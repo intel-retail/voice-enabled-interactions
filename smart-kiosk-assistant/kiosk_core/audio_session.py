@@ -23,7 +23,11 @@ from kiosk_core.tts_client import TtsClient
 
 logger = logging.getLogger(__name__)
 _SENTENCE_PATTERN = re.compile(r"^(.+?[.!?](?:[\"')\]]+)?)(?:\s+|$)", re.DOTALL)
-
+# Whisper hallucination tokens to strip from transcripts
+_WHISPER_JUNK = re.compile(
+    r"\[(?:BLANK_AUDIO|Music|Noise|Applause|Laughter|Silence|Background Music|noise|music)\]",
+    re.IGNORECASE,
+)
 
 class BaseAudioSession:
     def __init__(
@@ -289,6 +293,9 @@ class BaseAudioSession:
                 language=self.request.language,
                 temperature=self.request.temperature,
             )
+            if text:
+                # Strip Whisper hallucination tokens (e.g. [BLANK_AUDIO], [Music])
+                text = _WHISPER_JUNK.sub("", text).strip()
             if text:
                 with self._lock:
                     self.transcript_parts.append(text)

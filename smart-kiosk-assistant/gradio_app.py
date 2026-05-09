@@ -4,7 +4,6 @@ import io
 import os
 import time
 import wave
-from pathlib import Path
 from typing import Any, Generator
 
 import gradio as gr
@@ -13,435 +12,485 @@ import numpy as np
 
 from kiosk_core import config as kiosk_config
 
+# ── Config ────────────────────────────────────────────────────────────────────
+KIOSK_CORE_URL          = os.getenv("KIOSK_CORE_UI_BASE_URL",           "http://127.0.0.1:8012")
+RAG_URL                 = os.getenv("KIOSK_CORE_UI_RAG_URL",            "http://127.0.0.1:8020/api/v1/query")
+TTS_URL                 = os.getenv("KIOSK_CORE_UI_TTS_URL",            "http://127.0.0.1:8011/v1/audio/speech")
+ANALYZER_URL            = os.getenv("KIOSK_CORE_UI_ANALYZER_URL",       "http://127.0.0.1:8010/v1/audio/transcriptions")
+REQUEST_TIMEOUT_SECONDS = float(os.getenv("KIOSK_CORE_UI_TIMEOUT_SECONDS",       "120.0"))
+POLL_INTERVAL_SECONDS   = float(os.getenv("KIOSK_CORE_UI_POLL_INTERVAL_SECONDS", "0.35"))
+_CHUNK_SECONDS          = kiosk_config.DEFAULT_CHUNK_SECONDS
 
-KIOSK_CORE_URL = os.getenv("KIOSK_CORE_UI_BASE_URL", "http://127.0.0.1:8012")
-RAG_URL = os.getenv("KIOSK_CORE_UI_RAG_URL", "http://127.0.0.1:8020/api/v1/query")
-TTS_URL = os.getenv("KIOSK_CORE_UI_TTS_URL", "http://127.0.0.1:8011/v1/audio/speech")
-ANALYZER_URL = os.getenv("KIOSK_CORE_UI_ANALYZER_URL", "http://127.0.0.1:8010/v1/audio/transcriptions")
-REQUEST_TIMEOUT_SECONDS = float(os.getenv("KIOSK_CORE_UI_TIMEOUT_SECONDS", "120.0"))
-POLL_INTERVAL_SECONDS = float(os.getenv("KIOSK_CORE_UI_POLL_INTERVAL_SECONDS", "0.35"))
-
-
+# ── CSS (only targets our own divs + minimal Gradio overrides) ────────────────
 STYLE = """
-.gradio-container {
-  background:
-    radial-gradient(circle at top, #18344a 0%, #0d1822 42%, #071018 100%);
-  color: #e8f0f7;
-  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+/*
+ * Intel Light Theme
+ *   bg-base  #FFFFFF   page — clean white
+ *   bg-1     #F4F7FB   chat pane — very light blue-grey
+ *   bg-2     #EBF2FA   assistant bubble — soft Intel blue tint
+ *   border   #C8D8EA   Intel blue-grey border
+ *   user-bub #0068B5   Intel Blue
+ *   text-hi  #1A1A1A   near-black body text
+ *   text-md  #4A6070   Intel blue-grey secondary
+ *   text-lo  #8FA0AE   muted
+ *   accent   #0068B5   Intel Blue
+ */
+
+/* Page */
+.gradio-container { background: #FFFFFF !important; }
+footer { display: none !important; }
+
+/* Layout */
+.kiosk-row   { width: 100% !important; align-items: flex-start !important; gap: 16px !important; }
+.kiosk-left  { min-width: 0 !important; }
+.kiosk-right { width: 320px !important; min-width: 260px !important; max-width: 340px !important; flex-shrink: 0 !important; }
+
+/* Chat pane */
+.chat-pane {
+    height: 420px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px 10px;
+    background: #F4F7FB;
+    border-radius: 12px;
+    border: 1px solid #C8D8EA;
+    scroll-behavior: smooth;
+}
+.chat-pane::-webkit-scrollbar { width: 4px; }
+.chat-pane::-webkit-scrollbar-thumb { background: #C8D8EA; border-radius: 4px; }
+.chat-empty { margin: auto; color: #8FA0AE; font-size: 0.85rem; font-style: italic; }
+
+/* Bubbles */
+.msg-row { display: flex; align-items: flex-end; gap: 8px; }
+.msg-row.user { flex-direction: row-reverse; }
+
+.bubble {
+    max-width: 75%;
+    padding: 10px 15px;
+    border-radius: 18px;
+    font-size: 0.93rem;
+    line-height: 1.6;
+    word-break: break-word;
+    font-family: Inter, "Segoe UI", system-ui, sans-serif;
+}
+.msg-row.user .bubble {
+    background: #0068B5;
+    color: #FFFFFF;
+    border-bottom-right-radius: 4px;
+}
+.msg-row.asst .bubble {
+    background: #EBF2FA;
+    color: #1A1A1A;
+    border: 1px solid #C8D8EA;
+    border-bottom-left-radius: 4px;
+}
+.bubble.partial { opacity: 0.65; }
+.cursor {
+    display: inline-block;
+    color: #0068B5;
+    animation: blink 0.9s step-end infinite;
+}
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+
+/* Status */
+.status-line {
+    text-align: center;
+    color: #4A6070;
+    font-size: 0.78rem;
+    font-family: Inter, "Segoe UI", system-ui, sans-serif;
+    min-height: 20px;
 }
 
-.kiosk-shell {
-  max-width: 960px;
-  margin: 0 auto;
+/* Headings */
+.gradio-container h1, .gradio-container h2, .gradio-container h3,
+.gradio-container .prose h1, .gradio-container .prose h2 {
+    color: #1A1A1A !important;
 }
 
-.kiosk-hero {
-  padding: 24px 28px 12px 28px;
-  border: 1px solid rgba(163, 191, 214, 0.18);
-  border-radius: 28px;
-  background: linear-gradient(180deg, rgba(17, 34, 49, 0.88), rgba(8, 17, 25, 0.92));
-  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.28);
+/* Hide Gradio labels on the mic audio widget */
+#kiosk-mic > .block > label { display: none !important; }
+
+/* Gradio component shells — white with Intel blue-grey border */
+.gradio-container .block,
+.gradio-container .wrap,
+.gradio-container .form,
+.gradio-container fieldset,
+.gradio-container .panel {
+    background: #FFFFFF !important;
+    border-color: #C8D8EA !important;
+}
+.gradio-container .waveform-container,
+.gradio-container .recording-container,
+.gradio-container .controls {
+    background: #F4F7FB !important;
+    color: #1A1A1A !important;
+}
+.gradio-container .waveform-container button,
+.gradio-container .controls button,
+.gradio-container .recording-container button {
+    background: #EBF2FA !important;
+    color: #0068B5 !important;
+    border-color: #C8D8EA !important;
+}
+.gradio-container details,
+.gradio-container details > summary {
+    background: #FFFFFF !important;
+    border-color: #C8D8EA !important;
+    color: #1A1A1A !important;
+}
+.gradio-container details[open] > div {
+    background: #F4F7FB !important;
+    border-color: #C8D8EA !important;
+}
+.gradio-container label span,
+.gradio-container .label-wrap span {
+    color: #4A6070 !important;
 }
 
-.kiosk-title h1 {
-  margin: 0;
-  font-size: 2.2rem;
-  letter-spacing: -0.03em;
+/* ── KPI panel ── */
+.kpi-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 4px 0;
 }
-
-.kiosk-title p {
-  margin: 10px 0 0 0;
-  color: #a9bfd0;
-  font-size: 1rem;
+.kpi-card {
+    background: #FFFFFF;
+    border: 1px solid #C8D8EA;
+    border-left: 3px solid #0068B5;
+    border-radius: 10px;
+    padding: 12px 14px;
+    font-family: Inter, "Segoe UI", system-ui, sans-serif;
 }
-
-.assistant-orb-wrap {
-  display: flex;
-  justify-content: center;
-  padding: 22px 0 10px 0;
+.kpi-card-title {
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #0068B5;
+    margin-bottom: 8px;
 }
-
-.assistant-orb {
-  width: 168px;
-  height: 168px;
-  border-radius: 999px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: radial-gradient(circle at 30% 30%, #67d7ff 0%, #2d8bb0 38%, #0f2f42 72%, #09131c 100%);
-  box-shadow:
-    0 0 0 10px rgba(95, 187, 222, 0.08),
-    0 0 0 24px rgba(95, 187, 222, 0.04),
-    0 18px 60px rgba(26, 159, 204, 0.35);
+.kpi-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 3px 0;
+    border-bottom: 1px solid #EBF2FA;
 }
-
-.assistant-mic {
-  position: relative;
-  width: 42px;
-  height: 70px;
-  border: 4px solid #e9f8ff;
-  border-radius: 26px;
+.kpi-row:last-child { border-bottom: none; }
+.kpi-key {
+    font-size: 0.75rem;
+    color: #4A6070;
+    white-space: nowrap;
+    margin-right: 8px;
 }
-
-.assistant-mic::before {
-  content: "";
-  position: absolute;
-  left: 50%;
-  bottom: -22px;
-  width: 4px;
-  height: 20px;
-  transform: translateX(-50%);
-  background: #e9f8ff;
+.kpi-val {
+    font-size: 0.78rem;
+    color: #1A1A1A;
+    font-weight: 500;
+    text-align: right;
+    word-break: break-all;
 }
-
-.assistant-mic::after {
-  content: "";
-  position: absolute;
-  left: 50%;
-  bottom: -34px;
-  width: 42px;
-  height: 18px;
-  transform: translateX(-50%);
-  border: 4px solid #e9f8ff;
-  border-top: none;
-  border-radius: 0 0 28px 28px;
+.kpi-badge {
+    display: inline-block;
+    font-size: 0.65rem;
+    font-weight: 700;
+    padding: 1px 7px;
+    border-radius: 999px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
 }
-
-#kiosk-mic-input {
-  border: 1px solid rgba(163, 191, 214, 0.18);
-  border-radius: 24px;
-  background: rgba(7, 16, 24, 0.55);
-  padding: 14px;
-}
-
-#kiosk-mic-input button {
-  min-height: 54px;
-  border-radius: 999px;
-}
-
-.kiosk-panel {
-  border: 1px solid rgba(163, 191, 214, 0.16);
-  border-radius: 22px;
-  background: rgba(8, 16, 24, 0.72);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
-}
-
-.kiosk-status {
-  padding: 12px 16px;
-  border-radius: 16px;
-  background: rgba(17, 36, 50, 0.9);
-  color: #d8e9f5;
-  border: 1px solid rgba(104, 188, 224, 0.18);
-}
-
-.kiosk-copy textarea,
-.kiosk-copy .cm-content,
-.kiosk-copy input {
-  font-size: 1.03rem;
-}
-
-.kiosk-copy label {
-  color: #dcecf6;
-}
+.badge-green  { background: #D4F5E5; color: #0A6640; }
+.badge-blue   { background: #D0E8F8; color: #004E8C; }
+.badge-purple { background: #E8D8F8; color: #5E2D9E; }
 """
 
+# ── Chat HTML helpers ─────────────────────────────────────────────────────────
+def _esc(t: str) -> str:
+    return t.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace("\n","<br>")
 
-def _numpy_to_wav_bytes(audio: np.ndarray, sample_rate: int) -> bytes:
-    """Convert a 1-D int16 numpy array to raw WAV bytes."""
+def _render_chat(history: list[dict], partial_user: str = "", partial_asst: str = "") -> str:
+    rows: list[str] = []
+    for msg in history:
+        cls = "user" if msg["role"] == "user" else "asst"
+        rows.append(f'<div class="msg-row {cls}"><div class="bubble">{_esc(msg["text"])}</div></div>')
+    if partial_user:
+        rows.append(f'<div class="msg-row user"><div class="bubble partial">{_esc(partial_user)}</div></div>')
+    if partial_asst:
+        rows.append(
+            f'<div class="msg-row asst"><div class="bubble partial">'
+            f'{_esc(partial_asst)}<span class="cursor">▌</span></div></div>'
+        )
+    inner = "\n".join(rows) if rows else '<div class="chat-empty">Tap 🎤 and ask a question</div>'
+    scroll_js = "<script>setTimeout(()=>{var p=document.querySelector('.chat-pane');if(p)p.scrollTop=p.scrollHeight;},40);</script>"
+    return f'<div class="chat-pane">{inner}</div>{scroll_js}'
+
+# ── API helpers ───────────────────────────────────────────────────────────────
+def _numpy_to_wav(audio: np.ndarray, sr: int) -> bytes:
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sample_rate)
+        wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(sr)
         wf.writeframes(audio.astype(np.int16).tobytes())
     return buf.getvalue()
 
+def _open_session(sr: int) -> dict[str, Any]:
+    with httpx.Client(timeout=REQUEST_TIMEOUT_SECONDS, trust_env=False) as c:
+        r = c.post(f"{KIOSK_CORE_URL}/api/v1/sessions/start-stream", json={
+            "sample_rate": sr,
+            "chunk_seconds": kiosk_config.DEFAULT_CHUNK_SECONDS,  # 5.0s
+            "silence_timeout_seconds": 2.0,
+            "max_session_seconds": 60.0,
+            "silence_threshold": 900,
+            "language": "en", "temperature": 0.0,
+            "analyzer_url": ANALYZER_URL, "rag_url": RAG_URL, "tts_url": TTS_URL,
+            "tts_model": "qwen-tts", "tts_language": "English",
+        })
+    r.raise_for_status(); return r.json()
 
-def _open_stream_session(sample_rate: int) -> dict[str, Any]:
-    """Open a browser stream session on kiosk-core."""
-    with httpx.Client(timeout=REQUEST_TIMEOUT_SECONDS, trust_env=False) as client:
-        response = client.post(
-            f"{KIOSK_CORE_URL}/api/v1/sessions/start-stream",
-            json={
-                "sample_rate": sample_rate,
-                "chunk_seconds": kiosk_config.DEFAULT_CHUNK_SECONDS,
-                "silence_timeout_seconds": 1.5,
-                "max_session_seconds": 60.0,
-                "silence_threshold": 900,
-                "language": "en",
-                "temperature": 0.0,
-                "analyzer_url": ANALYZER_URL,
-                "rag_url": RAG_URL,
-                "tts_url": TTS_URL,
-                "tts_model": "qwen-tts",
-                "tts_language": "English",
-            },
-        )
-    response.raise_for_status()
-    return response.json()
+def _push(sid: str, wav: bytes) -> None:
+    with httpx.Client(timeout=REQUEST_TIMEOUT_SECONDS, trust_env=False) as c:
+        c.post(f"{KIOSK_CORE_URL}/api/v1/sessions/{sid}/audio",
+               content=wav, headers={"Content-Type": "audio/wav"}).raise_for_status()
 
+def _eos(sid: str) -> None:
+    with httpx.Client(timeout=REQUEST_TIMEOUT_SECONDS, trust_env=False) as c:
+        c.post(f"{KIOSK_CORE_URL}/api/v1/sessions/{sid}/audio/end").raise_for_status()
 
-def _push_chunk(session_id: str, wav_bytes: bytes) -> None:
-    with httpx.Client(timeout=REQUEST_TIMEOUT_SECONDS, trust_env=False) as client:
-        client.post(
-            f"{KIOSK_CORE_URL}/api/v1/sessions/{session_id}/audio",
-            content=wav_bytes,
-            headers={"Content-Type": "audio/wav"},
-        ).raise_for_status()
+def _poll(sid: str) -> dict[str, Any]:
+    with httpx.Client(timeout=REQUEST_TIMEOUT_SECONDS, trust_env=False) as c:
+        r = c.get(f"{KIOSK_CORE_URL}/api/v1/sessions/{sid}")
+    r.raise_for_status(); return r.json()
 
+def _latest_audio(session: dict, prev: int) -> tuple:
+    segs = session.get("tts_audio_segments") or []
+    if len(segs) > prev:
+        return gr.update(value=segs[-1]["audio_file"], autoplay=True), len(segs)
+    return gr.skip(), prev
 
-def _end_stream(session_id: str) -> None:
-    with httpx.Client(timeout=REQUEST_TIMEOUT_SECONDS, trust_env=False) as client:
-        client.post(f"{KIOSK_CORE_URL}/api/v1/sessions/{session_id}/audio/end").raise_for_status()
+# ── State ─────────────────────────────────────────────────────────────────────
+_INIT: dict = {"session_id": None, "buffer": [], "sample_rate": 16000, "history": []}
 
+# ── Handlers ──────────────────────────────────────────────────────────────────
+def on_start(state: dict):
+    s = dict(state); s["session_id"] = None; s["buffer"] = []
+    return s, _render_chat(s["history"], partial_user="🎤  Listening…"), gr.skip(), "🎙  Listening — speak now"
 
-def _poll_session(session_id: str) -> dict[str, Any]:
-    with httpx.Client(timeout=REQUEST_TIMEOUT_SECONDS, trust_env=False) as client:
-        response = client.get(f"{KIOSK_CORE_URL}/api/v1/sessions/{session_id}")
-    response.raise_for_status()
-    return response.json()
-
-
-def _build_status(session: dict[str, Any] | None, phase: str) -> str:
-    if phase == "idle":
-        return "Ready. Tap the microphone, speak your question, then stop recording."
-    if phase == "listening":
-        return "Listening... finish speaking to submit your question."
-    if session is None:
-        return "Starting session..."
-
-    tts_segments = len(session.get("tts_audio_segments", []))
-    status = str(session.get("status", "unknown"))
-    if status in {"running", "stopping"}:
-        if tts_segments:
-            return f"Speaking response... {tts_segments} sentence audio clip(s) ready."
-        if session.get("response"):
-            return "Generating response..."
-        if session.get("transcript"):
-            return "Transcription ready. Querying knowledge base..."
-        return "Processing audio..."
-    if status == "completed":
-        return f"Done. {tts_segments} sentence audio clip(s) generated."
-    error = session.get("error") or "Unknown failure"
-    return f"Session failed: {error}"
-
-
-def _latest_audio_update(session: dict[str, Any], previous_count: int) -> tuple[dict[str, Any], int]:
-    tts_segments = session.get("tts_audio_segments", []) or []
-    if len(tts_segments) > previous_count:
-        return gr.update(value=tts_segments[-1]["audio_file"], autoplay=True), len(tts_segments)
-    return gr.skip(), previous_count
-
-
-# ── Streaming event handlers ──────────────────────────────────────────────────
-
-# gr.State schema: {"session_id": str|None, "buffer": list[np.ndarray], "sample_rate": int}
-_CHUNK_SECONDS = kiosk_config.DEFAULT_CHUNK_SECONDS  # pushed to kiosk-core and used as stream_every
-
-
-def on_start_recording() -> tuple[dict, str, str, dict, str]:
-    """Called when the user starts recording. Resets UI and stream state."""
-    return (
-        {"session_id": None, "buffer": [], "sample_rate": 16000},
-        "",
-        "",
-        gr.update(value=None, autoplay=False),
-        _build_status(None, "listening"),
-    )
-
-
-def on_stream_chunk(
-    stream_state: dict,
-    audio_chunk,   # (sample_rate: int, data: np.ndarray) from Gradio streaming
-) -> tuple[dict, str, str, dict, str]:
-    """Called every ~CHUNK_SECONDS while the mic is open.
-    Accumulates audio and pushes to kiosk-core once we have a full chunk.
-    """
-    if audio_chunk is None:
-        return stream_state, "", "", gr.skip(), _build_status(None, "listening")
-
-    sample_rate, data = audio_chunk
+def on_chunk(state: dict, chunk):
+    if chunk is None:
+        return state, gr.skip(), gr.skip(), gr.skip()
+    sr, data = chunk
     if data is None or len(data) == 0:
-        return stream_state, "", "", gr.skip(), _build_status(None, "listening")
-
-    # Flatten to mono int16
-    if data.ndim > 1:
-        data = data[:, 0]
+        return state, gr.skip(), gr.skip(), gr.skip()
+    if data.ndim > 1: data = data[:, 0]
     data = data.astype(np.int16)
 
-    state = dict(stream_state)
-    state["sample_rate"] = sample_rate
-    state["buffer"] = list(state.get("buffer", [])) + [data]
+    s = dict(state); s["sample_rate"] = sr
+    s["buffer"] = list(s.get("buffer", [])) + [data]
 
-    # Open session on first chunk
-    if state["session_id"] is None:
+    if s["session_id"] is None:
         try:
-            started = _open_stream_session(sample_rate)
-            state["session_id"] = started["session_id"]
-        except Exception as exc:  # noqa: BLE001
-            return state, "", "", gr.skip(), f"Failed to open session: {exc}"
+            s["session_id"] = _open_session(sr)["session_id"]
+        except Exception as e:
+            return s, gr.skip(), gr.skip(), f"❌ {e}"
 
-    # Check if buffer has accumulated enough for a push
-    buffer_samples = sum(len(b) for b in state["buffer"])
-    if buffer_samples >= int(sample_rate * _CHUNK_SECONDS):
-        audio = np.concatenate(state["buffer"], axis=0)
-        state["buffer"] = []
-        wav_bytes = _numpy_to_wav_bytes(audio, sample_rate)
-        try:
-            _push_chunk(state["session_id"], wav_bytes)
-        except Exception:  # noqa: BLE001
-            pass  # Drop the chunk — session will continue with next push
+    total = sum(len(b) for b in s["buffer"])
+    if total >= int(sr * _CHUNK_SECONDS):
+        audio = np.concatenate(s["buffer"])
+        s["buffer"] = []
+        try: _push(s["session_id"], _numpy_to_wav(audio, sr))
+        except Exception: pass
 
-    # Poll for live transcript updates
     transcript = ""
     try:
-        session = _poll_session(state["session_id"])
-        transcript = str(session.get("transcript", "")).strip()
-    except Exception:  # noqa: BLE001
-        pass
+        transcript = str(_poll(s["session_id"]).get("transcript", "")).strip()
+    except Exception: pass
 
-    return state, transcript, "", gr.skip(), _build_status(None, "listening")
+    partial = transcript or "🎤  Listening…"
+    return s, _render_chat(s["history"], partial_user=partial), gr.skip(), "🎙  Listening — speak now"
 
+def on_stop(state: dict) -> Generator:
+    s = dict(state)
+    sid = s.get("session_id"); sr = s.get("sample_rate", 16000)
+    history = list(s.get("history", []))
 
-def on_stop_recording(
-    stream_state: dict,
-) -> Generator[tuple[dict, str, str, dict, str], None, None]:
-    """Called when the user stops recording.
-    Flushes remaining buffer, signals EOS, then polls until the session finishes.
-    """
-    state = dict(stream_state)
-    session_id = state.get("session_id")
-    sample_rate = state.get("sample_rate", 16000)
-
-    if not session_id:
-        yield state, "", "", gr.update(value=None, autoplay=False), "No audio was captured. Try again."
+    if not sid:
+        yield s, _render_chat(history), gr.update(value=None), "No audio — try again"
         return
 
-    # Flush remaining buffer
-    remaining = state.get("buffer", [])
+    remaining = s.get("buffer", [])
     if remaining:
-        audio = np.concatenate(remaining, axis=0)
-        wav_bytes = _numpy_to_wav_bytes(audio, sample_rate)
-        try:
-            _push_chunk(session_id, wav_bytes)
-        except Exception:  # noqa: BLE001
-            pass
+        try: _push(sid, _numpy_to_wav(np.concatenate(remaining), sr))
+        except Exception: pass
 
-    # Signal end-of-stream
-    try:
-        _end_stream(session_id)
-    except Exception as exc:  # noqa: BLE001
-        yield state, "", "", gr.update(value=None, autoplay=False), f"Failed to finalise session: {exc}"
-        return
+    try: _eos(sid)
+    except Exception as e:
+        yield s, _render_chat(history), gr.update(value=None), f"❌ {e}"; return
 
-    yield state, "", "", gr.update(value=None, autoplay=False), "Processing speech..."
+    yield s, _render_chat(history, partial_user="⏳  Processing…"), gr.update(value=None), "⏳  Processing…"
 
-    # Poll until done
-    previous_audio_count = 0
+    prev_audio = 0
     while True:
-        try:
-            session = _poll_session(session_id)
-        except Exception as exc:  # noqa: BLE001
-            yield state, "", "", gr.update(value=None, autoplay=False), f"Polling error: {exc}"
-            return
+        try: session = _poll(sid)
+        except Exception as e:
+            yield s, _render_chat(history), gr.update(value=None), f"❌ {e}"; return
 
-        transcript = str(session.get("transcript", "")).strip()
-        response_text = str(session.get("response", "")).strip()
-        audio_update, previous_audio_count = _latest_audio_update(session, previous_audio_count)
-        running = str(session.get("status", "")) in {"running", "stopping"}
+        transcript    = str(session.get("transcript","")).strip()
+        response_text = str(session.get("response","")).strip()
+        audio_upd, prev_audio = _latest_audio(session, prev_audio)
+        running = session.get("status","") in {"running","stopping"}
 
-        yield state, transcript, response_text, audio_update, _build_status(session, "processing")
+        n = len(session.get("tts_audio_segments") or [])
+        if n:             st = f"🔊  Speaking… ({n} clip{'s' if n>1 else ''})"
+        elif response_text: st = "💬  Generating response…"
+        elif transcript:    st = "📝  Querying knowledge base…"
+        else:               st = "⏳  Processing speech…"
+
+        yield s, _render_chat(history, partial_user=transcript, partial_asst=response_text), audio_upd, st
 
         if not running:
+            if transcript:    history.append({"role":"user",      "text": transcript})
+            if response_text: history.append({"role":"assistant", "text": response_text})
+            s["history"] = history; s["session_id"] = None; s["buffer"] = []
+            yield s, _render_chat(history), gr.skip(), "✓  Done — tap 🎤 for another question"
             break
         time.sleep(POLL_INTERVAL_SECONDS)
 
+# ── KPI panel HTML (static placeholders — swap values when wiring live data) ──
+_KPI_HTML = """
+<div class="kpi-panel">
+
+  <div class="kpi-card">
+    <div class="kpi-card-title">🎤 ASR — Speech Recognition</div>
+    <div class="kpi-row">
+      <span class="kpi-key">Model</span>
+      <span class="kpi-val">whisper-base</span>
+    </div>
+    <div class="kpi-row">
+      <span class="kpi-key">Backend</span>
+      <span class="kpi-val">OpenVINO</span>
+    </div>
+    <div class="kpi-row">
+      <span class="kpi-key">Precision</span>
+      <span class="kpi-val"><span class="kpi-badge badge-green">INT8</span></span>
+    </div>
+    <div class="kpi-row">
+      <span class="kpi-key">Device</span>
+      <span class="kpi-val">CPU</span>
+    </div>
+    <div class="kpi-row">
+      <span class="kpi-key">Language</span>
+      <span class="kpi-val">English</span>
+    </div>
+    <div class="kpi-row">
+      <span class="kpi-key">Latency (est.)</span>
+      <span class="kpi-val">— ms</span>
+    </div>
+  </div>
+
+  <div class="kpi-card">
+    <div class="kpi-card-title">🔍 RAG — Retrieval</div>
+    <div class="kpi-row">
+      <span class="kpi-key">Embeddings</span>
+      <span class="kpi-val">all-MiniLM-L6-v2</span>
+    </div>
+    <div class="kpi-row">
+      <span class="kpi-key">Vector DB</span>
+      <span class="kpi-val">ChromaDB</span>
+    </div>
+    <div class="kpi-row">
+      <span class="kpi-key">LLM</span>
+      <span class="kpi-val">— (placeholder)</span>
+    </div>
+    <div class="kpi-row">
+      <span class="kpi-key">Top-K</span>
+      <span class="kpi-val">—</span>
+    </div>
+    <div class="kpi-row">
+      <span class="kpi-key">Latency (est.)</span>
+      <span class="kpi-val">— ms</span>
+    </div>
+  </div>
+
+  <div class="kpi-card">
+    <div class="kpi-card-title">🔊 TTS — Speech Synthesis</div>
+    <div class="kpi-row">
+      <span class="kpi-key">Model</span>
+      <span class="kpi-val">Qwen-TTS</span>
+    </div>
+    <div class="kpi-row">
+      <span class="kpi-key">Backend</span>
+      <span class="kpi-val">OpenVINO</span>
+    </div>
+    <div class="kpi-row">
+      <span class="kpi-key">Precision</span>
+      <span class="kpi-val"><span class="kpi-badge badge-blue">FP16</span></span>
+    </div>
+    <div class="kpi-row">
+      <span class="kpi-key">Device</span>
+      <span class="kpi-val">CPU</span>
+    </div>
+    <div class="kpi-row">
+      <span class="kpi-key">Language</span>
+      <span class="kpi-val">English</span>
+    </div>
+    <div class="kpi-row">
+      <span class="kpi-key">Latency (est.)</span>
+      <span class="kpi-val">— ms</span>
+    </div>
+  </div>
+
+</div>
+"""
+
+# ── App ───────────────────────────────────────────────────────────────────────
 def create_app() -> gr.Blocks:
-    with gr.Blocks(title="Kiosk Core UI") as app:
-        # Per-session streaming state: session_id, audio buffer, sample_rate
-        stream_state = gr.State({"session_id": None, "buffer": [], "sample_rate": 16000})
+    with gr.Blocks(title="Kiosk Voice Assistant") as app:
+        state = gr.State(dict(_INIT))
 
-        with gr.Column(elem_classes=["kiosk-shell"]):
-            with gr.Column(elem_classes=["kiosk-hero"]):
-                gr.HTML(
-                    """
-                    <div class="kiosk-title">
-                      <h1>Kiosk Voice Assistant</h1>
-                      <p>Speak a question — transcription and answer appear as you speak.</p>
-                    </div>
-                    <div class="assistant-orb-wrap">
-                      <div class="assistant-orb">
-                        <div class="assistant-mic"></div>
-                      </div>
-                    </div>
-                    """
-                )
+        gr.Markdown("## 🎙 Kiosk Voice Assistant")
 
-                mic_input = gr.Audio(
+        with gr.Row(elem_classes=["kiosk-row"]):
+
+            # ── Left: chat + mic ──────────────────────────────────────────────
+            with gr.Column(elem_classes=["kiosk-left"]):
+                chat   = gr.HTML(value=_render_chat([]))
+                status = gr.HTML(value='<div class="status-line">Tap the mic and ask a question</div>')
+                mic    = gr.Audio(
                     sources=["microphone"],
                     type="numpy",
                     streaming=True,
-                    label="Tap the microphone and speak. Stop recording when done.",
-                    elem_id="kiosk-mic-input",
-                    waveform_options=gr.WaveformOptions(show_recording_waveform=True),
+                    label="Microphone",
+                    elem_id="kiosk-mic",
                 )
-                status_box = gr.Markdown(
-                    value=_build_status(None, "idle"),
-                    elem_classes=["kiosk-status"],
-                )
+                tts = gr.Audio(label="Assistant", interactive=False, autoplay=True)
 
-            with gr.Row():
-                transcript_box = gr.Textbox(
-                    label="User transcription",
-                    lines=5,
-                    interactive=False,
-                    elem_classes=["kiosk-panel", "kiosk-copy"],
-                )
-                response_box = gr.Textbox(
-                    label="RAG response",
-                    lines=8,
-                    interactive=False,
-                    elem_classes=["kiosk-panel", "kiosk-copy"],
-                )
+            # ── Right: collapsible model KPI panel ────────────────────────────
+            with gr.Column(elem_classes=["kiosk-right"]):
+                with gr.Accordion(label="📊 Model KPIs", open=False):
+                    gr.HTML(value=_KPI_HTML)
 
-            tts_audio = gr.Audio(
-                label="Assistant speech",
-                interactive=False,
-                autoplay=True,
-                elem_classes=["kiosk-panel"],
-                buttons=[],
-            )
+        outs = [state, chat, tts, status]
 
-            _outputs = [stream_state, transcript_box, response_box, tts_audio, status_box]
-
-            mic_input.start_recording(
-                fn=on_start_recording,
-                inputs=None,
-                outputs=_outputs,
-            )
-            mic_input.stream(
-                fn=on_stream_chunk,
-                inputs=[stream_state, mic_input],
-                outputs=_outputs,
-                stream_every=_CHUNK_SECONDS,
-            )
-            mic_input.stop_recording(
-                fn=on_stop_recording,
-                inputs=[stream_state],
-                outputs=_outputs,
-            )
+        mic.start_recording(fn=on_start, inputs=[state],         outputs=outs)
+        mic.stream(         fn=on_chunk, inputs=[state, mic],    outputs=outs, stream_every=0.5)
+        mic.stop_recording( fn=on_stop,  inputs=[state],         outputs=outs)
 
     return app
 
-
-def launch_app() -> tuple[Any, str, str]:
+def launch_app() -> Any:
+    # Allow Gradio to serve TTS audio files generated by kiosk-core
+    _generated_audio = os.path.join(
+        os.path.dirname(__file__), "generated_audio"
+    )
+    os.makedirs(_generated_audio, exist_ok=True)
     return create_app().launch(
         server_name="0.0.0.0",
         server_port=7860,
-        theme=gr.themes.Soft(),
         css=STYLE,
+        allowed_paths=[_generated_audio],
     )
-
 
 if __name__ == "__main__":
     launch_app()
