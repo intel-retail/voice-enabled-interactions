@@ -245,7 +245,7 @@ def _open_session(sr: int) -> dict[str, Any]:
             "silence_threshold": 900,
             "language": "en", "temperature": 0.0,
             "analyzer_url": ANALYZER_URL, "rag_url": RAG_URL, "tts_url": TTS_URL,
-            "tts_model": "qwen-tts", "tts_language": "English",
+            "tts_model": "speecht5", "tts_language": "English",
         })
     r.raise_for_status(); return r.json()
 
@@ -417,7 +417,7 @@ _KPI_HTML = """
     <div class="kpi-card-title">🔊 TTS — Speech Synthesis</div>
     <div class="kpi-row">
       <span class="kpi-key">Model</span>
-      <span class="kpi-val">Qwen-TTS</span>
+      <span class="kpi-val">SpeechT5</span>
     </div>
     <div class="kpi-row">
       <span class="kpi-key">Backend</span>

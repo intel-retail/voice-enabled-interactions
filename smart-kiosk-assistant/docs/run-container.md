@@ -14,7 +14,7 @@ The three downstream services must be running on the host before starting this s
 |---|---|---|
 | audio-analyzer | `8010` | `cd audio_analyzer && docker compose up -d` |
 | text-to-speech | `8011` | `cd text-to-speech && docker compose up -d` |
-| RAG service | `8020` | `cd rag_service && python main.py` |
+| RAG service | `8020` | `cd rag-service && docker compose up -d` |
 
 The Compose file uses `host.docker.internal` (mapped to the host gateway) so containers can reach host-side services by port.
 

@@ -14,7 +14,7 @@ The three downstream services must be running before starting kiosk-core:
 # From the repo root
 cd audio_analyzer && docker compose up -d && cd ..
 cd text-to-speech && docker compose up -d && cd ..
-cd rag_service    && python main.py &
+cd rag-service    && python main.py &
 ```
 
 | Service | Default URL | Port |
