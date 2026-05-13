@@ -1,0 +1,27 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+.venv-*/
+
+# Large model & vectorstore artifacts (mounted as volumes at runtime)
+models/
+storage/
+.cache/
+
+# Debug outputs
+chunks/
+*.log
+
+# Dev / eval scripts — not needed in the production image
+scripts/
+tests/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp

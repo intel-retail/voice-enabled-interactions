@@ -1,0 +1,36 @@
+from __future__ import annotations
+
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+
+class ContextRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=5_000_000)  # 5 MB hard cap
+    source: str = Field("api", max_length=256)
+    metadata: dict[str, Any] | None = None
+
+
+class QueryRequest(BaseModel):
+    transcription: str = Field(..., min_length=1, max_length=10_000)
+    context_text: str | None = Field(default=None, max_length=10_000)
+    top_k: int | None = Field(default=None, ge=1, le=20)
+    include_sources: bool = False
+
+
+class IngestResponse(BaseModel):
+    chunks_added: int
+    source: str
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str | list[dict[str, Any]]
+
+
+class ChatCompletionRequest(BaseModel):
+    model: str = Field(default="smart-kiosk-rag")
+    messages: list[ChatMessage] = Field(default_factory=list, min_length=1)
+    stream: bool = False
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    max_tokens: int | None = Field(default=None, ge=1, le=4096)
