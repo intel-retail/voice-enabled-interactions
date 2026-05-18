@@ -26,6 +26,7 @@ git submodule update --init --recursive
 Mic audio is captured by the **browser** (Web Audio API) and uploaded to kiosk-core as a file. No host mic passthrough required.
 
 ```bash
+git submodule update --init --recursive
 docker compose up -d --build
 # → kiosk-core API   http://127.0.0.1:8012
 # → Gradio UI        http://127.0.0.1:7860  ← open in browser, speak
@@ -67,10 +68,13 @@ kiosk-core calls these downstream services:
 | RAG service | `http://127.0.0.1:8020/api/v1/query` | Knowledge-base Q&A |
 | text-to-speech | `http://127.0.0.1:8011/v1/audio/speech` | Speech synthesis |
 
-With the submodule checked out, start the two edge services from:
+In container mode, `docker compose up` from `smart-kiosk-assistant/` now starts all five services together:
 
-- `../edge-ai-libraries/microservices/audio-analyzer/`
-- `../edge-ai-libraries/microservices/text-to-speech/`
+- `audio-analyzer`
+- `text-to-speech`
+- `rag-service`
+- `kiosk-core`
+- `kiosk-ui`
 
 All URLs are overridable via environment variables. See [docs/configuration.md](docs/configuration.md).
 

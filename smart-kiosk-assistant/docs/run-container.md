@@ -1,6 +1,6 @@
 # Run With Docker Compose (Gradio UI Mode)
 
-`docker compose up` starts **kiosk-core** (REST API) and **kiosk-ui** (Gradio browser interface) as containers.
+`docker compose up` starts **audio-analyzer**, **text-to-speech**, **rag-service**, **kiosk-core** (REST API), and **kiosk-ui** (Gradio browser interface) as containers.
 
 Mic audio is captured by the **browser** via the Web Audio API and uploaded to kiosk-core as a WAV file. No host mic hardware is passed into the containers.
 
@@ -17,15 +17,11 @@ If the repo is already cloned, run `git submodule update --init --recursive` fro
 
 ## Before You Start
 
-The three downstream services must be running on the host before starting this stack:
+Initialize the submodule once so the edge service sources exist locally:
 
-| Service | Default port | Start command |
-|---|---|---|
-| audio-analyzer | `8010` | `cd ../edge-ai-libraries/microservices/audio-analyzer && docker compose up -d` |
-| text-to-speech | `8011` | `cd ../edge-ai-libraries/microservices/text-to-speech && docker compose up -d` |
-| RAG service | `8020` | `cd rag-service && docker compose up -d` |
-
-The Compose file uses `host.docker.internal` (mapped to the host gateway) so containers can reach host-side services by port.
+```bash
+git submodule update --init --recursive
+```
 
 ## Start
 
@@ -35,10 +31,13 @@ From the `smart-kiosk-assistant/` directory:
 docker compose up -d --build
 ```
 
-This starts two containers:
+This starts five containers:
 
 | Container | Port | Purpose |
 |---|---|---|
+| `audio-analyzer` | `8010` | Speech-to-text |
+| `text-to-speech` | `8011` | Speech synthesis |
+| `rag-service` | `8020` | Knowledge-base retrieval |
 | `kiosk-core` | `8012` | FastAPI session API |
 | `kiosk-ui` | `7860` | Gradio voice UI |
 
@@ -79,7 +78,7 @@ docker compose down
 
 ## Override Downstream URLs
 
-Edit the `environment:` block in `docker-compose.yml`, or pass variables on the command line:
+By default the internal service URLs are already wired through the Compose network. Only override them if you want kiosk-core or kiosk-ui to talk to services outside this stack:
 
 ```bash
 KIOSK_CORE_ANALYZER_URL=http://192.168.1.10:8010/v1/audio/transcriptions \

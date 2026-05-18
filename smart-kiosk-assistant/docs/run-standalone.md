@@ -26,6 +26,8 @@ cd ../edge-ai-libraries/microservices/text-to-speech && docker compose up -d && 
 cd rag-service    && python main.py &
 ```
 
+If you want one command to start everything, use the container flow in [run-container.md](run-container.md) instead.
+
 | Service | Default URL | Port |
 |---|---|---|
 | audio-analyzer | `http://127.0.0.1:8010/v1/audio/transcriptions` | 8010 |
