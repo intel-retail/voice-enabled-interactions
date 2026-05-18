@@ -20,6 +20,7 @@ from components.chunker_component import SemanticChunker
 from components.embedding_component import EmbeddingComponent
 from utils.config_loader import config
 from utils.ensure_model import ensure_llm_model, get_llm_model_path
+from utils.latency_store import llm_latency
 
 
 logger = logging.getLogger(__name__)
@@ -415,7 +416,7 @@ class RagPipeline:
 
     def _generate_text(self, prompt: str, max_tokens: int | None = None, temperature: float | None = None) -> str:
         gen_kwargs = self._generation_kwargs(max_tokens=max_tokens, temperature=temperature)
-
+        _t0 = time.monotonic()
         with self._llm_lock:
             try:
                 result = self._llm.generate(prompt, **gen_kwargs)
@@ -426,10 +427,12 @@ class RagPipeline:
                 self._reload_llm_locked()
                 result = self._llm.generate(prompt, **gen_kwargs)
             self._post_generation_locked()
+        llm_latency.record((time.monotonic() - _t0) * 1000)
         return str(result)
 
     def _stream_generate(self, prompt: str, max_tokens: int | None = None, temperature: float | None = None) -> Generator[str, None, None]:
         gen_kwargs = self._generation_kwargs(max_tokens=max_tokens, temperature=temperature)
+        _t0 = time.monotonic()
         with self._llm_lock:
             try:
                 streamer = self._llm.generate_stream(prompt, **gen_kwargs)
@@ -453,6 +456,7 @@ class RagPipeline:
                 if result:
                     yield result
             finally:
+                llm_latency.record((time.monotonic() - _t0) * 1000)
                 self._post_generation_locked()
 
     @staticmethod

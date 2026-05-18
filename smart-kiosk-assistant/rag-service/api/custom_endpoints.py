@@ -8,7 +8,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from dto.query_dto import ContextRequest, IngestResponse, QueryRequest
 from pipeline import get_shared_pipeline
-
+from utils.config_loader import config
+from utils.latency_store import llm_latency
 
 router = APIRouter()
 
@@ -18,6 +19,23 @@ _MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get("/api/v1/model-info")
+def model_info():
+    stats = get_shared_pipeline().get_stats()
+    return JSONResponse(content={
+        **stats,
+        "llm_device": str(getattr(config.models.llm, "device", "CPU")).upper(),
+        "llm_weight_format": getattr(config.models.llm, "weight_format", None),
+        "embedding_device": str(getattr(config.models.embedding, "device", "CPU")).upper(),
+        "top_k": int(getattr(config.retrieval, "top_k", 3)),
+    })
+
+
+@router.get("/api/v1/performance")
+def rag_performance():
+    return JSONResponse(content={"latency": llm_latency.stats()})
 
 
 @router.post("/api/v1/context", response_model=IngestResponse)
