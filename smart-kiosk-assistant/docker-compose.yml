@@ -67,12 +67,13 @@ services:
       - video
       - "992"
     environment:
+      MPLCONFIGDIR: /tmp/matplotlib
       SMART_KIOSK_RAG_CONFIG_OVERRIDE_PATHS: /app/rag-service/config.container.yaml
     volumes:
       - ./rag-service/config.container.yaml:/app/rag-service/config.container.yaml:ro
-      - ./rag-service/models:/app/rag-service/models
-      - ./rag-service/storage:/app/rag-service/storage
-      - ./rag-service/.cache/huggingface:/app/rag-service/.cache/huggingface
+      - rag_service_models:/app/rag-service/models
+      - rag_service_storage:/app/rag-service/storage
+      - rag_service_hf_cache:/app/rag-service/.cache/huggingface
     restart: unless-stopped
 
   kiosk-core:
@@ -123,3 +124,8 @@ services:
       kiosk-core:
         condition: service_healthy
     restart: unless-stopped
+
+volumes:
+  rag_service_models:
+  rag_service_storage:
+  rag_service_hf_cache:
