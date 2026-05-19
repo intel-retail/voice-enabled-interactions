@@ -22,7 +22,11 @@ RUN python3 -m pip install --upgrade pip \
 
 COPY . .
 
-RUN chown -R ragservice:ragservice /app/rag-service
+RUN mkdir -p /app/rag-service/models \
+    /app/rag-service/storage \
+    /app/rag-service/.cache/huggingface \
+    /app/rag-service/.cache/matplotlib \
+    && chown -R ragservice:ragservice /app/rag-service
 
 USER ragservice
 

@@ -1,0 +1,28 @@
+# Kiosk-pinned config for the text-to-speech service.
+#
+# This file is mounted into the text-to-speech container by
+# voice-enabled-interactions/smart-kiosk-assistant/docker-compose.yml,
+# overriding the service's built-in config so the kiosk always boots a
+# known-good version regardless of changes in edge-ai-libraries.
+app:
+  name: Text To Speech
+  clear_storage_on_startup: true
+
+models:
+  tts:
+    name: microsoft/speecht5_tts
+    runtime: openvino
+    device: CPU
+    dtype: int8
+    model_variant: custom_voice
+    default_speaker: Ryan
+    default_language: English
+    models_base_path: models
+    use_local_cache: true
+
+audio:
+  output_format: wav
+  sample_width: 16
+
+pipeline:
+  persist_outputs: true

@@ -20,6 +20,7 @@ from components.chunker_component import SemanticChunker
 from components.embedding_component import EmbeddingComponent
 from utils.config_loader import config
 from utils.ensure_model import ensure_llm_model, get_llm_model_path
+from utils.latency_store import llm_latency
 
 
 logger = logging.getLogger(__name__)
@@ -207,6 +208,16 @@ class RagPipeline:
             )
             self._reload_llm_locked()
 
+    def count_tokens(self, text: str) -> int:
+        """Return the number of LLM tokens in ``text`` (no special tokens)."""
+        if not text:
+            return 0
+        try:
+            return len(self._tokenizer.encode(text, add_special_tokens=False))
+        except Exception:
+            # Fallback heuristic: ~4 chars per token
+            return max(1, len(text) // 4)
+
     def ingest_text(self, text: str, source: str = "api", metadata: dict | None = None) -> int:
         logger.info("[INGEST] Starting | source=%s | input_chars=%d", source, len(text))
         t0 = time.monotonic()
@@ -380,14 +391,14 @@ class RagPipeline:
         retrieved_context = self._build_context_block(sources)
         extra_context = (context_text or "").strip()
         fallback_hint = (
-            "If the retrieved store context is insufficient, you may use general retail knowledge but state uncertainty clearly."
+            "If the retrieved kiosk context is insufficient, you may use limited general domain knowledge, but state uncertainty clearly and do not invent business-specific facts."
             if bool(getattr(config.answering, "fallback_to_general_knowledge", True))
-            else "If the context is insufficient, say you do not have enough store context."
+            else "If the context is insufficient, say you do not have enough knowledge-base context to answer confidently."
         )
 
         prompt = [prompt_system.strip(), "", f"Customer question:\n{question.strip()}"]
         if retrieved_context:
-            prompt.extend(["", f"Retrieved store context:\n{retrieved_context}"])
+            prompt.extend(["", f"Retrieved knowledge-base context:\n{retrieved_context}"])
         if extra_context:
             prompt.extend(["", f"Runtime context passed by caller:\n{extra_context}"])
         prompt.extend(["", fallback_hint, "Answer:"])
@@ -415,7 +426,7 @@ class RagPipeline:
 
     def _generate_text(self, prompt: str, max_tokens: int | None = None, temperature: float | None = None) -> str:
         gen_kwargs = self._generation_kwargs(max_tokens=max_tokens, temperature=temperature)
-
+        _t0 = time.monotonic()
         with self._llm_lock:
             try:
                 result = self._llm.generate(prompt, **gen_kwargs)
@@ -426,10 +437,12 @@ class RagPipeline:
                 self._reload_llm_locked()
                 result = self._llm.generate(prompt, **gen_kwargs)
             self._post_generation_locked()
+        llm_latency.record((time.monotonic() - _t0) * 1000)
         return str(result)
 
     def _stream_generate(self, prompt: str, max_tokens: int | None = None, temperature: float | None = None) -> Generator[str, None, None]:
         gen_kwargs = self._generation_kwargs(max_tokens=max_tokens, temperature=temperature)
+        _t0 = time.monotonic()
         with self._llm_lock:
             try:
                 streamer = self._llm.generate_stream(prompt, **gen_kwargs)
@@ -453,6 +466,7 @@ class RagPipeline:
                 if result:
                     yield result
             finally:
+                llm_latency.record((time.monotonic() - _t0) * 1000)
                 self._post_generation_locked()
 
     @staticmethod

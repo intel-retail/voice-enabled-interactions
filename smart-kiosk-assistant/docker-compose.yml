@@ -1,17 +1,81 @@
 # docker-compose.yml
 #
-# Starts kiosk-core (API) and kiosk-ui (Gradio browser interface).
+# Starts audio-analyzer, text-to-speech, rag-service, kiosk-core, and kiosk-ui.
 # Mic audio is captured by the browser via Web Audio API and uploaded as a
 # file — no host mic passthrough into the container is required.
-#
-# The three downstream services (audio-analyzer :8010, TTS :8011, RAG :8020)
-# must be running on the host before starting this stack.
 #
 # Start:   docker compose up -d --build
 # Stop:    docker compose down
 # Logs:    docker compose logs -f
 
 services:
+  audio-analyzer:
+    build:
+      context: ../edge-ai-libraries/microservices/audio-analyzer
+      dockerfile: Dockerfile
+    container_name: audio-analyzer
+    ports:
+      - "8010:8010"
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+    environment:
+      AUDIO_ANALYZER_CONFIG_OVERRIDE_PATHS: /app/audio_analyzer/config.container.yaml
+    volumes:
+      # Kiosk-pinned config (see ./configs/README.md) — overrides the service's
+      # built-in config without modifying edge-ai-libraries.
+      - ./configs/audio-analyzer/config.container.yaml:/app/audio_analyzer/config.container.yaml:ro
+      - ../edge-ai-libraries/microservices/audio-analyzer/models:/app/audio_analyzer/models
+      - ../edge-ai-libraries/microservices/audio-analyzer/chunks:/app/audio_analyzer/chunks
+      - ../edge-ai-libraries/microservices/audio-analyzer/storage:/app/audio_analyzer/storage
+      - ../edge-ai-libraries/microservices/audio-analyzer/.cache/huggingface:/root/.cache/huggingface
+    restart: unless-stopped
+
+  text-to-speech:
+    build:
+      context: ../edge-ai-libraries/microservices/text-to-speech
+      dockerfile: Dockerfile
+    container_name: text-to-speech
+    ports:
+      - "8011:8011"
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+    environment:
+      TEXT_TO_SPEECH_CONFIG_OVERRIDE_PATHS: /app/text-to-speech/config.container.yaml
+    volumes:
+      # Kiosk-pinned config (see ./configs/README.md) — overrides the service's
+      # built-in config without modifying edge-ai-libraries.
+      - ./configs/text-to-speech/config.container.yaml:/app/text-to-speech/config.container.yaml:ro
+      - ../edge-ai-libraries/microservices/text-to-speech/models:/app/text-to-speech/models
+      - ../edge-ai-libraries/microservices/text-to-speech/storage:/app/text-to-speech/storage
+      - ../edge-ai-libraries/microservices/text-to-speech/.cache/huggingface:/root/.cache/huggingface
+    restart: unless-stopped
+
+  rag-service:
+    build:
+      context: ./rag-service
+      dockerfile: Dockerfile
+    container_name: rag-service
+    ports:
+      - "8020:8020"
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - "992"
+    environment:
+      MPLCONFIGDIR: /tmp/matplotlib
+      SMART_KIOSK_RAG_CONFIG_OVERRIDE_PATHS: /app/rag-service/config.container.yaml
+    volumes:
+      - ./rag-service/config.container.yaml:/app/rag-service/config.container.yaml:ro
+      - rag_service_models:/app/rag-service/models
+      - rag_service_storage:/app/rag-service/storage
+      - rag_service_hf_cache:/app/rag-service/.cache/huggingface
+    restart: unless-stopped
+
   kiosk-core:
     build:
       context: .
@@ -20,13 +84,18 @@ services:
     ports:
       - "8012:8012"
     environment:
-      KIOSK_CORE_ANALYZER_URL: http://host.docker.internal:8010/v1/audio/transcriptions
-      KIOSK_CORE_RAG_URL:      http://host.docker.internal:8020/api/v1/query
-      KIOSK_CORE_TTS_URL:      http://host.docker.internal:8011/v1/audio/speech
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      KIOSK_CORE_ANALYZER_URL: http://audio-analyzer:8010/v1/audio/transcriptions
+      KIOSK_CORE_RAG_URL:      http://rag-service:8020/api/v1/query
+      KIOSK_CORE_TTS_URL:      http://text-to-speech:8011/v1/audio/speech
     volumes:
       - ./generated_audio:/app/generated_audio
+    depends_on:
+      audio-analyzer:
+        condition: service_healthy
+      text-to-speech:
+        condition: service_healthy
+      rag-service:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python3", "-c",
              "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8012/health', timeout=5)"]
@@ -45,11 +114,9 @@ services:
       - "7860:7860"
     environment:
       KIOSK_CORE_UI_BASE_URL:     http://kiosk-core:8012
-      KIOSK_CORE_UI_ANALYZER_URL: http://host.docker.internal:8010/v1/audio/transcriptions
-      KIOSK_CORE_UI_RAG_URL:      http://host.docker.internal:8020/api/v1/query
-      KIOSK_CORE_UI_TTS_URL:      http://host.docker.internal:8011/v1/audio/speech
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      KIOSK_CORE_UI_ANALYZER_URL: http://audio-analyzer:8010/v1/audio/transcriptions
+      KIOSK_CORE_UI_RAG_URL:      http://rag-service:8020/api/v1/query
+      KIOSK_CORE_UI_TTS_URL:      http://text-to-speech:8011/v1/audio/speech
     volumes:
       - ./generated_audio:/app/generated_audio
     command: ["python3", "gradio_app.py"]
@@ -57,3 +124,8 @@ services:
       kiosk-core:
         condition: service_healthy
     restart: unless-stopped
+
+volumes:
+  rag_service_models:
+  rag_service_storage:
+  rag_service_hf_cache:

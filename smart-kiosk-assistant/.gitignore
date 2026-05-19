@@ -15,3 +15,4 @@ chunks/
 
 # Session storage
 storage/
+.ui-dev/

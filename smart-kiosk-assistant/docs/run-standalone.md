@@ -6,16 +6,27 @@ Because kiosk-core runs on the host, `sounddevice` opens the mic directly. No Do
 
 For the Gradio browser UI instead, see [run-container.md](run-container.md).
 
+Clone the repo with its dependency submodule before starting:
+
+```bash
+git clone --recurse-submodules https://github.com/unarayan/voice-enabled-interactions.git
+cd voice-enabled-interactions/smart-kiosk-assistant
+```
+
+If the repo is already cloned, run `git submodule update --init --recursive` from the repo root.
+
 ## Prerequisites
 
 The three downstream services must be running before starting kiosk-core:
 
 ```bash
-# From the repo root
-cd audio_analyzer && docker compose up -d && cd ..
-cd text-to-speech && docker compose up -d && cd ..
+# From smart-kiosk-assistant/
+cd ../edge-ai-libraries/microservices/audio-analyzer && docker compose up -d && cd -
+cd ../edge-ai-libraries/microservices/text-to-speech && docker compose up -d && cd -
 cd rag-service    && python main.py &
 ```
+
+If you want one command to start everything, use the container flow in [run-container.md](run-container.md) instead.
 
 | Service | Default URL | Port |
 |---|---|---|
