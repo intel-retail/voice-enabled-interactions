@@ -62,7 +62,57 @@ footer { display: none !important; }
 /* Layout */
 .kiosk-row   { width: 100% !important; align-items: flex-start !important; gap: 16px !important; }
 .kiosk-left  { min-width: 0 !important; }
-.kiosk-right { width: 320px !important; min-width: 260px !important; max-width: 340px !important; flex-shrink: 0 !important; }
+.kiosk-right { width: 340px !important; min-width: 280px !important; max-width: 360px !important; flex-shrink: 0 !important; }
+
+/* ── Compact file upload widgets inside the right-panel accordions ── */
+.kiosk-right .file-preview,
+.kiosk-right [data-testid="file"],
+.kiosk-right .upload-container {
+    min-height: 0 !important;
+}
+.kiosk-right .file-preview,
+.kiosk-right [data-testid="file"] {
+    padding: 6px 8px !important;
+    font-size: 0.74rem !important;
+}
+.kiosk-right .upload-container,
+.kiosk-right .file-preview .download {
+    padding: 4px 6px !important;
+}
+/* The big drag-and-drop drop zone — compress its vertical footprint */
+.kiosk-right .wrap.svelte-1ipelgc,
+.kiosk-right .wrap[class*="svelte"]:has(input[type="file"]),
+.kiosk-right [data-testid="file"] .wrap,
+.kiosk-right .upload-container .wrap,
+.kiosk-right .file-preview,
+.kiosk-right .file-preview .wrap {
+    min-height: 32px !important;
+    height: 32px !important;
+    padding: 4px 8px !important;
+    font-size: 0.72rem !important;
+    line-height: 1.1 !important;
+}
+/* Hide the big "Drop File Here / or Click to Upload" hint block so the
+   zone collapses to just the icon + filename row */
+.kiosk-right .file-preview .or,
+.kiosk-right [data-testid="file"] .or,
+.kiosk-right .upload-container .or {
+    display: none !important;
+}
+.kiosk-right .file-preview .wrap > *,
+.kiosk-right [data-testid="file"] .wrap > * {
+    margin: 0 !important;
+}
+.kiosk-right input[type="file"] + * .icon,
+.kiosk-right .upload-container svg {
+    width: 18px !important;
+    height: 18px !important;
+}
+/* Tighten the label rows above the file widgets */
+.kiosk-right .label-wrap span,
+.kiosk-right label > span {
+    font-size: 0.74rem !important;
+}
 
 /* Chat pane */
 .chat-pane {
@@ -824,7 +874,7 @@ def _ingest_doc_common(file, idle_upload_label: str = "Upload & Ingest", idle_sa
     # Immediately lock the mic and both ingest buttons while work is in progress
     loading_html = (
         '<div class="ingest-status loading">'
-        '⏳ Refreshing knowledge base &#8212; the assistant will be back shortly&#8230;'
+        '⏳ Ingesting knowledge base &#8212; the assistant will be back shortly&#8230;'
         '<br><small>This may take a few minutes depending on content size. '
         'Please do not refresh the page.</small>'
         '</div>'
