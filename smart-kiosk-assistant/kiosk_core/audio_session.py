@@ -205,8 +205,9 @@ class BaseAudioSession:
 
         print(f"\nRAG response for session {self.session_id}:\n", end="", flush=True)
         sentence_index = 0
+        history = list(getattr(self.request, "history", []) or [])
         try:
-            for token in self.rag_client.stream_answer(transcript):
+            for token in self.rag_client.stream_answer(transcript, history=history):
                 with self._lock:
                     self.response_parts.append(token)
                 print(token, end="", flush=True)

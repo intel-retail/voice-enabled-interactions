@@ -103,10 +103,14 @@ def clear_context():
 @router.post("/api/v1/query")
 def query_context(request: QueryRequest) -> StreamingResponse:
     pipeline = get_shared_pipeline()
+    history_pairs: list[tuple[str, str]] | None = (
+        [(turn.role, turn.content) for turn in request.history] if request.history else None
+    )
     prompt, sources = pipeline.plan_answer(
         request.transcription,
         context_text=request.context_text,
         top_k=request.top_k,
+        history=history_pairs,
     )
 
     def _sse_generator():

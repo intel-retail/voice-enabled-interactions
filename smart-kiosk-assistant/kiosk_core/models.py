@@ -25,6 +25,9 @@ class SessionStartRequest(BaseModel):
     tts_voice: str | None = config.DEFAULT_TTS_VOICE
     tts_language: str | None = config.DEFAULT_TTS_LANGUAGE
     tts_instructions: str | None = config.DEFAULT_TTS_INSTRUCTIONS
+    # Recent conversation turns prior to this question, oldest-first.
+    # Forwarded verbatim to the RAG service so follow-ups have context.
+    history: list[dict[str, str]] = Field(default_factory=list)
 
 
 class FileSessionStartRequest(SessionStartRequest):

@@ -1013,7 +1013,23 @@ def _numpy_to_wav(audio: np.ndarray, sr: int) -> bytes:
         wf.writeframes(audio.astype(np.int16).tobytes())
     return buf.getvalue()
 
-def _open_session(sr: int) -> dict[str, Any]:
+def _recent_history_payload(history: list[dict] | None, max_turns: int = 4) -> list[dict[str, str]]:
+    """Return the last `max_turns` chat turns in {role, content} form for the
+    RAG service. `state["history"]` stores entries as {"role", "text"}; we
+    rename `text` -> `content` and drop empties.
+    """
+    if not history:
+        return []
+    cleaned: list[dict[str, str]] = []
+    for entry in history[-max_turns:]:
+        role = str(entry.get("role", ""))
+        content = str(entry.get("text", "")).strip()
+        if role in {"user", "assistant"} and content:
+            cleaned.append({"role": role, "content": content})
+    return cleaned
+
+
+def _open_session(sr: int, history: list[dict] | None = None) -> dict[str, Any]:
     with httpx.Client(timeout=REQUEST_TIMEOUT_SECONDS, trust_env=False) as c:
         r = c.post(f"{KIOSK_CORE_URL}/api/v1/sessions/start-stream", json={
             "sample_rate": sr,
@@ -1024,6 +1040,7 @@ def _open_session(sr: int) -> dict[str, Any]:
             "language": "en", "temperature": 0.0,
             "analyzer_url": ANALYZER_URL, "rag_url": RAG_URL, "tts_url": TTS_URL,
             "tts_model": "speecht5", "tts_language": "English",
+            "history": _recent_history_payload(history),
         })
     r.raise_for_status(); return r.json()
 
@@ -1077,7 +1094,7 @@ def on_chunk(state: dict, chunk):
 
     if s["session_id"] is None:
         try:
-            s["session_id"] = _open_session(sr)["session_id"]
+            s["session_id"] = _open_session(sr, history=s.get("history"))["session_id"]
         except Exception as e:
             return s, gr.skip(), gr.skip(), gr.skip(), f"❌ {e}"
 
