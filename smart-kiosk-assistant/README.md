@@ -71,15 +71,14 @@ The compose stack runs most containers as your host user. Exporting `LOCAL_UID` 
 - Start here: [docs/overview.md](docs/overview.md) and [docs/get-started.md](docs/get-started.md)
 - Architecture and request flow: [docs/how-it-works.md](docs/how-it-works.md)
 - Hardware and OS prerequisites: [docs/system-requirements.md](docs/system-requirements.md)
-- Build details for all five services: [docs/build-from-source.md](docs/build-from-source.md)
+- Build details: [docs/build-from-source.md](docs/build-from-source.md)
 - Container startup and verification: [docs/run-container.md](docs/run-container.md)
 - Host-run kiosk-core and Gradio UI: [docs/run-standalone.md](docs/run-standalone.md)
-- `kiosk-core` API surface: [docs/api-reference.md](docs/api-reference.md)
-- Environment variables and **per-service device selection (CPU / GPU / NPU)**:
-  [docs/configuration.md](docs/configuration.md)
+- `kiosk-core` API: [docs/api-reference.md](docs/api-reference.md)
+- Environment variables and inference device: [docs/configuration.md](docs/configuration.md)
 - Troubleshooting: [docs/troubleshooting.md](docs/troubleshooting.md)
 - Release notes: [docs/release-notes.md](docs/release-notes.md)
-- Internal RAG service overview and APIs: [rag-service/README.md](rag-service/README.md)
+- RAG service: [rag-service/README.md](rag-service/README.md)
 - Pinned configs for upstream services: [configs/README.md](configs/README.md)
 
 ## Operational Notes

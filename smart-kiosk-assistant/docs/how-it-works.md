@@ -14,24 +14,24 @@ speech synthesis through three model-hosting microservices.
 
 ## Components
 
-- **`kiosk-ui`** — Gradio browser interface. Captures microphone audio
-  via the Web Audio API and posts it to `kiosk-core`. Polls the session
-  endpoint until the answer text and generated audio are available, then
-  plays the audio clips back in order.
-- **`kiosk-core`** — FastAPI session orchestrator. Owns the per-session
+- `kiosk-ui` — Gradio interface. Captures microphone audio via the Web
+  Audio API and posts it to `kiosk-core`. Polls the session endpoint
+  until answer text and generated audio are available, then plays the
+  audio clips back in order.
+- `kiosk-core` — FastAPI session orchestrator. Owns the per-session
   state machine, forwards audio to `audio-analyzer`, sends the
   transcription to `rag-service`, and streams the generated answer
   sentence-by-sentence to `text-to-speech`.
-- **`audio-analyzer`** — OpenAI-compatible speech-to-text microservice
-  built on Whisper and OpenVINO. Configurable device (`CPU` or `GPU`).
-- **`rag-service`** — Local retrieval-augmented generation microservice.
-  Hosts a Qwen LLM, a BGE embedding model, and a BGE reranker, all on
-  OpenVINO. Each model can be pinned to `CPU` or `GPU` independently.
-- **`text-to-speech`** — OpenVINO TTS microservice. Supports the SpeechT5
-  family (`CPU`, `GPU`) and the Qwen-TTS family (`CPU`, `GPU`, `NPU`).
+- `audio-analyzer` — OpenAI-compatible speech-to-text microservice
+  built on Whisper and OpenVINO.
+- `rag-service` — Local retrieval-augmented generation microservice
+  hosting a Qwen LLM, a BGE embedding model, and a BGE reranker, all
+  on OpenVINO.
+- `text-to-speech` — OpenVINO TTS microservice supporting SpeechT5 and
+  Qwen-TTS.
 
-`kiosk-core` and `kiosk-ui` host no models and do not require a device
-selection. All inference happens inside the three model-hosting services.
+`kiosk-core` and `kiosk-ui` host no models. All inference happens
+inside the three model-hosting services.
 
 ## Request Flow
 
@@ -61,32 +61,5 @@ selection. All inference happens inside the three model-hosting services.
    session snapshot, downloads them from `kiosk-core`, and plays them
    sequentially.
 
-## Per-Service Device Placement
-
-Each model-hosting service decides where its models execute. The
-selection is read from that service's pinned configuration:
-
-| Service | Config file | Device fields |
-|---|---|---|
-| `audio-analyzer` | `configs/audio-analyzer/config.yaml` | `models.asr.device`, `sentiment.device` |
-| `text-to-speech` | `configs/text-to-speech/config.yaml` | `models.tts.device` |
-| `rag-service` | `rag-service/config.yaml` | `models.llm.device`, `models.embedding.device`, `retrieval.reranker.device` |
-
-See [configuration.md](configuration.md#choosing-the-inference-device-cpu--gpu--npu)
-for supported values and recommended combinations.
-
-## Configuration Surface
-
-- `kiosk-core` and `kiosk-ui` are configured purely through environment
-  variables — see [configuration.md](configuration.md#environment-variables).
-- The three model-hosting services read pinned YAML files mounted from
-  `configs/` and `rag-service/`. See
-  [configs/README.md](../configs/README.md) for why the indirection
-  exists.
-
-## Where to Go Next
-
-- [Get Started](get-started.md) — recommended positive flow.
-- [API Reference](api-reference.md) — `kiosk-core` HTTP surface.
-- [Run With Docker Compose](run-container.md) and
-  [Run On The Host](run-standalone.md) — deployment recipes.
+See [configuration.md](configuration.md) for environment variables and
+per-service device fields.

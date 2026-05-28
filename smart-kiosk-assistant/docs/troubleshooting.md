@@ -46,31 +46,25 @@ RAG LLM compile on GPU can also take a few minutes the first time.
 
 ## Selected Device Is Not Used
 
-The `CPU` / `GPU` / `NPU` field lives in the per-service pinned config
-file (see
-[configuration.md](configuration.md#choosing-the-inference-device-cpu--gpu--npu)).
-If the device does not appear in the logs, check:
+The device field lives in the per-service pinned config (see
+[configuration.md](configuration.md#inference-device)). If the device
+does not appear in the logs:
 
-- The value matches one of the supported devices for that model
-  (`GPU` is not supported by SpeechT5 for the int4 variant; `NPU` is
-  only supported by the Qwen-TTS variant; `audio-analyzer` ASR supports
+- Check the value is supported for that model (e.g. `NPU` is only
+  supported by the Qwen-TTS variant; `audio-analyzer` ASR supports
   `CPU` and `GPU` only).
-- For `GPU`: the host has `/dev/dri` and the Intel/OpenVINO host GPU
-  runtime installed. The compose file passes `/dev/dri` through by
-  default and adds the `video` group.
-- For `NPU`: the host has the Intel NPU driver installed and the
-  matching `level-zero` user-space loader. The `rag-service` container
-  also needs the right `group_add` entry to access `/dev/accel/accel0`.
-- After the change, restart only the affected service so the new device
-  is picked up:
+- For `GPU`: confirm `/dev/dri` exists and the Intel OpenVINO GPU
+  runtime is installed.
+- For `NPU`: confirm the Intel NPU driver and matching `level-zero`
+  loader are installed; `rag-service` also needs the right `group_add`
+  entry for `/dev/accel/accel0`.
+- Restart the affected service after the change:
 
   ```bash
-  docker compose up -d --build --force-recreate audio-analyzer
-  docker compose up -d --build --force-recreate text-to-speech
-  docker compose up -d --build --force-recreate rag-service
+  docker compose up -d --build --force-recreate <service-name>
   ```
 
-- Confirm OpenVINO actually picked the device:
+- Confirm OpenVINO picked the device:
 
   ```bash
   docker compose logs <service-name> | grep -i -E "device|compiling|GPU|NPU|CPU"
@@ -155,10 +149,8 @@ you override these URLs for a host-run setup, confirm:
   `host.docker.internal` (see the alternative compose snippets in
   [run-container.md](run-container.md)).
 
-## Where to Look Next
+## See Also
 
-- [Configuration](configuration.md) — every environment variable and
-  device field.
-- [Get Started](get-started.md) — the positive flow to compare against.
-- [Run On The Host](run-standalone.md) — host-run instructions and
-  expected URLs.
+- [Configuration](configuration.md)
+- [Get Started](get-started.md)
+- [Run On The Host](run-standalone.md)

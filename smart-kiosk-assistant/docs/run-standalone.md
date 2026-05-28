@@ -1,22 +1,13 @@
-# Run On The Host (Gradio UI Mode)
+# Run On The Host
 
-Use this path when you want to run `kiosk-core` and the Gradio UI directly on the host instead of inside the top-level Compose stack.
+Use this path to run `kiosk-core` and the Gradio UI directly on the host
+instead of inside the top-level Compose stack. The microphone is still
+captured by the browser and uploaded to `kiosk-core`.
 
-The user experience stays browser-based: the microphone is still captured by the browser and uploaded to `kiosk-core` as audio. This guide covers the host-run Gradio flow only.
+## Prerequisites
 
-## Clone And Prepare
-
-Clone the repository and populate only the two upstream microservices this setup uses:
-
-```bash
-git clone https://github.com/intel-retail/voice-enabled-interactions.git
-cd voice-enabled-interactions
-git submodule update --init --depth 1 edge-ai-libraries
-git -C edge-ai-libraries sparse-checkout set --cone microservices/audio-analyzer microservices/text-to-speech
-cd smart-kiosk-assistant
-```
-
-If the repository is already present, apply the same sparse-checkout commands from the repo root before starting.
+Clone the repository and initialize the submodule as described in
+[get-started.md](get-started.md#step-1-clone-and-prepare-sources).
 
 ## Start Downstream Services
 
