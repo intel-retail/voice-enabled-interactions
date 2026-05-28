@@ -31,6 +31,8 @@ docker compose build
 docker compose up -d
 ```
 
+Images are tagged with `RELEASE_TAG` read from `.env` (defaults to `latest` if unset): `audio-analyzer:${RELEASE_TAG}`, `text-to-speech:${RELEASE_TAG}`, `rag-service:${RELEASE_TAG}`, `kiosk-core:${RELEASE_TAG}`, `kiosk-ui:${RELEASE_TAG}`. The committed `.env` pins the current release tag; override it for local builds by exporting `RELEASE_TAG` or editing `.env`.
+
 This starts five containers:
 
 | Container | Port | Purpose |
@@ -86,4 +88,4 @@ docker compose down
 - The default Compose wiring already connects `kiosk-core` and `kiosk-ui` to the internal `audio-analyzer`, `rag-service`, and `text-to-speech` containers. Most deployments should not override these URLs.
 - Only change downstream service URLs when this stack must call services running outside the local Compose network, such as a remote host or a separately managed service tier.
 - See [configuration.md](configuration.md) for the advanced environment variables if you need that non-default routing.
-- For endpoint details, see [api.md](api.md).
+- For endpoint details, see [api-reference.md](api-reference.md).

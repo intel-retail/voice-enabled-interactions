@@ -10,6 +10,8 @@ From the `rag-service/` directory:
 docker compose up -d --build
 ```
 
+The built image will be tagged `rag-service:${RELEASE_TAG}` (e.g. `rag-service:v2026.1.0-rc1`). `RELEASE_TAG` is read from `.env` (defaults to `latest` if unset); the committed `.env` pins the current release tag.
+
 This publishes:
 
 - API: `http://127.0.0.1:8020`

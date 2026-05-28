@@ -3,6 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    image: rag-service:${RELEASE_TAG:-latest}
     container_name: rag-service
     ports:
       - "8020:8020"
