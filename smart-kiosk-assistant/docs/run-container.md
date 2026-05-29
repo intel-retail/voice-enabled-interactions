@@ -48,10 +48,9 @@ This starts five containers:
 | `kiosk-core` | 8012 | FastAPI session API |
 | `kiosk-ui` | 7860 | Gradio voice UI |
 
-Containers run as non-root; the published images default to UID/GID
-`1000:1000`. To match a different host user, export `LOCAL_UID` /
-`LOCAL_GID` (those vars are only consumed during a local build, so the
-pull flow uses the image defaults).
+Containers run as non-root; every image is built with UID/GID
+`1000:1000` and the named volumes are initialized with that ownership,
+so no host UID/GID configuration is required.
 
 ## Verify
 

@@ -16,12 +16,8 @@ services:
     build:
       context: ../edge-ai-libraries/microservices/audio-analyzer
       dockerfile: Dockerfile
-      args:
-        APP_UID: ${LOCAL_UID:-1000}
-        APP_GID: ${LOCAL_GID:-1000}
     image: ${REGISTRY:-intel}/audio-analyzer:${RELEASE_TAG:-latest}
     container_name: audio-analyzer
-    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     ports:
       - "8010:8010"
     devices:
@@ -61,12 +57,8 @@ services:
     build:
       context: ../edge-ai-libraries/microservices/text-to-speech
       dockerfile: Dockerfile
-      args:
-        APP_UID: ${LOCAL_UID:-1000}
-        APP_GID: ${LOCAL_GID:-1000}
     image: ${REGISTRY:-intel}/text-to-speech:${RELEASE_TAG:-latest}
     container_name: text-to-speech
-    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     ports:
       - "8011:8011"
     devices:
@@ -115,12 +107,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        APP_UID: ${LOCAL_UID:-1000}
-        APP_GID: ${LOCAL_GID:-1000}
     image: ${REGISTRY:-intel}/kiosk-core:${RELEASE_TAG:-latest}
     container_name: kiosk-core
-    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     ports:
       - "8012:8012"
     environment:
@@ -149,12 +137,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        APP_UID: ${LOCAL_UID:-1000}
-        APP_GID: ${LOCAL_GID:-1000}
     image: ${REGISTRY:-intel}/kiosk-ui:${RELEASE_TAG:-latest}
     container_name: kiosk-ui
-    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     ports:
       - "7860:7860"
     environment:

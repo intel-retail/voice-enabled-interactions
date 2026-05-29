@@ -43,16 +43,13 @@ the pull flow, so subsequent `docker compose up` calls reuse the local
 build until you `docker compose pull` again.
 
 ```bash
-export LOCAL_UID=$(id -u)
-export LOCAL_GID=$(id -g)
 docker compose build
 docker compose up -d
 ```
 
-`LOCAL_UID` and `LOCAL_GID` are only consumed during `docker compose
-build`; they bake the container's runtime UID/GID into the rebuilt
-image. Runtime data lives in named Docker volumes, so the pull flow
-does not need them and uses the image defaults (`1000:1000`).
+All five services run as UID/GID `1000:1000` (baked into each image),
+and runtime data lives in named Docker volumes initialized with that
+ownership, so no host UID/GID configuration is needed.
 
 ## Rebuild A Single Service
 
