@@ -27,6 +27,7 @@ services:
       - /dev/dri:/dev/dri
     group_add:
       - video
+      - "${RENDER_GID:-992}"
     environment:
       # Point HF cache under the same parent as ~/.cache/whisper so a single
       # ./.cache mount persists every model cache the service uses
@@ -105,6 +106,17 @@ services:
       - rag_service_models:/app/rag-service/models
       - rag_service_storage:/app/rag-service/storage
       - rag_service_hf_cache:/app/rag-service/.cache/huggingface
+    # First-run model download from HuggingFace can take several minutes on
+    # slow networks; override the image healthcheck so the long boot does
+    # not flip the container to `unhealthy` and abort kiosk-core / kiosk-ui
+    # via their `depends_on: service_healthy` gates.
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8020/health', timeout=5).read()"]
+      interval: 15s
+      timeout: 10s
+      start_period: 600s
+      retries: 10
     restart: unless-stopped
 
   kiosk-core:

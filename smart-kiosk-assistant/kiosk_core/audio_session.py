@@ -150,6 +150,7 @@ class BaseAudioSession:
                 if self._chunk_duration_seconds(chunk_frames) >= self.request.chunk_seconds:
                     self._flush_chunk(chunk_frames)
                     chunk_frames = []
+                    silence_run_seconds = 0.0
 
                 if silence_run_seconds >= self.request.silence_timeout_seconds:
                     end_reason = "silence_timeout"
@@ -180,6 +181,8 @@ class BaseAudioSession:
                     with self._lock:
                         self.error = str(exc)
                     logger.exception("RAG query failed for session %s", self.session_id)
+            else:
+                self._synthesize_response("How can I help you?")
 
         with self._lock:
             if final_status == "completed" and self.end_reason == "stopped_by_api":
@@ -196,6 +199,17 @@ class BaseAudioSession:
         )
         if self.on_complete is not None:
             self.on_complete(self.session_id)
+
+    def _synthesize_response(self, text: str) -> None:
+        """Speak a fixed response directly via TTS, without calling RAG."""
+        with self._lock:
+            self.response_parts.append(text)
+        sentence_queue: Queue[tuple[int | None, str | None]] = Queue()
+        worker = threading.Thread(target=self._tts_worker, args=(sentence_queue,), daemon=True)
+        worker.start()
+        sentence_queue.put((1, text))
+        sentence_queue.put((None, None))
+        worker.join()
 
     def _stream_rag_response(self, transcript: str) -> None:
         pending_text = ""

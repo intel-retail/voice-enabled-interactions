@@ -1068,7 +1068,13 @@ def _gradio_file_url(absolute_path: str) -> str:
     return f"/gradio_api/file={encoded}"
 
 # ── State ─────────────────────────────────────────────────────────────────────
-_INIT: dict = {"session_id": None, "buffer": [], "sample_rate": 16000, "history": []}
+_INIT: dict = {
+    "session_id": None,
+    "buffer": [],
+    "sample_rate": 16000,
+    "history": [],
+    "stream_prev": None,
+}
 
 # Process-wide flag set while a knowledge-base ingest is running. The streaming
 # mic events check this and become no-ops so users can't fire a question while
@@ -1079,8 +1085,24 @@ _INGEST_IN_PROGRESS = threading.Event()
 def on_start(state: dict):
     if _INGEST_IN_PROGRESS.is_set():
         return state, gr.skip(), gr.update(value=None), gr.skip(), "⏳ Ingestion in progress — please wait…"
-    s = dict(state); s["session_id"] = None; s["buffer"] = []
+    s = dict(state); s["session_id"] = None; s["buffer"] = []; s["stream_prev"] = None
     return s, _render_chat(s["history"], partial_user="🎤  Listening…"), gr.update(value=None), gr.skip(), "🎙  Listening — speak now"
+
+
+def _extract_new_stream_audio(prev_chunk: np.ndarray | None, current_chunk: np.ndarray) -> np.ndarray:
+    if prev_chunk is None or len(prev_chunk) == 0:
+        return current_chunk
+
+    prev_len = len(prev_chunk)
+    current_len = len(current_chunk)
+
+    if current_len == prev_len and np.array_equal(current_chunk, prev_chunk):
+        return np.empty(0, dtype=current_chunk.dtype)
+
+    if current_len > prev_len and np.array_equal(current_chunk[:prev_len], prev_chunk):
+        return current_chunk[prev_len:]
+
+    return current_chunk
 
 def on_chunk(state: dict, chunk):
     if _INGEST_IN_PROGRESS.is_set():
@@ -1094,7 +1116,12 @@ def on_chunk(state: dict, chunk):
     data = data.astype(np.int16)
 
     s = dict(state); s["sample_rate"] = sr
-    s["buffer"] = list(s.get("buffer", [])) + [data]
+    new_data = _extract_new_stream_audio(s.get("stream_prev"), data)
+    s["stream_prev"] = data.copy()
+    if len(new_data) == 0:
+        return s, gr.skip(), gr.skip(), gr.skip(), gr.skip()
+
+    s["buffer"] = list(s.get("buffer", [])) + [new_data]
 
     if s["session_id"] is None:
         try:
@@ -1105,9 +1132,11 @@ def on_chunk(state: dict, chunk):
     total = sum(len(b) for b in s["buffer"])
     if total >= int(sr * _CHUNK_SECONDS):
         audio = np.concatenate(s["buffer"])
+        try:
+            _push(s["session_id"], _numpy_to_wav(audio, sr))
+        except Exception:
+            pass
         s["buffer"] = []
-        try: _push(s["session_id"], _numpy_to_wav(audio, sr))
-        except Exception: pass
 
     transcript = ""
     try:
@@ -1166,7 +1195,7 @@ def on_stop(state: dict) -> Generator:
         if not running:
             if transcript:    history.append({"role":"user",      "text": transcript})
             if response_text: history.append({"role":"assistant", "text": response_text})
-            s["history"] = history; s["session_id"] = None; s["buffer"] = []
+            s["history"] = history; s["session_id"] = None; s["buffer"] = []; s["stream_prev"] = None
             yield s, _render_chat(history), gr.skip(), gr.skip(), "✓  Done — tap 🎤 for another question"
             break
         time.sleep(POLL_INTERVAL_SECONDS)
