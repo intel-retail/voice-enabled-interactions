@@ -45,7 +45,7 @@ GET /api/v1/sessions
 
 **Response**
 
-```json
+```text
 {
   "sessions": [
     {
