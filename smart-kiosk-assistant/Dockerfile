@@ -1,12 +1,10 @@
+# SPDX-FileCopyrightText: (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
 # Dockerfile — kiosk-core / kiosk-ui
 #
 # Default CMD starts the kiosk-core FastAPI service on port 8012.
 # The kiosk-ui service in docker-compose.yml overrides CMD to run gradio_app.py.
-#
-# Mic audio is NOT captured server-side in this image.
-# The Gradio UI captures audio in the browser (Web Audio API) and uploads it
-# as a file.
-
 FROM python:3.11-slim
 
 ARG APP_UID=1000
