@@ -39,6 +39,8 @@ The other two are pulled from `intel/audio-analyzer` and `intel/text-to-speech` 
 From the `smart-kiosk-assistant/` directory:
 
 ```bash
+sudo apt-get install -y --no-install-recommends libportaudio2
+
 python -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
