@@ -50,14 +50,10 @@ The device field lives in the per-service pinned config (see
 [Configuration](./get-started/configuration.md#inference-device)). If the device
 does not appear in the logs:
 
-- Check the value is supported for that model (e.g. `NPU` is only
-  supported by the Qwen-TTS variant; `audio-analyzer` ASR supports
-  `CPU` and `GPU` only).
+- Check the value is supported for that model (e.g. `audio-analyzer`
+  ASR supports `CPU` and `GPU` only).
 - For `GPU`: confirm `/dev/dri` exists and the Intel OpenVINO GPU
   runtime is installed.
-- For `NPU`: confirm the Intel NPU driver and matching `level-zero`
-  loader are installed; `rag-service` also needs the right `group_add`
-  entry for `/dev/accel/accel0`.
 - Restart the affected service after the change:
 
   ```bash
@@ -67,7 +63,7 @@ does not appear in the logs:
 - Confirm OpenVINO picked the device:
 
   ```bash
-  docker compose logs <service-name> | grep -i -E "device|compiling|GPU|NPU|CPU"
+  docker compose logs <service-name> | grep -i -E "device|compiling|GPU|CPU"
   ```
 
 ## Permission Errors on Mounted Folders

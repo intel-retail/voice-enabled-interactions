@@ -17,7 +17,7 @@ Smart Kiosk Assistant is a voice-first, retrieval-augmented kiosk stack
 for retail, Quick Service Restaurant (QSR), and similar customer-facing deployments. The browser
 captures microphone audio, the stack transcribes it, retrieves a grounded
 answer from a local knowledge base, and plays a synthesized reply. All
-inference runs locally on Intel CPU, GPU, or NPU via OpenVINO.
+inference runs locally on Intel CPU or GPU via OpenVINO.
 
 ## Services
 

@@ -14,9 +14,6 @@
   a supported discrete GPU exposed via `/dev/dri`. The RAG LLM and reranker
   benefit most from `GPU`; `audio-analyzer` and `text-to-speech` can also be
   pinned to `GPU` for higher throughput.
-- **NPU (optional)**: Intel Core Ultra NPU. Currently supported as a
-  device choice for `text-to-speech` (Qwen-TTS variant); other services
-  fall back to CPU/GPU if `NPU` is selected.
 - **Microphone**: Not required on the host — audio is captured by the
   browser via the Web Audio API and uploaded to `kiosk-core`.
 
@@ -27,8 +24,6 @@
 - Docker Engine and Docker Compose v2 for container deployment.
 - For GPU acceleration on Linux: Intel/OpenVINO host GPU runtime
   (e.g. `intel-opencl-icd`, `level-zero`) installed on the host.
-- For NPU acceleration: the Intel NPU driver and matching `level-zero`
-  runtime installed on the host.
 
 ## Host Packages (Standalone Run Only)
 

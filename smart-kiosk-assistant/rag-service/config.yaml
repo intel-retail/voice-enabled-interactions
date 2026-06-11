@@ -11,20 +11,20 @@ api:
 models:
   llm:
     hf_id: "Qwen/Qwen3-4B-Instruct-2507"
-    device: "GPU"
-    weight_format: "int8"
+    device: "GPU"               # inference device. Permitted values: CPU | GPU
+    weight_format: "int8"       # OpenVINO export precision. Permitted values: int8 | fp16 | fp32
     models_base_path: "./models/llm"
     # temperature omitted — always greedy (do_sample=False)
     cache_dir: "./storage/ov_cache"
   embedding:
     hf_id: "BAAI/bge-large-en-v1.5"
-    device: "CPU"
-    backend: "openvino"
-    weight_format: "int8"
+    device: "CPU"               # inference device. Permitted values: CPU | GPU
+    backend: "openvino"         # inference backend. Permitted values: openvino
+    weight_format: "int8"       # OpenVINO export precision. Permitted values: int8 | fp16 | fp32
     max_seq_length: 512
     batch_size: 16
     models_base_path: "./models/embeddings"
-    normalize_embeddings: true
+    normalize_embeddings: true  # true | false
 
 storage:
   persist_directory: "./storage/vector_db"
@@ -40,11 +40,11 @@ retrieval:
   # Cross-encoder reranker. When enabled, fetch_k docs are pulled by ANN,
   # rescored jointly with the query, and the top_k by rerank score are kept.
   reranker:
-    enabled: true
+    enabled: true                # true | false
     hf_id: "BAAI/bge-reranker-base"
-    device: "GPU"
-    backend: "openvino"
-    weight_format: "int8"
+    device: "GPU"                # inference device. Permitted values: CPU | GPU
+    backend: "openvino"          # inference backend. Permitted values: openvino
+    weight_format: "int8"        # OpenVINO export precision. Permitted values: int8 | fp16 | fp32
     models_base_path: "./models/rerankers"
     max_length: 384
     batch_size: 8
