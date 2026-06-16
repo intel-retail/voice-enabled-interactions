@@ -31,12 +31,13 @@ From whatever parent directory you keep source in:
 
 ```bash
 git clone https://github.com/intel-retail/voice-enabled-interactions.git
+cd voice-enabled-interactions/
 git clone --depth 1 --filter=blob:none --sparse \
   https://github.com/open-edge-platform/edge-ai-libraries.git
 git -C edge-ai-libraries sparse-checkout set \
   microservices/audio-analyzer microservices/text-to-speech
 
-cd voice-enabled-interactions/smart-kiosk-assistant
+cd smart-kiosk-assistant/
 ```
 
 The sparse checkout pulls only the two microservices the kiosk build
