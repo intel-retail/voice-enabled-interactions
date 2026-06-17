@@ -7,12 +7,14 @@ import threading
 import time
 import urllib.parse as _urlparse
 import wave
+from datetime import datetime
 from typing import Any, Generator
 from urllib.parse import urlparse
 
 import gradio as gr
 import httpx
 import numpy as np
+import plotly.graph_objects as go
 
 from kiosk_core import config as kiosk_config
 
@@ -21,6 +23,7 @@ KIOSK_CORE_URL          = os.getenv("KIOSK_CORE_UI_BASE_URL",           "http://
 RAG_URL                 = os.getenv("KIOSK_CORE_UI_RAG_URL",            "http://127.0.0.1:8020/api/v1/query")
 TTS_URL                 = os.getenv("KIOSK_CORE_UI_TTS_URL",            "http://127.0.0.1:8011/v1/audio/speech")
 ANALYZER_URL            = os.getenv("KIOSK_CORE_UI_ANALYZER_URL",       "http://127.0.0.1:8010/v1/audio/transcriptions")
+METRICS_URL             = os.getenv("KIOSK_CORE_UI_METRICS_URL",        "http://127.0.0.1:9000")
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("KIOSK_CORE_UI_TIMEOUT_SECONDS",       "120.0"))
 POLL_INTERVAL_SECONDS   = float(os.getenv("KIOSK_CORE_UI_POLL_INTERVAL_SECONDS", "0.35"))
 _CHUNK_SECONDS          = kiosk_config.DEFAULT_CHUNK_SECONDS
@@ -844,11 +847,22 @@ footer { display: none !important; }
     opacity: 0.5;
     filter: grayscale(0.6);
 }
-/* Disable mic while kiosk-core is processing a response (same visual as ingest). */
-.kiosk-mic-locked #kiosk-mic {
-    pointer-events: none;
-    opacity: 0.5;
-    filter: grayscale(0.6);
+
+/* ── Performance / Resource Utilization panel ── */
+.perf-plot-row {
+    gap: 8px !important;
+    margin-bottom: 6px !important;
+}
+.perf-plot-row > div {
+    min-width: 0 !important;
+    flex: 1 1 0 !important;
+}
+/* Shrink the Plotly toolbar so it doesn't overflow the narrow right panel */
+.kiosk-right .js-plotly-plot .plotly .modebar {
+    right: 2px !important;
+    top: 2px !important;
+    transform: scale(0.8);
+    transform-origin: top right;
 }
 """
 
@@ -1323,6 +1337,95 @@ def _render_kpi_html(asr: dict, rag: dict, tts: dict) -> str:
     return f'<div class="kpi-panel">{asr_card}{rag_card}{tts_card}</div>'
 
 
+# ── Metrics / Performance helpers ────────────────────────────────────────────
+def _fetch_metrics() -> dict:
+    """Fetch time-series metrics from the metrics-collector service."""
+    try:
+        with httpx.Client(timeout=4.0, trust_env=False) as c:
+            r = c.get(f"{METRICS_URL}/metrics")
+            r.raise_for_status()
+            return r.json()
+    except Exception:
+        return {}
+
+
+def _make_line_fig(
+    series: list,
+    label: str,
+    color: str,
+    y_max: float | None = 100,
+) -> go.Figure:
+    """Build a compact Plotly line figure from a [[timestamp_iso, value], ...] series."""
+    xs_fmt: list[str] = []
+    ys: list[float] = []
+    for item in series:
+        try:
+            xs_fmt.append(datetime.fromisoformat(item[0]).strftime("%H:%M:%S"))
+        except Exception:
+            xs_fmt.append(str(item[0]))
+        ys.append(float(item[1]) if len(item) > 1 else 0.0)
+
+    rgba = color.replace("rgb(", "rgba(").replace(")", ", 0.15)")
+    fig = go.Figure(
+        go.Scatter(
+            x=xs_fmt,
+            y=ys,
+            mode="lines",
+            name=label,
+            line=dict(color=color, width=2),
+            fill="tozeroy",
+            fillcolor=rgba,
+        )
+    )
+    fig.update_layout(
+        margin=dict(l=38, r=8, t=28, b=28),
+        height=185,
+        title=dict(text=label, font=dict(size=11, color="#1A1A1A"), x=0.5),
+        xaxis=dict(nticks=6, tickangle=0, tickfont=dict(size=9)),
+        yaxis=dict(
+            title="%",
+            titlefont=dict(size=9),
+            tickfont=dict(size=9),
+            range=[0, y_max] if y_max is not None else None,
+            rangemode="tozero" if y_max is None else "normal",
+        ),
+        plot_bgcolor="#F4F7FB",
+        paper_bgcolor="#FFFFFF",
+        showlegend=False,
+    )
+    if not ys:
+        fig.add_annotation(
+            text="Waiting for data\u2026",
+            xref="paper", yref="paper",
+            x=0.5, y=0.5,
+            showarrow=False,
+            font=dict(size=11, color="#8FA0AE"),
+        )
+    return fig
+
+
+def _fetch_performance_charts() -> tuple[go.Figure, go.Figure, go.Figure, go.Figure]:
+    """Return four Plotly figures: cpu, gpu, memory, npu."""
+    metrics = _fetch_metrics()
+    cpu_fig = _make_line_fig(
+        metrics.get("cpu_utilization", []),
+        "CPU Utilization", "rgb(54, 162, 235)",
+    )
+    gpu_fig = _make_line_fig(
+        metrics.get("gpu_utilization", []),
+        "GPU Utilization", "rgb(75, 192, 192)",
+    )
+    # memory items: [ts, total_gb, used_gb, free_gb, usage_pct]
+    mem_raw = metrics.get("memory", [])
+    mem_series = [[item[0], item[4]] for item in mem_raw if len(item) > 4]
+    mem_fig = _make_line_fig(mem_series, "Memory Utilization", "rgb(255, 99, 132)")
+    npu_fig = _make_line_fig(
+        metrics.get("npu_utilization", []),
+        "NPU Utilization", "rgb(153, 102, 255)",
+    )
+    return cpu_fig, gpu_fig, mem_fig, npu_fig
+
+
 # ── App ───────────────────────────────────────────────────────────────────────
 def create_app() -> gr.Blocks:
     with gr.Blocks(title="Kiosk Voice Assistant") as app:
@@ -1390,6 +1493,14 @@ def create_app() -> gr.Blocks:
                     )
                     ingest_status = gr.HTML(value="")
 
+                with gr.Accordion(label="📈 Performance", open=True):
+                    perf_timer = gr.Timer(value=10, active=True)
+                    cpu_plot = gr.Plot(label="CPU", show_label=False)
+                    gpu_plot = gr.Plot(label="GPU", show_label=False)
+                    mem_plot = gr.Plot(label="Memory", show_label=False)
+                    npu_plot = gr.Plot(label="NPU", show_label=False)
+                    perf_refresh_btn = gr.Button("🔄 Refresh", size="sm", variant="secondary")
+
                 with gr.Accordion(label="📊 Model KPIs", open=True):
                     kpi_panel = gr.HTML(value=_render_kpi_html({}, {}, {}))
                     refresh_btn = gr.Button("🔄 Refresh", size="sm", variant="secondary")
@@ -1429,6 +1540,16 @@ def create_app() -> gr.Blocks:
             }""",
         )
 
+        _perf_plots = [cpu_plot, gpu_plot, mem_plot, npu_plot]
+        perf_refresh_btn.click(
+            fn=_fetch_performance_charts,
+            outputs=_perf_plots,
+        )
+        perf_timer.tick(
+            fn=_fetch_performance_charts,
+            outputs=_perf_plots,
+        )
+
         refresh_btn.click(
             fn=lambda: _render_kpi_html(*_fetch_kpis()),
             outputs=[kpi_panel],
@@ -1451,6 +1572,10 @@ def create_app() -> gr.Blocks:
             fn=_ingest_sample_doc,
             inputs=[sample_choice],
             outputs=[ingest_status, ingest_btn, sample_ingest_btn],
+        )
+        app.load(
+            fn=_fetch_performance_charts,
+            outputs=_perf_plots,
         )
         app.load(
             fn=lambda: _render_kpi_html(*_fetch_kpis()),
