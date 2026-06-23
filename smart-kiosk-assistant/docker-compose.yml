@@ -94,7 +94,7 @@ services:
     # dependent services (kiosk-core / kiosk-ui).
     healthcheck:
       test: ["CMD", "python3", "-c",
-             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=5).read()"]
+            "import urllib.request; opener = urllib.request.build_opener(urllib.request.ProxyHandler({})); opener.open('http://127.0.0.1:8010/health', timeout=5).read()"]
       interval: 15s
       timeout: 10s
       start_period: 240s
@@ -135,7 +135,7 @@ services:
     # `depends_on: service_healthy` gates.
     healthcheck:
       test: ["CMD", "python3", "-c",
-             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8011/health', timeout=5).read()"]
+            "import urllib.request; opener = urllib.request.build_opener(urllib.request.ProxyHandler({})); opener.open('http://127.0.0.1:8011/health', timeout=5).read()"]
       interval: 15s
       timeout: 10s
       start_period: 240s
