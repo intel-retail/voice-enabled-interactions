@@ -19,6 +19,7 @@ Usage::
 
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Any
 
@@ -28,6 +29,19 @@ from agentic.mcp_client import MCPTool, bootstrap_mcp_tools, call_tool, get_all_
 from agentic.tools.knowledge_lookup_tool import knowledge_lookup
 
 logger = logging.getLogger(__name__)
+
+# Maps JSON-schema primitive types to Python types so ADK can build an
+# accurate function-call declaration (parameter names + types) for each MCP
+# tool. Without this, a ``**kwargs`` wrapper advertises zero parameters and the
+# LLM invokes every tool with empty arguments.
+_JSON_TO_PY: dict[str, type] = {
+    "string": str,
+    "integer": int,
+    "number": float,
+    "boolean": bool,
+    "array": list,
+    "object": dict,
+}
 
 # ---------------------------------------------------------------------------
 # Agent instruction prompt
@@ -194,7 +208,16 @@ class OrderingAgent:
 
     @staticmethod
     def _make_mcp_callable(tool_name: str, mcp_tool: MCPTool):
-        """Dynamically create an async function wrapping an MCP tool call."""
+        """Dynamically create an async function wrapping an MCP tool call.
+
+        The wrapper is given an explicit ``__signature__`` and
+        ``__annotations__`` derived from the MCP tool's JSON input schema so
+        that Google ADK advertises the real parameter names and types to the
+        LLM. A bare ``**kwargs`` signature would otherwise be introspected as
+        a zero-parameter tool, causing the model to call every tool with empty
+        arguments (e.g. ``list_products()`` instead of
+        ``list_products(category="burgers")``).
+        """
 
         async def _mcp_fn(**kwargs: Any) -> Any:
             logger.info("[AGENT→MCP] tool=%s args=%s", tool_name, kwargs)
@@ -203,9 +226,40 @@ class OrderingAgent:
             return result
 
         _mcp_fn.__name__ = tool_name
-        _mcp_fn.__doc__ = mcp_tool.description
-        # Attach JSON schema as __annotations__ hint for ADK
-        _mcp_fn.__schema__ = mcp_tool.to_function_schema()  # type: ignore[attr-defined]
+        _mcp_fn.__doc__ = mcp_tool.description or tool_name
+
+        # Build an explicit signature from the MCP JSON input schema so ADK
+        # introspection produces a correct function-call declaration.
+        input_schema = mcp_tool.input_schema or {}
+        properties: dict[str, Any] = input_schema.get("properties", {}) or {}
+        required = set(input_schema.get("required", []) or [])
+
+        params: list[inspect.Parameter] = []
+        annotations: dict[str, Any] = {}
+        for pname, pspec in properties.items():
+            pytype = _JSON_TO_PY.get((pspec or {}).get("type", "string"), str)
+            annotations[pname] = pytype
+            if pname in required:
+                params.append(
+                    inspect.Parameter(
+                        pname, inspect.Parameter.KEYWORD_ONLY, annotation=pytype
+                    )
+                )
+            else:
+                params.append(
+                    inspect.Parameter(
+                        pname,
+                        inspect.Parameter.KEYWORD_ONLY,
+                        annotation=pytype,
+                        default=None,
+                    )
+                )
+        annotations["return"] = Any
+
+        _mcp_fn.__signature__ = inspect.Signature(  # type: ignore[attr-defined]
+            params, return_annotation=Any
+        )
+        _mcp_fn.__annotations__ = annotations
         return _mcp_fn
 
     async def chat(
