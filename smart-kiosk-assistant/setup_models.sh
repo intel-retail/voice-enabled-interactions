@@ -2,8 +2,9 @@
 # setup_models.sh — Pre-download all models required by Smart Kiosk Assistant
 #
 # What this script downloads:
-#   1. OVMS LLM  — OpenVINO/Qwen3-4B-int4-ov  (pre-converted INT4, ~2 GB)
+#   1. OVMS LLM  — OpenVINO/Qwen3-4B-int8-ov  (pre-converted INT8, ~4 GB)
 #                  Served by ovms-llm for the ordering agent (tool calling).
+#                  INT8 chosen over INT4 for better instruction-following accuracy.
 #                  Uses OVMS pull mode — no local export/quantisation needed.
 #
 # Models downloaded inside their containers on first run (no setup needed):
@@ -18,12 +19,14 @@
 #
 # Options:
 #   --device  CPU|GPU|NPU   Target inference device for OVMS  (default: GPU)
+#   --int4                  Use INT4 model instead of INT8 (smaller, less accurate)
 #   --skip-ovms             Skip the OVMS LLM model download
 #   --hf-token  TOKEN       HuggingFace token (or export HF_TOKEN env var)
 #
 # Examples:
-#   ./setup_models.sh                        # GPU (default)
+#   ./setup_models.sh                        # GPU (default, INT8)
 #   ./setup_models.sh --device CPU           # CPU-only systems
+#   ./setup_models.sh --int4                 # INT4 (smaller, faster, less accurate)
 #   ./setup_models.sh --hf-token hf_xxx...   # explicit HF token
 
 set -e
@@ -34,10 +37,12 @@ VENV_DIR="${SCRIPT_DIR}/.setup-venv"
 ENV_FILE="${SCRIPT_DIR}/.env"
 
 # ── Model registry ────────────────────────────────────────────────────────────
-# Best choice per https://docs.openvino.ai/2026/model-server/ovms_demos_continuous_batching_agent.html
-# Pre-converted INT4 model with native tool calling support via hermes3 parser.
-OVMS_SOURCE_MODEL="OpenVINO/Qwen3-4B-int4-ov"
-OVMS_MODEL_NAME="OpenVINO/Qwen3-4B-int4-ov"
+# INT8 is the default: better instruction-following and tool-calling accuracy
+# compared to INT4, at the cost of ~2x model size (~4 GB vs ~2 GB).
+# Use --int4 flag to override.
+OVMS_QUANT="int8"
+OVMS_SOURCE_MODEL="OpenVINO/Qwen3-4B-int8-ov"
+OVMS_MODEL_NAME="OpenVINO/Qwen3-4B-int8-ov"
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 TARGET_DEVICE="GPU"
@@ -49,6 +54,12 @@ while [[ $# -gt 0 ]]; do
         --device)
             TARGET_DEVICE="${2^^}"   # uppercase
             shift 2
+            ;;
+        --int4)
+            OVMS_QUANT="int4"
+            OVMS_SOURCE_MODEL="OpenVINO/Qwen3-4B-int4-ov"
+            OVMS_MODEL_NAME="OpenVINO/Qwen3-4B-int4-ov"
+            shift
             ;;
         --skip-ovms)
             SKIP_OVMS=true
@@ -154,9 +165,9 @@ ensure_venv() {
 
     source "${VENV_DIR}/bin/activate"
 
-    echo "  Installing huggingface_hub..."
+    echo "  Installing huggingface_hub (hf CLI)..."
     pip install -q --upgrade pip
-    pip install -q "huggingface_hub>=0.23"
+    pip install -q "huggingface_hub[cli]>=0.23"
     echo "  ✓ huggingface_hub installed"
 
     _VENV_READY=1
@@ -178,7 +189,7 @@ download_ovms_model() {
 
     echo "  Downloading ${OVMS_SOURCE_MODEL} from HuggingFace..."
     echo "  Target: ${target_path}"
-    echo "  (INT4 pre-converted OpenVINO model, ~2 GB)"
+    echo "  (INT${OVMS_QUANT^^} pre-converted OpenVINO model, ~$([ "$OVMS_QUANT" = "int4" ] && echo "2 GB" || echo "4 GB"))"
     echo ""
 
     local hf_token_arg=""
@@ -186,8 +197,9 @@ download_ovms_model() {
         hf_token_arg="--token ${HF_TOKEN}"
     fi
 
-    # Use huggingface_hub CLI for reliable snapshot download with progress
-    "${VENV_DIR}/bin/huggingface-cli" download \
+    # Use hf CLI for reliable snapshot download with progress
+    # (huggingface-cli is deprecated; hf is the modern replacement)
+    "${VENV_DIR}/bin/hf" download \
         "${OVMS_SOURCE_MODEL}" \
         --local-dir "${target_path}" \
         --local-dir-use-symlinks False \
