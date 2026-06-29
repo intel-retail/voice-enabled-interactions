@@ -98,10 +98,10 @@ function TypingIndicator() {
 
 function WelcomeScreen() {
   const suggestions = [
-    { icon: '🍔', text: 'Show menu' },
-    { icon: '🛒', text: 'Place order' },
-    { icon: '⏰', text: 'Store hours' },
-    { icon: '❓', text: 'Get help' },
+    { icon: '🍔', text: '"What\'s on the menu?"' },
+    { icon: '🍕', text: '"Show me your burgers"' },
+    { icon: '🛒', text: '"I\'d like to order a burger"' },
+    { icon: '⏰', text: '"What are your opening hours?"' },
   ];
 
   return (
