@@ -44,6 +44,39 @@ def _svc():
     return _ordering_service
 
 
+async def _attach_upsell(order_result: dict[str, Any]) -> dict[str, Any]:
+    """Attach rule-based upsell suggestions to an order result in-place.
+
+    Computes suggestions deterministically from the products currently in the
+    order so the agent always receives them with the order response — rather
+    than depending on the LLM to make a separate get_upsell_suggestions call,
+    which it does inconsistently. Returns the same dict for convenience.
+    """
+    from kiosk_core.ordering.models import UpsellRequest
+
+    product_ids = [
+        it.get("product_id")
+        for it in order_result.get("items", [])
+        if it.get("product_id")
+    ]
+    if not product_ids:
+        order_result["upsell_suggestions"] = []
+        return order_result
+    try:
+        suggestions = await _svc().get_upsell_suggestions(
+            UpsellRequest(product_ids=product_ids)
+        )
+        order_result["upsell_suggestions"] = [s.model_dump() for s in suggestions]
+        logger.info(
+            "[MCP-SERVER] attached %d upsell suggestion(s) to order",
+            len(suggestions),
+        )
+    except Exception as exc:  # upsell must never break order placement
+        logger.warning("[MCP-SERVER] upsell attach failed: %s", exc)
+        order_result["upsell_suggestions"] = []
+    return order_result
+
+
 # ---------------------------------------------------------------------------
 # Tool definitions
 # ---------------------------------------------------------------------------
@@ -84,7 +117,7 @@ async def place_order(user_id: str, items: list[dict[str, Any]]) -> dict[str, An
         req = CreateOrderRequest(user_id=user_id, items=item_list)
         order = await _svc().place_order(req)
         logger.info("[MCP-SERVER] place_order user=%s order_id=%d total=%.2f", user_id, order.order_id, order.total)
-        return order.model_dump(mode="json")
+        return await _attach_upsell(order.model_dump(mode="json"))
     except ValueError as exc:
         logger.warning("[MCP-SERVER] place_order user=%s rejected: %s", user_id, exc)
         return {"error": str(exc)}
@@ -107,7 +140,7 @@ async def update_order(order_id: int, items: list[dict[str, Any]]) -> dict[str, 
         item_list = [OrderItemIn(**i) for i in items]
         order = await _svc().update_order_items(order_id, item_list)
         logger.info("[MCP-SERVER] update_order order_id=%d new_total=%.2f", order_id, order.total)
-        return order.model_dump(mode="json")
+        return await _attach_upsell(order.model_dump(mode="json"))
     except ValueError as exc:
         logger.warning("[MCP-SERVER] update_order order_id=%d rejected: %s", order_id, exc)
         return {"error": str(exc)}

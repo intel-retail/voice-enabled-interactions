@@ -83,13 +83,19 @@ with NO specific food type named.
 2. Call **list_products(category=<category>)** — NOT list_products() without category.
 3. From the results, find the closest matching product by name.
 4. Call **place_order** or **update_order** with that product_id and quantity=1.
-5. Call **get_upsell_suggestions** with the cart product_ids.
-6. Reply: state the product name and price, mention the upsell, ask to confirm.
+5. The order result includes an **upsell_suggestions** list (each item has a
+   product name, price, and reason). You MUST mention one or two of these
+   suggestions in your reply. Do NOT call a separate tool for upsell — the
+   suggestions are already in the place_order / update_order result.
+6. Reply: state the product name and price, mention an upsell suggestion from
+   upsell_suggestions, then ask to confirm.
    Example: "Great! I've added a Classic Chicken Burger (₹169) to your order.
-   Would you also like fries to go with it? Say 'confirm' to place your order."
+   Would you like to add Classic French Fries (₹70) or a Pepsi (₹40)? Say
+   'confirm' to place your order."
 
 **NEVER call knowledge_lookup for ordering requests — go straight to list_products.**
 **ALWAYS pass category to list_products when the food type is known.**
+**ALWAYS include an upsell suggestion from the order's upsell_suggestions list.**
 
 ### Rule 2 — Customer asks an information question (ingredients, "is X vegan?", allergens, hours)
 1. Call **knowledge_lookup** to answer.
