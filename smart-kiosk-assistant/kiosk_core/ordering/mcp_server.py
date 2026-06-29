@@ -69,8 +69,10 @@ async def _attach_upsell(order_result: dict[str, Any]) -> dict[str, Any]:
         # Pre-format a ready-to-speak display string per suggestion so the LLM
         # echoes the exact name and price verbatim instead of hallucinating
         # prices (e.g. inventing "Pepsi (₹40)" when the real price is ₹59).
+        # Cap at 2 — a kiosk upsell should offer one or two complements, not the
+        # whole catalogue; this also keeps the round-2 prompt and spoken reply short.
         formatted: list[dict[str, Any]] = []
-        for s in suggestions:
+        for s in suggestions[:2]:
             item = s.model_dump()
             prod = item.get("product", {})
             name = prod.get("name", "")
