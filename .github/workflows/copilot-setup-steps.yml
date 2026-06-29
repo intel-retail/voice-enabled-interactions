@@ -1,0 +1,90 @@
+name: "Copilot Setup Steps"
+
+# Automatically run when this file changes for easy validation.
+# Also allows manual runs from the Actions tab.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+  pull_request:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+
+jobs:
+  # Job MUST be named `copilot-setup-steps` to be picked up by Copilot.
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      contents: read
+
+    steps:
+      # ── Checkout ──────────────────────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@1e31de5234b9f8995739874a8ce0492dc87873e2
+
+      # ── Python setup ──────────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install project dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r smart-kiosk-assistant/requirements.txt
+          pip install -r smart-kiosk-assistant/rag-service/requirements.txt
+
+      # ── Security & linting tools (mirrors loss-prevention reviewdog workflow) ─
+      - name: Install bandit and pycodestyle
+        run: |
+          pip install \
+            bandit==1.7.10 \
+            pycodestyle==2.12.1
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Install hadolint
+        env:
+          HADOLINT_VERSION: v1.16.3
+        run: |
+          mkdir -p ./bin
+          wget -q https://github.com/hadolint/hadolint/releases/download/${HADOLINT_VERSION}/hadolint-Linux-x86_64 \
+            -O ./bin/hadolint
+          chmod +x ./bin/hadolint
+          echo "$PWD/bin" >> "$GITHUB_PATH"
+
+      - name: Install Trivy
+        run: |
+          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" \
+            | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update -qq
+          sudo apt-get install -y trivy
+
+      - name: Install reviewdog
+        run: |
+          mkdir -p ./bin
+          curl -sfL https://raw.githubusercontent.com/reviewdog/reviewdog/master/install.sh \
+            | sh -s -- -b ./bin
+          echo "$PWD/bin" >> "$GITHUB_PATH"
+
+      # ── Docker (for image build/scan tasks) ───────────────────────────────────
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── Validate tool installations ───────────────────────────────────────────
+      - name: Verify tool versions
+        run: |
+          python --version
+          bandit --version
+          pycodestyle --version
+          shellcheck --version
+          hadolint --version
+          trivy --version
+          reviewdog -version
