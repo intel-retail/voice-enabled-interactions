@@ -1,7 +1,8 @@
 """MCP client — discovers tools on the kiosk-core MCP server and invokes them.
 
-Uses the official ``mcp`` Python library with SSE transport, which handles the
-MCP initialization handshake and message routing correctly.
+Uses the official ``mcp`` Python library with streamable-HTTP transport, which
+is the modern FastMCP transport (``http_app()``).  The URL is the bare endpoint
+returned by mounting ``mcp.http_app()`` — no ``/sse/`` suffix required.
 """
 
 from __future__ import annotations
@@ -92,14 +93,13 @@ def load_mcp_config(config_path: str) -> list[MCPServerConfig]:
 
 
 async def discover_tools(server: MCPServerConfig) -> list[MCPTool]:
-    """Discover available tools using the official mcp SSE client."""
-    from mcp.client.sse import sse_client
+    """Discover available tools using the official mcp streamable-HTTP client."""
+    from mcp.client.streamable_http import streamablehttp_client
     from mcp import ClientSession
 
-    sse_url = server.url.rstrip("/") + "/sse/"
     tools: list[MCPTool] = []
     try:
-        async with sse_client(sse_url) as (read, write):
+        async with streamablehttp_client(server.url) as (read, write, _):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 result = await session.list_tools()
@@ -132,13 +132,12 @@ async def call_tool(tool_name: str, arguments: dict[str, Any]) -> Any:
     if server is None:
         raise ValueError(f"MCP server not found: {tool.server}")
 
-    from mcp.client.sse import sse_client
+    from mcp.client.streamable_http import streamablehttp_client
     from mcp import ClientSession
 
-    sse_url = server.url.rstrip("/") + "/sse/"
     logger.info("[MCP] Calling tool=%s on server=%s args=%s", tool_name, tool.server, arguments)
     try:
-        async with sse_client(sse_url) as (read, write):
+        async with streamablehttp_client(server.url) as (read, write, _):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 result = await session.call_tool(tool_name, arguments)

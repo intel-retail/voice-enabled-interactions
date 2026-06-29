@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, AsyncExitStack
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -14,45 +14,55 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 
 logger = logging.getLogger(__name__)
 
+# Build the MCP http_app once at module level so its lifespan can be wired
+# into the FastAPI app's own lifespan below.
+_mcp_http_app = None
+if cfg.ORDERING_ENABLED:
+    from kiosk_core.ordering.mcp_server import mcp
+    _mcp_http_app = mcp.http_app()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # ── Ordering feature startup ─────────────────────────────────────────────
-    if cfg.ORDERING_ENABLED:
-        from kiosk_core.ordering.db import init_db
-        from kiosk_core.ordering.service import OrderingService
-        from kiosk_core.ordering.api import init_ordering_service
+    async with AsyncExitStack() as stack:
+        # ── Wire MCP http_app lifespan (required for streamable HTTP transport) ──
+        if _mcp_http_app is not None:
+            await stack.enter_async_context(_mcp_http_app.lifespan(_mcp_http_app))
 
-        await init_db(db_path=cfg.KIOSK_DB_PATH)
+        # ── Ordering feature startup ─────────────────────────────────────────
+        if cfg.ORDERING_ENABLED:
+            from kiosk_core.ordering.db import init_db
+            from kiosk_core.ordering.service import OrderingService
+            from kiosk_core.ordering.api import init_ordering_service
+            from kiosk_core.ordering.mcp_server import init_mcp_server
 
-        ordering_service = OrderingService(upsell_rules_path=cfg.UPSELL_RULES_YAML_PATH)
-        # Seed products (runs in threadpool to avoid blocking event loop)
-        seeded = await asyncio.get_event_loop().run_in_executor(
-            None, ordering_service.run_seed, cfg.PRODUCTS_YAML_PATH
-        )
-        logger.info("[STARTUP] Ordering DB ready — %d product(s) seeded", seeded)
+            await init_db(db_path=cfg.KIOSK_DB_PATH)
 
-        init_ordering_service(ordering_service)
+            ordering_service = OrderingService(upsell_rules_path=cfg.UPSELL_RULES_YAML_PATH)
+            seeded = await asyncio.get_event_loop().run_in_executor(
+                None, ordering_service.run_seed, cfg.PRODUCTS_YAML_PATH
+            )
+            logger.info("[STARTUP] Ordering DB ready — %d product(s) seeded", seeded)
 
-        # Mount MCP server for agent tool discovery
-        from kiosk_core.ordering.mcp_server import mcp, init_mcp_server
-        init_mcp_server(ordering_service)
-        app.mount("/mcp", mcp.sse_app())
-        logger.info("[STARTUP] MCP server mounted at /mcp (SSE) ✓")
-        logger.info("[STARTUP] Ordering feature enabled ✓")
-    else:
-        logger.info("[STARTUP] Ordering feature disabled (KIOSK_CORE_ORDERING_ENABLED=false)")
+            init_ordering_service(ordering_service)
+            init_mcp_server(ordering_service)
+            logger.info("[STARTUP] MCP server mounted at /mcp (streamable HTTP) ✓")
+            logger.info("[STARTUP] Ordering feature enabled ✓")
+        else:
+            logger.info("[STARTUP] Ordering feature disabled (KIOSK_CORE_ORDERING_ENABLED=false)")
 
-    yield  # application runs here
+        yield  # application runs
 
 
 app = FastAPI(title="kiosk-core", lifespan=lifespan)
 service = SessionService()
 
-# ── Ordering router ──────────────────────────────────────────────────────────
+# ── Ordering router + MCP mount ──────────────────────────────────────────────
 if cfg.ORDERING_ENABLED:
     from kiosk_core.ordering.api import router as ordering_router
     app.include_router(ordering_router)
+    if _mcp_http_app is not None:
+        app.mount("/mcp", _mcp_http_app)
 
 
 @app.get("/health")

@@ -86,13 +86,16 @@ class OrderingAgent:
         """Initialise the ADK model, MCP tools, and runner.
 
         Safe to call multiple times — subsequent calls are no-ops.
+        MCP tool discovery may silently return 0 tools if kiosk-core is not
+        yet ready; ``chat()`` will trigger re-discovery automatically.
         """
         if self._bootstrapped:
             return
 
         logger.info("[AGENT] Bootstrapping OrderingAgent …")
 
-        # 1. Discover MCP tools from kiosk-core
+        # 1. Discover MCP tools from kiosk-core (best-effort at startup;
+        #    will be retried on first chat() call if kiosk-core isn't ready yet)
         mcp_tools = await bootstrap_mcp_tools(agent_cfg.MCP_CONFIG_PATH)
         logger.info("[AGENT] MCP tools: %s", list(mcp_tools))
 
@@ -123,6 +126,44 @@ class OrderingAgent:
 
         self._bootstrapped = True
         logger.info("[AGENT] OrderingAgent ready ✓")
+
+    async def _refresh_mcp_tools(self) -> None:
+        """Re-discover MCP tools and rebuild the agent if tools are missing.
+
+        Called automatically from ``chat()`` when no MCP tools are registered —
+        this recovers from the startup race where rag-service starts before
+        kiosk-core, as well as from kiosk-core restarts mid-session.
+        """
+        if get_all_tools():
+            return  # already have tools, nothing to do
+
+        logger.info("[AGENT] No MCP tools registered — retrying discovery from kiosk-core …")
+        mcp_tools = await bootstrap_mcp_tools(agent_cfg.MCP_CONFIG_PATH)
+        if not mcp_tools:
+            logger.warning("[AGENT] MCP re-discovery returned 0 tools — kiosk-core may still be starting")
+            return
+
+        logger.info("[AGENT] MCP re-discovery succeeded: %s", list(mcp_tools))
+
+        # Rebuild the agent with the newly discovered tools
+        from google.adk.agents import LlmAgent
+        from google.adk.tools import FunctionTool
+
+        adk_tools = [FunctionTool(knowledge_lookup)]
+        for tool_name, mcp_tool in mcp_tools.items():
+            adk_tools.append(FunctionTool(self._make_mcp_callable(tool_name, mcp_tool)))
+
+        model = create_adk_model()
+        self._agent = LlmAgent(
+            name="kiosk_ordering_agent",
+            model=model,
+            description="Kiosk ordering assistant — handles menu Q&A and order management",
+            instruction=_AGENT_INSTRUCTION,
+            tools=adk_tools,
+        )
+        self._session_service = create_session_service()
+        self._runner = create_runner(self._agent, self._session_service)
+        logger.info("[AGENT] Agent rebuilt with %d MCP tool(s) ✓", len(mcp_tools))
 
     @staticmethod
     def _make_mcp_callable(tool_name: str, mcp_tool: MCPTool):
@@ -164,6 +205,10 @@ class OrderingAgent:
         """
         if not self._bootstrapped:
             await self.bootstrap()
+
+        # If MCP tools weren't available at startup (race with kiosk-core),
+        # attempt re-discovery before this turn so ordering tools work.
+        await self._refresh_mcp_tools()
 
         logger.info("[AGENT] chat session=%s user=%s message=%r", session_id, user_id, message[:120])
 
