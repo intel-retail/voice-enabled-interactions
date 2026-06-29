@@ -187,6 +187,16 @@ download_ovms_model() {
     check_memory
     ensure_venv
 
+    # Ensure the target directory is writable by the current user.
+    # The models/ tree may be owned by uid 5000 (OVMS container user) from
+    # a previous run; use a minimal Docker container to fix permissions without sudo.
+    if [ -d "${MODELS_DIR}" ]; then
+        docker run --rm \
+          -v "${MODELS_DIR}:/models" \
+          alpine sh -c "chmod -R 777 /models" 2>/dev/null || true
+    fi
+    mkdir -p "${target_path}"
+
     echo "  Downloading ${OVMS_SOURCE_MODEL} from HuggingFace..."
     echo "  Target: ${target_path}"
     echo "  (INT${OVMS_QUANT^^} pre-converted OpenVINO model, ~$([ "$OVMS_QUANT" = "int4" ] && echo "2 GB" || echo "4 GB"))"
@@ -202,12 +212,14 @@ download_ovms_model() {
     "${VENV_DIR}/bin/hf" download \
         "${OVMS_SOURCE_MODEL}" \
         --local-dir "${target_path}" \
-        --local-dir-use-symlinks False \
         ${hf_token_arg}
 
     if check_ovms_model "${target_path}"; then
         echo ""
         echo "  ✓ ${OVMS_SOURCE_MODEL} downloaded successfully"
+        # Ensure OVMS (uid 5000) can read all model files
+        docker run --rm -v "${MODELS_DIR}:/models" alpine \
+            sh -c "chown -R 5000:5000 /models/OpenVINO && chmod -R 755 /models/OpenVINO" 2>/dev/null || true
     else
         echo "  ✗ Download failed or model files are missing"
         echo "    Check ${target_path}"
