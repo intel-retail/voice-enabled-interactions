@@ -5,9 +5,10 @@ import type { Order, UpsellSuggestion } from '../types';
 export async function fetchCurrentOrder(userId: string): Promise<Order | null> {
   try {
     const res = await fetch(endpoints.currentOrder(userId), { signal: AbortSignal.timeout(4000) });
-    if (res.status === 404) return null;
     if (!res.ok) return null;
-    return await res.json();
+    // Backend returns JSON null (200) when no draft order exists.
+    const data: Order | null = await res.json();
+    return data ?? null;
   } catch {
     return null;
   }

@@ -12,6 +12,11 @@ const formatCurrency = (value: number | undefined): string => `$${(value ?? 0).t
 
 const formatOrderId = (orderId: number): string => `ORD-${String(orderId).padStart(5, '0')}`;
 
+// Poll quickly during an active ordering session; fall back to the same cadence
+// as the performance dashboard so we don't spam the backend when idle.
+const ACTIVE_POLL_MS = 2000;
+const IDLE_POLL_MS = tuning.perfRefreshMs; // 10 s
+
 export function OrderPanel({ active }: OrderPanelProps) {
   const [order, setOrder] = useState<Order | null>(null);
   const [suggestions, setSuggestions] = useState<UpsellSuggestion[]>([]);
@@ -33,29 +38,21 @@ export function OrderPanel({ active }: OrderPanelProps) {
     }
   }, []);
 
+  // Single interval whose cadence adapts to the active state.
+  // Replaces the previous two-interval bug that caused overlapping polls.
   useEffect(() => {
     mountedRef.current = true;
     void loadOrder();
 
+    const intervalMs = active ? ACTIVE_POLL_MS : IDLE_POLL_MS;
     const intervalId = window.setInterval(() => {
       void loadOrder();
-    }, 3000);
+    }, intervalMs);
 
     return () => {
       mountedRef.current = false;
       window.clearInterval(intervalId);
     };
-  }, [loadOrder]);
-
-  useEffect(() => {
-    if (!active) return undefined;
-
-    void loadOrder();
-    const intervalId = window.setInterval(() => {
-      void loadOrder();
-    }, tuning.pollIntervalMs);
-
-    return () => window.clearInterval(intervalId);
   }, [active, loadOrder]);
 
   const visibleSuggestions = useMemo(() => suggestions.slice(0, 3), [suggestions]);

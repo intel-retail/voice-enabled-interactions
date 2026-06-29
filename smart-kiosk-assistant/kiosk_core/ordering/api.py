@@ -101,14 +101,20 @@ async def get_order(order_id: int, service: ServiceDep) -> Order:
     return order
 
 
-@router.get("/users/{user_id}/orders/current", response_model=Order, summary="Get current draft order")
-async def get_current_order(user_id: str, service: ServiceDep) -> Order:
-    """Retrieve the latest draft order for a user."""
-    logger.info("[ORDERING-API] GET /users/%s/orders/current", user_id)
-    order = await service.get_current_order(user_id)
-    if order is None:
-        raise HTTPException(status_code=404, detail=f"No active order for user: {user_id}")
-    return order
+@router.get(
+    "/users/{user_id}/orders/current",
+    response_model=Order | None,
+    summary="Get current draft order",
+)
+async def get_current_order(user_id: str, service: ServiceDep) -> Order | None:
+    """Retrieve the latest draft order for a user.
+
+    Returns the order object when one exists, or ``null`` (HTTP 200) when the
+    user has no active draft.  Callers should treat a ``null`` response as
+    "no order yet" rather than an error.
+    """
+    logger.debug("[ORDERING-API] GET /users/%s/orders/current", user_id)
+    return await service.get_current_order(user_id)
 
 
 @router.patch("/orders/{order_id}/items", response_model=Order, summary="Update order items")

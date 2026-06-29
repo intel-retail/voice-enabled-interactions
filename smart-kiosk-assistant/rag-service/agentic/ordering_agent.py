@@ -208,6 +208,23 @@ class OrderingAgent:
             return {"reply": "Sorry, I encountered an error. Please try again.", "tool_calls": []}
 
         reply = "".join(reply_parts).strip()
+
+        # Qwen3 models output chain-of-thought thinking before the final response.
+        # Strip everything before the last double-newline that separates thinking
+        # from the actual reply, so TTS and the UI get clean text only.
+        if "\n\n" in reply:
+            # Find last paragraph that looks like the final answer
+            # (thinking blocks tend to be long reasoning chains ending with a blank line)
+            parts = [p.strip() for p in reply.split("\n\n") if p.strip()]
+            # Keep the last block if it looks like a user-facing answer (shorter, no "I need to")
+            if len(parts) > 1:
+                last_part = parts[-1]
+                if not last_part.lower().startswith(("okay,", "alright,", "the user", "i need to", "i should")):
+                    reply = last_part
+                else:
+                    # All looks like thinking — return as-is but log a warning
+                    logger.warning("[AGENT] Reply may contain unstripped thinking (%d chars)", len(reply))
+
         logger.info("[AGENT] Reply length=%d tool_calls=%s", len(reply), tool_calls)
         return {"reply": reply, "tool_calls": tool_calls}
 

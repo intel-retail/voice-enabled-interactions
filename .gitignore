@@ -1,2 +1,15 @@
 smart-kiosk-assistant/rag-service/.venv
 .github/copilot-instructions.md
+
+# Local-only MCP config (contains credentials — do not commit)
+.mcp.json
+
+# Secrets — never commit
+smart-kiosk-assistant/.env
+
+# Runtime-generated metrics logs
+smart-kiosk-assistant/metrics/
+
+# Model files and setup virtualenv (large / local only)
+smart-kiosk-assistant/models/
+smart-kiosk-assistant/.setup-venv/

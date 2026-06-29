@@ -12,9 +12,9 @@ models:
     weight_format: null # OpenVINO: int8 | fp16 | null. whispercpp: null | q5 | q5_0 | q5_1 | q8 | q8_0 | int5 | int8
     temperature: 0.0
     diarization: True         # set True to enable pyannote speaker diarization
-    hf_token: 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            # REQUIRED when diarization=True — set your Hugging Face token here
-                              # e.g. hf_token: "hf_xxxxxxxxxxxxxxxxxxxx"
-                              # or leave None and export HF_TOKEN env var in docker-compose.yml
+    hf_token: null                # Set HF_TOKEN in .env — passed via docker-compose environment.
+                              # The audio-analyzer service reads HF_TOKEN env var automatically
+                              # when hf_token is null. See docker-compose.yml audio-analyzer.environment.
     models_base_path: "models"
 
     # Hallucination filtering — openai provider uses native no_speech_prob/avg_logprob.

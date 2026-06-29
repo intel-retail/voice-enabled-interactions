@@ -60,7 +60,7 @@ export function PerformanceDashboard({
   const [activeTab, setActiveTab] = useState<Tab>('performance');
 
   return (
-    <aside className="flex h-full flex-col overflow-hidden rounded-xl border border-gray-200 bg-gray-50 shadow-sm">
+    <aside className="flex flex-col overflow-hidden rounded-xl border border-gray-200 bg-gray-50 shadow-sm min-h-[360px] lg:min-h-0 lg:h-full w-full">
       {/* ── Tab bar ─────────────────────────────────────────────────────────── */}
       <div className="flex shrink-0 border-b border-gray-200 bg-white">
         {(
@@ -90,7 +90,7 @@ export function PerformanceDashboard({
       </div>
 
       {/* ── Scrollable body ─────────────────────────────────────────────────── */}
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 overflow-y-auto overscroll-contain">
         {activeTab === 'performance' && (
           <div className="space-y-5 p-4">
             {/* AI Pipeline */}

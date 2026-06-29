@@ -115,7 +115,7 @@ function HardwareChart({ label, deviceTag, points, stroke, fill, fillOpacity = 0
               </defs>
               <CartesianGrid
                 strokeDasharray="3 3"
-                stroke="#334155"
+                stroke="#e2e8f0"
                 vertical={false}
               />
               <ReferenceLine y={90} stroke="#ef444460" strokeDasharray="4 2" strokeWidth={1} />

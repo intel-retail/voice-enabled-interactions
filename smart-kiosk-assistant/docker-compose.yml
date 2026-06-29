@@ -77,6 +77,9 @@ services:
       # ./.cache mount persists every model cache the service uses
       # (huggingface, openai-whisper, torch hub, etc.).
       HF_HOME: /app/audio_analyzer/.cache/huggingface
+      # HuggingFace token — required by Pyannote speaker diarization.
+      # Set HF_TOKEN in .env (single source of truth).
+      HF_TOKEN: ${HF_TOKEN:-}
     volumes:
       # Kiosk-pinned config (see ./configs/README.md) — mounted as the
       # service config without modifying edge-ai-libraries.
@@ -162,8 +165,13 @@ services:
       MPLCONFIGDIR: /tmp/matplotlib
       # Agent LLM — points at the OVMS container
       AGENT_LLM_URL:   http://ovms-llm:8000/v3
-      AGENT_LLM_MODEL: ${OVMS_MODEL_NAME:-Qwen3-4B}
-      AGENT_MCP_CONFIG: /app/agentic/resources/mcp_servers.json
+      AGENT_LLM_MODEL: ${OVMS_MODEL_NAME:-OpenVINO/Qwen3-4B-int4-ov}
+      AGENT_MCP_CONFIG: /app/rag-service/agentic/resources/mcp_servers.json
+      # Bypass corporate proxy for all intra-cluster traffic so that
+      # requests to ovms-llm, kiosk-core, etc. go directly on the
+      # Docker bridge network instead of through the Intel proxy.
+      NO_PROXY: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,172.16.0.0/12,10.0.0.0/8"
+      no_proxy: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,172.16.0.0/12,10.0.0.0/8"
     volumes:
       - rag_service_models:/app/rag-service/models
       - rag_service_storage:/app/rag-service/storage
@@ -179,31 +187,53 @@ services:
       retries: 10
     restart: unless-stopped
 
-  # OVMS — serves Qwen3-4B for both the ordering agent (ADK→LiteLlm→OVMS)
-  # and the RAG pipeline (after llm_service refactor).
-  # Model must be downloaded into the ovms_models volume before first run.
-  # Set OVMS_MODEL_NAME in your .env file to match the model directory name.
+  # OVMS — serves Qwen3-4B-int4-ov for the ordering agent (ADK → LiteLLM → OVMS).
+  #
+  # Uses OVMS pull mode: if ./models/OpenVINO/Qwen3-4B-int4-ov/ is present
+  # (pre-downloaded by setup_models.sh) the model loads from disk; otherwise
+  # OVMS pulls it from HuggingFace on first start.
+  #
+  # Pre-download recommended:
+  #   ./setup_models.sh            # GPU (default)
+  #   ./setup_models.sh --device CPU
+  #
+  # Why OpenVINO/Qwen3-4B-int4-ov + hermes3?
+  #   Pre-converted INT4 (~2 GB) with native tool-calling support per
+  #   https://docs.openvino.ai/2026/model-server/ovms_demos_continuous_batching_agent.html
   ovms-llm:
-    image: openvino/model_server:latest
+    image: openvino/model_server:latest-gpu
     container_name: ovms-llm
     ports:
       - "9001:9000"  # gRPC (host 9001 avoids conflict with metrics-collector:9000)
       - "8000:8000"  # REST / OpenAI-compatible /v3
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - "${RENDER_GID:-992}"
     volumes:
-      - ovms_models:/models
+      # Bind-mount pre-downloaded models directory (populated by setup_models.sh).
+      # OVMS will pull from HuggingFace on first run if the directory is empty.
+      - ./models:/models
+      # OpenVINO compilation cache — avoids re-compiling IR on every startup
+      - ovms_ov_cache:/tmp/ov_cache
+    environment:
+      OV_CACHE_DIR: /tmp/ov_cache
     command: >
-      --model_name ${OVMS_MODEL_NAME:-Qwen3-4B}
-      --model_path /models/${OVMS_MODEL_NAME:-Qwen3-4B}
-      --port 9000
       --rest_port 8000
-      --target_device CPU
-      --plugin_config '{"NUM_STREAMS": 1}'
+      --port 9000
+      --source_model ${OVMS_MODEL_NAME:-OpenVINO/Qwen3-4B-int4-ov}
+      --model_repository_path /models
+      --task text_generation
+      --tool_parser hermes3
+      --target_device ${TARGET_DEVICE:-GPU}
+      --cache_dir /tmp/ov_cache
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/v3/models"]
       interval: 20s
       timeout: 10s
-      start_period: 120s
-      retries: 6
+      start_period: 300s
+      retries: 10
     restart: unless-stopped
 
   kiosk-core:
@@ -226,6 +256,9 @@ services:
       KIOSK_CORE_DB_PATH:          /app/data/kiosk.db
       KIOSK_CORE_PRODUCTS_YAML:    /app/configs/ordering/products.yaml
       KIOSK_CORE_UPSELL_RULES_YAML: /app/configs/ordering/upsell_rules.yaml
+      # Bypass corporate proxy for intra-cluster traffic
+      NO_PROXY: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,172.16.0.0/12,10.0.0.0/8"
+      no_proxy: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,172.16.0.0/12,10.0.0.0/8"
     volumes:
       - generated_audio:/app/generated_audio
       - kiosk_db:/app/data
@@ -272,4 +305,5 @@ volumes:
   rag_service_storage:
   rag_service_hf_cache:
   kiosk_db:
-  ovms_models:
+  # OpenVINO compilation cache for ovms-llm — avoids re-compiling model IR on restart
+  ovms_ov_cache:

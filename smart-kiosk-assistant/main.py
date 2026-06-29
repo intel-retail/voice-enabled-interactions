@@ -38,7 +38,7 @@ async def lifespan(app: FastAPI):
         from kiosk_core.ordering.mcp_server import mcp, init_mcp_server
         init_mcp_server(ordering_service)
         app.mount("/mcp", mcp.sse_app())
-        logger.info("[STARTUP] MCP server mounted at /mcp ✓")
+        logger.info("[STARTUP] MCP server mounted at /mcp (SSE) ✓")
         logger.info("[STARTUP] Ordering feature enabled ✓")
     else:
         logger.info("[STARTUP] Ordering feature disabled (KIOSK_CORE_ORDERING_ENABLED=false)")
