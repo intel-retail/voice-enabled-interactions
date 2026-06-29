@@ -131,29 +131,62 @@ setup-models: ## Download the OVMS LLM model (Qwen3-4B) via setup_models.sh
 	fi
 	@echo "$(GREEN)✓ Model download complete$(NC)"
 
-check-env: ## Validate .env and required variables
-	@echo "$(BLUE)Checking environment...$(NC)"
-	@if [ ! -f .env ]; then \
-		echo "$(YELLOW)  Warning: .env not found. Run 'make init-env' first.$(NC)"; \
-	fi
-	@if [ -z "$(HF_TOKEN)" ]; then \
-		echo "$(RED)  Error: HF_TOKEN is not set. Add it to .env$(NC)"; \
-		echo "  Get yours at: https://huggingface.co/settings/tokens"; \
+check-env: ## Validate .env and all required variables before running the stack
+	@echo "$(BLUE)Validating environment...$(NC)"
+	@ERRORS=0; \
+	\
+	if [ ! -f .env ]; then \
+		echo "  $(RED)✗ .env not found$(NC)  →  run 'make init-env' first"; \
+		ERRORS=$$((ERRORS+1)); \
+	else \
+		echo "  $(GREEN)✓ .env present$(NC)"; \
+	fi; \
+	\
+	if [ -z "$(HF_TOKEN)" ]; then \
+		echo "  $(RED)✗ HF_TOKEN is not set$(NC)"; \
+		echo "    Set it in .env  →  https://huggingface.co/settings/tokens"; \
+		ERRORS=$$((ERRORS+1)); \
+	else \
+		echo "  $(GREEN)✓ HF_TOKEN is set$(NC)"; \
+	fi; \
+	\
+	if [ "$(TARGET_DEVICE)" != "CPU" ] && [ "$(TARGET_DEVICE)" != "GPU" ] && [ "$(TARGET_DEVICE)" != "NPU" ]; then \
+		echo "  $(RED)✗ TARGET_DEVICE='$(TARGET_DEVICE)' is invalid$(NC)  (must be CPU | GPU | NPU)"; \
+		ERRORS=$$((ERRORS+1)); \
+	else \
+		echo "  $(GREEN)✓ TARGET_DEVICE=$(TARGET_DEVICE)$(NC)"; \
+	fi; \
+	\
+	if [ "$(TARGET_DEVICE)" = "GPU" ]; then \
+		if [ -z "$(RENDER_GID)" ]; then \
+			echo "  $(RED)✗ RENDER_GID is not set$(NC)  (required for GPU access inside containers)"; \
+			echo "    Run: getent group render | cut -d: -f3  then add RENDER_GID=<value> to .env"; \
+			ERRORS=$$((ERRORS+1)); \
+		else \
+			echo "  $(GREEN)✓ RENDER_GID=$(RENDER_GID)$(NC)"; \
+		fi; \
+		if [ -z "$$(ls /dev/dri/renderD* 2>/dev/null)" ]; then \
+			echo "  $(YELLOW)⚠ TARGET_DEVICE=GPU but no /dev/dri/renderD* device found$(NC)"; \
+			echo "    Install Intel GPU drivers or set TARGET_DEVICE=CPU in .env"; \
+		else \
+			echo "  $(GREEN)✓ GPU device node found$(NC) ($$(ls /dev/dri/renderD* 2>/dev/null | head -1))"; \
+		fi; \
+	fi; \
+	\
+	if [ ! -d models/$(OVMS_MODEL_NAME) ]; then \
+		echo "  $(YELLOW)⚠ OVMS model not found at models/$(OVMS_MODEL_NAME)$(NC)"; \
+		echo "    Run 'make setup-models' before 'make up' (first time only)"; \
+	else \
+		echo "  $(GREEN)✓ OVMS model present$(NC) (models/$(OVMS_MODEL_NAME))"; \
+	fi; \
+	\
+	echo ""; \
+	if [ $$ERRORS -gt 0 ]; then \
+		echo "$(RED)✗ Environment check failed — fix the errors above before proceeding.$(NC)"; \
 		exit 1; \
+	else \
+		echo "$(GREEN)✓ Environment OK$(NC)"; \
 	fi
-	@if [ "$(TARGET_DEVICE)" != "CPU" ] && [ "$(TARGET_DEVICE)" != "GPU" ] && [ "$(TARGET_DEVICE)" != "NPU" ]; then \
-		echo "$(RED)  Error: TARGET_DEVICE must be CPU, GPU, or NPU (got: $(TARGET_DEVICE))$(NC)"; \
-		exit 1; \
-	fi
-	@if [ "$(TARGET_DEVICE)" = "GPU" ] && [ ! -e /dev/dri/renderD128 ] && [ -z "$$(ls /dev/dri/renderD* 2>/dev/null)" ]; then \
-		echo "$(YELLOW)  Warning: TARGET_DEVICE=GPU but no /dev/dri/renderD* device found.$(NC)"; \
-		echo "  Install Intel GPU drivers or set TARGET_DEVICE=CPU in .env."; \
-	fi
-	@if [ ! -d models/$(OVMS_MODEL_NAME) ]; then \
-		echo "$(YELLOW)  Warning: OVMS model not found at models/$(OVMS_MODEL_NAME)$(NC)"; \
-		echo "  Run 'make setup-models' to download it before 'make up'."; \
-	fi
-	@echo "$(GREEN)✓ Environment OK$(NC)"
 
 show-config: ## Print resolved configuration
 	@echo "$(BLUE)Current Configuration:$(NC)"
