@@ -90,6 +90,42 @@ async def _attach_upsell(order_result: dict[str, Any]) -> dict[str, Any]:
     return order_result
 
 
+async def _resolve_items(
+    items: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None]:
+    """Resolve order item references to canonical product_ids.
+
+    Each incoming item may carry the product reference under ``product_id``,
+    ``name``, or ``product`` — and that reference may be a real id, a spoken
+    name, or a value the LLM fabricated. Every reference is resolved against
+    the catalogue via OrderingService.resolve_product so a wrong-format id no
+    longer fails the order.
+
+    Returns:
+        (resolved_items, None) on success, where resolved_items is a list of
+        {product_id, quantity} using real catalogue ids; or (None, error) where
+        error is a structured dict with the unresolved reference and a grounded
+        ``available_products`` list the agent can offer instead of guessing.
+    """
+    resolved: list[dict[str, Any]] = []
+    for it in items:
+        ref = it.get("product_id") or it.get("name") or it.get("product") or ""
+        qty = it.get("quantity", 1)
+        product = await _svc().resolve_product(ref)
+        if product is None:
+            suggestions = await _svc().suggest_products(ref)
+            logger.warning("[MCP-SERVER] could not resolve product reference '%s'", ref)
+            return None, {
+                "error": f"No product matches '{ref}'. Do not invent one — offer the customer an item from available_products.",
+                "available_products": [
+                    {"product_id": p.product_id, "name": p.name, "price": p.price}
+                    for p in suggestions
+                ],
+            }
+        resolved.append({"product_id": product.product_id, "quantity": qty})
+    return resolved, None
+
+
 # ---------------------------------------------------------------------------
 # Tool definitions
 # ---------------------------------------------------------------------------
@@ -117,16 +153,21 @@ async def place_order(user_id: str, items: list[dict[str, Any]]) -> dict[str, An
 
     Args:
         user_id: Customer identifier (use "anonymous" if unknown).
-        items: List of {product_id: str, quantity: int} dicts.
+        items: List of {product_id, quantity} dicts. product_id may be either a
+            catalogue id from list_products OR a plain product name (e.g.
+            "Classic Chicken Burger") — the server resolves it to the real item.
 
     Returns:
-        The created order with order_id, items, total, and status="draft",
-        or an error dict if a product_id is not found in the catalogue.
+        The created order with order_id, items, total, and status="draft", or an
+        error dict with ``available_products`` if a reference cannot be matched.
     """
     from kiosk_core.ordering.models import CreateOrderRequest, OrderItemIn
 
+    resolved, err = await _resolve_items(items)
+    if err is not None:
+        return err
     try:
-        item_list = [OrderItemIn(**i) for i in items]
+        item_list = [OrderItemIn(**i) for i in resolved]
         req = CreateOrderRequest(user_id=user_id, items=item_list)
         order = await _svc().place_order(req)
         logger.info("[MCP-SERVER] place_order user=%s order_id=%d total=%.2f", user_id, order.order_id, order.total)
@@ -142,15 +183,20 @@ async def update_order(order_id: int, items: list[dict[str, Any]]) -> dict[str, 
 
     Args:
         order_id: The order to update.
-        items: List of {product_id: str, quantity: int} dicts to add.
+        items: List of {product_id, quantity} dicts to add. product_id may be a
+            catalogue id OR a plain product name — the server resolves it.
 
     Returns:
-        Updated order with new items and recalculated total, or an error dict.
+        Updated order with new items and recalculated total, or an error dict
+        with ``available_products`` if a reference cannot be matched.
     """
     from kiosk_core.ordering.models import OrderItemIn
 
+    resolved, err = await _resolve_items(items)
+    if err is not None:
+        return err
     try:
-        item_list = [OrderItemIn(**i) for i in items]
+        item_list = [OrderItemIn(**i) for i in resolved]
         order = await _svc().update_order_items(order_id, item_list)
         logger.info("[MCP-SERVER] update_order order_id=%d new_total=%.2f", order_id, order.total)
         return await _attach_upsell(order.model_dump(mode="json"))
