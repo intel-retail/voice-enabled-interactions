@@ -1,0 +1,44 @@
+description,status
+tests > functional > api > TestHealthEndpoint > health returns 200,PASS
+tests > functional > api > TestHealthEndpoint > health returns ok status,PASS
+tests > functional > api > TestHealthEndpoint > health content type is json,PASS
+tests > functional > api > TestDeviceEndpoint > devices returns 200,PASS
+tests > functional > api > TestDeviceEndpoint > devices response has devices key,PASS
+tests > functional > api > TestDeviceEndpoint > devices returns list,PASS
+tests > functional > api > TestDeviceEndpoint > devices each entry has required fields,PASS
+tests > functional > api > TestSessionListing > list sessions returns 200,PASS
+tests > functional > api > TestSessionListing > list sessions has sessions key,PASS
+tests > functional > api > TestSessionListing > list sessions returns list,PASS
+tests > functional > api > TestSessionNotFound > get unknown session returns 404,PASS
+tests > functional > api > TestSessionNotFound > stop unknown session returns 404,PASS
+tests > functional > api > TestSessionNotFound > audio end on unknown session returns 404,PASS
+tests > functional > api > TestEmptyAudioRejection > push empty audio to unknown session returns 404,PASS
+tests > functional > api > TestEmptyAudioRejection > push empty audio body rejected,PASS
+tests > functional > api > TestSessionConflict > second stream session returns 409,PASS
+tests > functional > api > TestSessionConflict > conflict response contains detail,PASS
+tests > functional > api > TestConversationHistory > session start accepts history field,PASS
+tests > functional > api > TestConversationHistory > session start accepts empty history,PASS
+tests > functional > api > TestConversationHistory > start stream endpoint accepts history in payload,PASS
+tests > functional > ordering > TestOrderingProducts > products returns non empty list with expected schema,PASS
+tests > functional > ordering > TestOrderingProducts > products category filter returns only matching category,PASS
+tests > functional > ordering > TestOrderingProducts > get product returns known product and unknown product 404,PASS
+tests > functional > ordering > TestOrderingLifecycle > full order lifecycle computes totals and confirms,PASS
+tests > functional > ordering > TestOrderingLifecycle > current draft returns 404 for user without orders,PASS
+tests > functional > ordering > TestOrderingUpsell > upsell returns configured suggestions for burger cart,PASS
+tests > functional > ordering > TestOrderingUpsell > upsell returns empty list for empty or irrelevant cart,PASS
+tests > functional > ordering > TestOrderingSeed > app startup seed is idempotent for same database,PASS
+tests > functional > structure > TestRepositoryClone > readme present,PASS
+tests > functional > structure > TestRepositoryClone > dockerfile present,PASS
+tests > functional > structure > TestRepositoryClone > docker compose present,PASS
+tests > functional > structure > TestRepositoryClone > requirements present,PASS
+tests > functional > structure > TestRepositoryClone > main entrypoint present,PASS
+tests > functional > structure > TestProjectStructure > kiosk core package present,PASS
+tests > functional > structure > TestProjectStructure > docs directory present,PASS
+tests > functional > structure > TestProjectStructure > rag service present,PASS
+tests > functional > structure > TestProjectStructure > configs directory present,PASS
+tests > functional > structure > TestProjectStructure > metrics collector present,PASS
+tests > functional > structure > TestProjectStructure > kiosk core service module present,PASS
+tests > functional > structure > TestProjectStructure > kiosk core models module present,PASS
+tests > functional > structure > TestProjectStructure > kiosk core config module present,PASS
+tests > functional > structure > TestProjectStructure > docker compose references kiosk core service,PASS
+tests > functional > structure > TestProjectStructure > docker compose kiosk core exposes port 8012,PASS

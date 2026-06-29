@@ -1,0 +1,70 @@
+# Upsell Rules — QuickBite Express
+# Defines complementary product pairings used by the AI ordering agent
+# for cross-sell/upsell suggestions.
+#
+# Rule structure:
+#   trigger_product_ids: list of product IDs that activate this rule  (optional)
+#   trigger_categories:  list of categories that activate this rule   (optional)
+#   suggest_product_ids: list of products to suggest                  (required)
+#   reason:              human-readable rationale shown to the user   (required)
+#
+# At least one of trigger_product_ids or trigger_categories must be set.
+
+rules:
+  # Burger → drink pairing
+  - trigger_categories:
+      - burgers
+    suggest_product_ids:
+      - DRINK-001
+      - DRINK-002
+    reason: "Customers love pairing a cold drink with their burger!"
+
+  # Burger → fries upsell
+  - trigger_categories:
+      - burgers
+    suggest_product_ids:
+      - SIDE-001
+      - SIDE-002
+    reason: "Add fries to complete your meal?"
+
+  # Pizza → drink pairing
+  - trigger_categories:
+      - pizza
+    suggest_product_ids:
+      - DRINK-001
+      - DRINK-003
+    reason: "A refreshing drink goes perfectly with pizza!"
+
+  # Pizza → garlic bread
+  - trigger_categories:
+      - pizza
+    suggest_product_ids:
+      - SIDE-004
+    reason: "Garlic bread is a classic pizza companion."
+
+  # Wrap → fries or drink
+  - trigger_categories:
+      - wraps
+    suggest_product_ids:
+      - SIDE-001
+      - DRINK-005
+    reason: "Round off your wrap with fries or a fresh lime soda!"
+
+  # Any order → dessert nudge (triggered on specific bestsellers)
+  - trigger_product_ids:
+      - BURGER-VEG-001
+      - BURGER-NV-001
+      - PIZZA-NV-002
+      - BURGER-NV-003
+    suggest_product_ids:
+      - DESSERT-001
+      - DESSERT-002
+    reason: "Leave room for dessert — our brownies and soft serve are must-tries!"
+
+  # Cold coffee with any burger/pizza
+  - trigger_categories:
+      - burgers
+      - pizza
+    suggest_product_ids:
+      - DRINK-004
+    reason: "Try our Cold Coffee for a perfect finish!"

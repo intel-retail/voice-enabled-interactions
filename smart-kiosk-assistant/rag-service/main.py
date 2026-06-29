@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.custom_endpoints import router as custom_router
 from api.openai_endpoints import router as openai_router
+from api.agent_endpoints import router as agent_router
 from pipeline import close_shared_pipeline
 from utils.config_loader import config
 from utils.ensure_model import ensure_model
@@ -22,6 +23,16 @@ async def lifespan(app: FastAPI):
     ensure_model()
     preload_models()
     logger.info("smart-kiosk-assistant rag-service initialized")
+
+    # Bootstrap the ordering agent (discovers MCP tools from kiosk-core)
+    try:
+        from agentic.ordering_agent import get_ordering_agent
+        agent = get_ordering_agent()
+        await agent.bootstrap()
+        logger.info("[STARTUP] OrderingAgent bootstrapped ✓")
+    except Exception as exc:
+        logger.warning("[STARTUP] OrderingAgent bootstrap failed (non-fatal): %s", exc)
+
     try:
         yield
     finally:
@@ -40,6 +51,7 @@ app.add_middleware(
 
 app.include_router(openai_router)
 app.include_router(custom_router)
+app.include_router(agent_router)
 
 
 if __name__ == "__main__":

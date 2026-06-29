@@ -1,11 +1,58 @@
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+from pathlib import Path
 
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
+
+from kiosk_core import config as cfg
 from kiosk_core.models import FileSessionStartRequest, SessionStartRequest, SessionStopResponse
 from kiosk_core.service import SessionService
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
-app = FastAPI(title="kiosk-core")
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # ── Ordering feature startup ─────────────────────────────────────────────
+    if cfg.ORDERING_ENABLED:
+        from kiosk_core.ordering.db import init_db
+        from kiosk_core.ordering.service import OrderingService
+        from kiosk_core.ordering.api import init_ordering_service
+
+        await init_db(db_path=cfg.KIOSK_DB_PATH)
+
+        ordering_service = OrderingService(upsell_rules_path=cfg.UPSELL_RULES_YAML_PATH)
+        # Seed products (runs in threadpool to avoid blocking event loop)
+        seeded = await asyncio.get_event_loop().run_in_executor(
+            None, ordering_service.run_seed, cfg.PRODUCTS_YAML_PATH
+        )
+        logger.info("[STARTUP] Ordering DB ready — %d product(s) seeded", seeded)
+
+        init_ordering_service(ordering_service)
+
+        # Mount MCP server for agent tool discovery
+        from kiosk_core.ordering.mcp_server import mcp, init_mcp_server
+        init_mcp_server(ordering_service)
+        app.mount("/mcp", mcp.sse_app())
+        logger.info("[STARTUP] MCP server mounted at /mcp ✓")
+        logger.info("[STARTUP] Ordering feature enabled ✓")
+    else:
+        logger.info("[STARTUP] Ordering feature disabled (KIOSK_CORE_ORDERING_ENABLED=false)")
+
+    yield  # application runs here
+
+
+app = FastAPI(title="kiosk-core", lifespan=lifespan)
 service = SessionService()
+
+# ── Ordering router ──────────────────────────────────────────────────────────
+if cfg.ORDERING_ENABLED:
+    from kiosk_core.ordering.api import router as ordering_router
+    app.include_router(ordering_router)
 
 
 @app.get("/health")
@@ -129,6 +176,26 @@ def stop_session(session_id: str) -> SessionStopResponse:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/sessions/{session_id}/audio/{filename}")
+def get_session_audio(session_id: str, filename: str) -> FileResponse:
+    """Serve a generated TTS WAV audio file for a session."""
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid audio filename")
+
+    session_dir = (Path(__file__).resolve().parent / "generated_audio" / session_id).resolve()
+    audio_path = (session_dir / filename).resolve()
+
+    try:
+        audio_path.relative_to(session_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=404) from exc
+
+    if not audio_path.is_file():
+        raise HTTPException(status_code=404, detail="Audio file not found")
+
+    return FileResponse(audio_path, media_type="audio/wav")
 
 
 if __name__ == "__main__":

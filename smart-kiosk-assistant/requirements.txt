@@ -7,3 +7,8 @@ pydantic==2.11.7
 python-multipart==0.0.27
 sounddevice==0.5.1
 uvicorn==0.35.0
+
+# Ordering feature
+aiosqlite==0.20.0
+PyYAML==6.0.2
+fastmcp==2.10.0

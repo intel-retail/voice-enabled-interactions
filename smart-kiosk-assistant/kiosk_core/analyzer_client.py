@@ -15,11 +15,21 @@ class AnalyzerClient:
         file_path: str,
         language: str | None = None,
         temperature: float = 0.0,
-    ) -> str:
+        diarization: bool = False,
+    ) -> dict:
+        """POST an audio file to the transcription endpoint.
+
+        Returns the full JSON response dict. When ``diarization=True`` the
+        request asks for ``response_format=verbose_json`` so the caller
+        receives a ``segments`` list with per-segment ``speaker`` labels.
+        """
         path = Path(file_path)
-        data = {"temperature": temperature}
+        data: dict = {"temperature": str(temperature)}
         if language:
             data["language"] = language
+        if diarization:
+            data["diarization"] = "true"
+            data["response_format"] = "verbose_json"
 
         with path.open("rb") as audio_file:
             with httpx.Client(timeout=self.timeout_seconds, trust_env=False) as client:
@@ -29,5 +39,4 @@ class AnalyzerClient:
                     data=data,
                 )
         response.raise_for_status()
-        payload = response.json()
-        return str(payload.get("text", "")).strip()
+        return response.json()

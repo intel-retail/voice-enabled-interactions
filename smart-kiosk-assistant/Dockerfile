@@ -31,11 +31,11 @@ RUN pip install --upgrade pip \
 
 COPY . .
 
-RUN mkdir -p /app/generated_audio \
+RUN mkdir -p /app/generated_audio /app/data \
     && chown -R ${APP_UID}:${APP_GID} /app
 
 USER appuser
 
 EXPOSE 8012
 
-CMD ["python3", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8012"]
+CMD ["python3", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8012", "--log-level", "info"]

@@ -160,6 +160,10 @@ services:
       - "${RENDER_GID:-992}"
     environment:
       MPLCONFIGDIR: /tmp/matplotlib
+      # Agent LLM — points at the OVMS container
+      AGENT_LLM_URL:   http://ovms-llm:8000/v3
+      AGENT_LLM_MODEL: ${OVMS_MODEL_NAME:-Qwen3-4B}
+      AGENT_MCP_CONFIG: /app/agentic/resources/mcp_servers.json
     volumes:
       - rag_service_models:/app/rag-service/models
       - rag_service_storage:/app/rag-service/storage
@@ -173,6 +177,33 @@ services:
       timeout: 10s
       start_period: 600s
       retries: 10
+    restart: unless-stopped
+
+  # OVMS — serves Qwen3-4B for both the ordering agent (ADK→LiteLlm→OVMS)
+  # and the RAG pipeline (after llm_service refactor).
+  # Model must be downloaded into the ovms_models volume before first run.
+  # Set OVMS_MODEL_NAME in your .env file to match the model directory name.
+  ovms-llm:
+    image: openvino/model_server:latest
+    container_name: ovms-llm
+    ports:
+      - "9001:9000"  # gRPC (host 9001 avoids conflict with metrics-collector:9000)
+      - "8000:8000"  # REST / OpenAI-compatible /v3
+    volumes:
+      - ovms_models:/models
+    command: >
+      --model_name ${OVMS_MODEL_NAME:-Qwen3-4B}
+      --model_path /models/${OVMS_MODEL_NAME:-Qwen3-4B}
+      --port 9000
+      --rest_port 8000
+      --target_device CPU
+      --plugin_config '{"NUM_STREAMS": 1}'
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/v3/models"]
+      interval: 20s
+      timeout: 10s
+      start_period: 120s
+      retries: 6
     restart: unless-stopped
 
   kiosk-core:
@@ -189,8 +220,16 @@ services:
       KIOSK_CORE_RAG_URL:      http://rag-service:8020/api/v1/query
       KIOSK_CORE_TTS_URL:      http://text-to-speech:8011/v1/audio/speech
       KIOSK_CORE_METRICS_URL:  http://metrics-collector:9000
+      # Ordering & agent routing
+      KIOSK_CORE_ORDERING_ENABLED: "true"
+      KIOSK_CORE_AGENT_URL:        http://rag-service:8020/api/v1/agent/chat
+      KIOSK_CORE_DB_PATH:          /app/data/kiosk.db
+      KIOSK_CORE_PRODUCTS_YAML:    /app/configs/ordering/products.yaml
+      KIOSK_CORE_UPSELL_RULES_YAML: /app/configs/ordering/upsell_rules.yaml
     volumes:
       - generated_audio:/app/generated_audio
+      - kiosk_db:/app/data
+      - ./configs/ordering:/app/configs/ordering:ro
     depends_on:
       audio-analyzer:
         condition: service_healthy
@@ -209,22 +248,12 @@ services:
 
   kiosk-ui:
     build:
-      context: .
+      context: ./kiosk-ui
       dockerfile: Dockerfile
     image: ${REGISTRY:-intel}/kiosk-ui:${RELEASE_TAG:-latest}
     container_name: kiosk-ui
-    user: "1000:1000"
     ports:
       - "7860:7860"
-    environment:
-      KIOSK_CORE_UI_BASE_URL:     http://kiosk-core:8012
-      KIOSK_CORE_UI_ANALYZER_URL: http://audio-analyzer:8010/v1/audio/transcriptions
-      KIOSK_CORE_UI_RAG_URL:      http://rag-service:8020/api/v1/query
-      KIOSK_CORE_UI_TTS_URL:      http://text-to-speech:8011/v1/audio/speech
-      KIOSK_CORE_UI_METRICS_URL:  http://metrics-collector:9000
-    volumes:
-      - generated_audio:/app/generated_audio
-    command: ["python3", "gradio_app.py"]
     depends_on:
       kiosk-core:
         condition: service_healthy
@@ -242,3 +271,5 @@ volumes:
   rag_service_models:
   rag_service_storage:
   rag_service_hf_cache:
+  kiosk_db:
+  ovms_models:

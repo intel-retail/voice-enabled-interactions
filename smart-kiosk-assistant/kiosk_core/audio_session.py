@@ -2,6 +2,7 @@ import logging
 import tempfile
 import threading
 import time
+import unicodedata
 import wave
 from collections import deque
 from datetime import UTC, datetime
@@ -15,6 +16,7 @@ import numpy as np
 import sounddevice as sd
 
 from kiosk_core import config
+from kiosk_core.agent_client import AgentClient
 from kiosk_core.analyzer_client import AnalyzerClient
 from kiosk_core.models import FileSessionStartRequest, SessionStartRequest
 from kiosk_core.rag_client import RagClient
@@ -29,6 +31,20 @@ _WHISPER_JUNK = re.compile(
     re.IGNORECASE,
 )
 
+# Domain vocabulary for the semantic fallback in _filter_target_speaker.
+# When the primary customer is silent for an entire chunk this set is used
+# to decide whether a background speaker said something kiosk-relevant enough
+# to warrant re-assigning the primary (e.g. a new customer stepped up).
+_DOMAIN_KEYWORDS: frozenset[str] = frozenset({
+    "order", "orders", "ordering", "menu", "item", "items",
+    "burger", "pizza", "sandwich", "wrap", "salad", "combo",
+    "fries", "drink", "water", "coffee", "tea", "juice", "soda",
+    "price", "cost", "how much", "pay", "payment", "card", "cash",
+    "checkout", "bill", "receipt", "change",
+    "ticket", "seat", "flight", "hotel", "book", "booking", "reserve",
+    "help", "assist", "please", "want", "need", "like", "get",
+})
+
 class BaseAudioSession:
     def __init__(
         self,
@@ -41,6 +57,14 @@ class BaseAudioSession:
         self.client = AnalyzerClient(request.analyzer_url)
         self.rag_client = RagClient(request.rag_url)
         self.tts_client = TtsClient(request.tts_url)
+        # Agent client is used when the ordering feature is enabled.
+        # All turns go through the agent — it decides Q&A vs ordering.
+        if config.ORDERING_ENABLED:
+            agent_url = getattr(request, "agent_url", None) or config.DEFAULT_AGENT_URL
+            self.agent_client: AgentClient | None = AgentClient(agent_url)
+            logger.info("[SESSION] Agent routing enabled → %s", agent_url)
+        else:
+            self.agent_client = None
         self.created_at = datetime.now(UTC)
         self.started_at: datetime | None = None
         self.completed_at: datetime | None = None
@@ -52,6 +76,11 @@ class BaseAudioSession:
         self.tts_audio_segments: list[dict[str, object]] = []
         self.tts_errors: list[str] = []
         self.stop_requested_at: datetime | None = None
+
+        # Speaker diarization state — persists across chunk boundaries for
+        # the lifetime of this session.  Reset when the session is recreated.
+        self.primary_speaker_id: str | None = None
+        self.pending_segments: list[dict] = []
 
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -107,6 +136,7 @@ class BaseAudioSession:
                 "response_parts": list(self.response_parts),
                 "tts_audio_segments": [dict(segment) for segment in self.tts_audio_segments],
                 "tts_errors": list(self.tts_errors),
+                "primary_speaker_id": self.primary_speaker_id,
             }
 
     def _run(self) -> None:
@@ -230,11 +260,26 @@ class BaseAudioSession:
         worker = threading.Thread(target=self._tts_worker, args=(sentence_queue,), daemon=True)
         worker.start()
 
-        print(f"\nRAG response for session {self.session_id}:\n", end="", flush=True)
-        sentence_index = 0
         history = list(getattr(self.request, "history", []) or [])
+
+        # Route through the ordering agent when enabled; fall back to direct RAG.
+        if self.agent_client is not None:
+            logger.info("[SESSION] Routing turn to agent: session=%s message=%r", self.session_id, transcript[:80])
+            token_source = self.agent_client.get_reply(
+                transcription=transcript,
+                session_id=self.session_id,
+                user_id=getattr(self.request, "user_id", "anonymous") or "anonymous",
+                history=history,
+            )
+            label = "Agent"
+        else:
+            token_source = self.rag_client.stream_answer(transcript, history=history)
+            label = "RAG"
+
+        print(f"\n{label} response for session {self.session_id}:\n", end="", flush=True)
+        sentence_index = 0
         try:
-            for token in self.rag_client.stream_answer(transcript, history=history):
+            for token in token_source:
                 with self._lock:
                     self.response_parts.append(token)
                 print(token, end="", flush=True)
@@ -316,19 +361,193 @@ class BaseAudioSession:
         audio = np.concatenate(frames, axis=0)
         temp_path = self._write_temp_wav(audio)
         try:
-            text = self.client.transcribe_file(
+            duration = len(audio) / self.request.sample_rate
+            logger.info(
+                "[CHUNK] session=%s | flushing %.2fs of audio, diarization=%s",
+                self.session_id, duration, config.DEFAULT_DIARIZATION_ENABLED,
+            )
+            payload = self.client.transcribe_file(
                 temp_path,
                 language=self.request.language,
                 temperature=self.request.temperature,
+                diarization=config.DEFAULT_DIARIZATION_ENABLED,
             )
+            segments: list[dict] = payload.get("segments", []) if isinstance(payload, dict) else []
+            raw_text = str(payload.get("text", "")).strip() if isinstance(payload, dict) else str(payload).strip()
+
+            logger.info(
+                "[CHUNK] session=%s | audio-analyzer response: %d segment(s), flat_text=%r",
+                self.session_id, len(segments), raw_text[:120],
+            )
+
+            if segments and config.DEFAULT_DIARIZATION_ENABLED:
+                text = self._filter_target_speaker(segments)
+            else:
+                if config.DEFAULT_DIARIZATION_ENABLED and not segments:
+                    logger.info(
+                        "[CHUNK] session=%s | diarization enabled but no segments returned — using flat text",
+                        self.session_id,
+                    )
+                text = raw_text
+
             if text:
                 # Strip Whisper hallucination tokens (e.g. [BLANK_AUDIO], [Music])
                 text = _WHISPER_JUNK.sub("", text).strip()
             if text:
+                logger.info(
+                    "[CHUNK] session=%s | appending to transcript: %r",
+                    self.session_id, text[:120],
+                )
                 with self._lock:
                     self.transcript_parts.append(text)
+            else:
+                logger.info(
+                    "[CHUNK] session=%s | chunk produced no usable text (filtered or empty)",
+                    self.session_id,
+                )
         finally:
             Path(temp_path).unlink(missing_ok=True)
+
+    @staticmethod
+    def _meaningful_char_count(text: str) -> int:
+        """Count characters that are not whitespace and not Unicode punctuation."""
+        return sum(
+            1 for ch in text
+            if not ch.isspace() and not unicodedata.category(ch).startswith("P")
+        )
+
+    def _filter_target_speaker(self, segments: list[dict]) -> str:
+        """Filter diarized segments to keep only the primary customer's speech.
+
+        Phase 1 — lock-on + pending-buffer:
+          - UNKNOWN speaker before primary is locked → buffer in pending_segments.
+          - First meaningful KNOWN speaker → lock as primary; flush pending.
+          - UNKNOWN after lock → treat as primary continuation (inherit).
+          - KNOWN != primary → discard.
+
+        Phase 2 — semantic fallback:
+          If *no* segment was kept (primary was silent the whole chunk), score
+          each discarded segment against DOMAIN_KEYWORDS.  The best-scoring
+          segment above the threshold wins and reassigns primary_speaker_id.
+        """
+        if not segments:
+            return ""
+
+        kept_segments: list[dict] = []
+        discarded_segments: list[dict] = []
+
+        logger.info(
+            "[SPEAKER-FILTER] session=%s | processing %d segment(s), primary_speaker=%s",
+            self.session_id, len(segments),
+            self.primary_speaker_id if self.primary_speaker_id else "NOT_SET",
+        )
+
+        for i, segment in enumerate(segments):
+            speaker: str | None = segment.get("speaker")
+            text: str = segment.get("text", "")
+
+            # ── UNKNOWN speaker (Pyannote gap / silence) ─────────────────────
+            if not speaker:
+                if self.primary_speaker_id is not None:
+                    # Post-lock: inherit primary, give benefit of the doubt.
+                    logger.info(
+                        "[SPEAKER-FILTER] session=%s | seg[%d] UNKNOWN → inheriting primary=%s → KEEP | text=%r",
+                        self.session_id, i, self.primary_speaker_id, text[:80],
+                    )
+                    kept_segments.append(segment)
+                else:
+                    # Pre-lock: buffer for retroactive assignment.
+                    logger.info(
+                        "[SPEAKER-FILTER] session=%s | seg[%d] UNKNOWN, no primary yet → BUFFERED (pending=%d) | text=%r",
+                        self.session_id, i, len(self.pending_segments) + 1, text[:80],
+                    )
+                    self.pending_segments.append(segment)
+                continue
+
+            # ── KNOWN speaker ─────────────────────────────────────────────────
+            if self.primary_speaker_id is None:
+                if self._meaningful_char_count(text) > 1:
+                    # Lock primary speaker on first meaningful utterance.
+                    self.primary_speaker_id = speaker
+                    logger.info(
+                        "[SPEAKER-FILTER] session=%s | seg[%d] speaker=%s → PRIMARY LOCKED ✓ | flushing %d pending segment(s) | text=%r",
+                        self.session_id, i, speaker, len(self.pending_segments), text[:80],
+                    )
+                    # Retroactively flush all buffered unknown segments.
+                    if self.pending_segments:
+                        logger.info(
+                            "[SPEAKER-FILTER] session=%s | flushing %d pending segment(s) → assigned to primary=%s",
+                            self.session_id, len(self.pending_segments), speaker,
+                        )
+                    kept_segments.extend(self.pending_segments)
+                    self.pending_segments = []
+                    kept_segments.append(segment)
+                else:
+                    # Noise token or single punctuation — discard.
+                    logger.info(
+                        "[SPEAKER-FILTER] session=%s | seg[%d] speaker=%s → noise/punctuation only, no lock → DISCARD | text=%r",
+                        self.session_id, i, speaker, text[:80],
+                    )
+                    discarded_segments.append(segment)
+            elif speaker == self.primary_speaker_id:
+                logger.info(
+                    "[SPEAKER-FILTER] session=%s | seg[%d] speaker=%s == primary → KEEP | text=%r",
+                    self.session_id, i, speaker, text[:80],
+                )
+                kept_segments.append(segment)
+            else:
+                logger.info(
+                    "[SPEAKER-FILTER] session=%s | seg[%d] speaker=%s != primary (%s) → DISCARD (secondary voice) | text=%r",
+                    self.session_id, i, speaker, self.primary_speaker_id, text[:80],
+                )
+                discarded_segments.append(segment)
+
+        # ── Phase 2: Semantic fallback ────────────────────────────────────────
+        if not kept_segments and discarded_segments:
+            logger.info(
+                "[SPEAKER-FILTER] session=%s | primary was silent this chunk — running semantic fallback on %d discarded segment(s)",
+                self.session_id, len(discarded_segments),
+            )
+            best_score = 0.0
+            best_segment: dict | None = None
+            for segment in discarded_segments:
+                words = segment.get("text", "").lower().split()
+                if not words:
+                    continue
+                overlap = sum(1 for w in words if w in _DOMAIN_KEYWORDS)
+                score = overlap / max(len(words), 1)
+                logger.info(
+                    "[SPEAKER-FILTER] session=%s | fallback score speaker=%s score=%.2f | text=%r",
+                    self.session_id, segment.get("speaker", "UNKNOWN"), score, segment.get("text", "")[:80],
+                )
+                if score > best_score:
+                    best_score = score
+                    best_segment = segment
+
+            if best_segment is not None and best_score >= config.DEFAULT_SEMANTIC_FALLBACK_THRESHOLD:
+                new_speaker = best_segment.get("speaker")
+                logger.info(
+                    "[SPEAKER-FILTER] session=%s | semantic fallback ACCEPTED speaker=%s score=%.2f — PRIMARY REASSIGNED ✓ | text=%r",
+                    self.session_id, new_speaker, best_score, best_segment.get("text", "")[:80],
+                )
+                self.primary_speaker_id = new_speaker
+                kept_segments = [best_segment]
+            else:
+                logger.info(
+                    "[SPEAKER-FILTER] session=%s | semantic fallback found no domain match (best_score=%.2f, threshold=%.2f) → chunk DROPPED",
+                    self.session_id, best_score, config.DEFAULT_SEMANTIC_FALLBACK_THRESHOLD,
+                )
+
+        final_text = " ".join(seg.get("text", "") for seg in kept_segments).strip()
+        logger.info(
+            "[SPEAKER-FILTER] session=%s | RESULT: kept=%d dropped=%d primary=%s | final_text=%r",
+            self.session_id,
+            len(kept_segments),
+            len(discarded_segments) - (1 if kept_segments and discarded_segments else 0),
+            self.primary_speaker_id,
+            final_text[:120],
+        )
+        return final_text
 
     def _write_temp_wav(self, audio: np.ndarray) -> str:
         with tempfile.NamedTemporaryFile(prefix=f"{self.session_id}-", suffix=".wav", delete=False) as temp_file:

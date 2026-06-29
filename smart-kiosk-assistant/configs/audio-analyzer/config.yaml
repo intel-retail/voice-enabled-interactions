@@ -11,8 +11,10 @@ models:
     device: CPU # CPU recommended; CPU only for whispercpp, CPU or GPU for openvino provider
     weight_format: null # OpenVINO: int8 | fp16 | null. whispercpp: null | q5 | q5_0 | q5_1 | q8 | q8_0 | int5 | int8
     temperature: 0.0
-    diarization: False
-    hf_token: None   # needed only if diarization=true
+    diarization: True         # set True to enable pyannote speaker diarization
+    hf_token: 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            # REQUIRED when diarization=True — set your Hugging Face token here
+                              # e.g. hf_token: "hf_xxxxxxxxxxxxxxxxxxxx"
+                              # or leave None and export HF_TOKEN env var in docker-compose.yml
     models_base_path: "models"
 
     # Hallucination filtering — openai provider uses native no_speech_prob/avg_logprob.
@@ -32,14 +34,14 @@ models:
     # openai-whisper transcribe() native param: skip generation over silent
     # regions longer than this many seconds.  Directly targets the
     # noise-transcribed-as-text problem.  null = disabled.
-    hallucination_silence_threshold: 0.7
+    hallucination_silence_threshold: 1.0
 
     # Post-processing repetition filter (all providers).
     # 1.0 = disabled. Any value > 1.0 enables consecutive repeated-phrase
     # removal (word n-gram dedup, window 1-8) and duplicate-segment stripping.
     # Note: openai-whisper's DecodingOptions has no repetition_penalty field;
     # this is applied after transcription, not inside the decoder.
-    repetition_penalty: 2
+    repetition_penalty: 1.8
 
     # Decoder controls — beam_size/best_of apply to openai and whispercpp.
     # word_timestamps and threads are whisper.cpp specific.
@@ -47,6 +49,12 @@ models:
     best_of: 1
     word_timestamps: false
     threads: 0
+
+  diarization: # Only applicable when models.asr.diarization is set to True
+    provider: "huggingface"
+    name: "pyannote/speaker-diarization-community-1"
+    device: CPU  # CPU or GPU
+    models_base_path: "models"
 
 audio_preprocessing:
   chunk_duration_sec: 15
