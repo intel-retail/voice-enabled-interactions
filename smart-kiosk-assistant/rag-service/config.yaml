@@ -10,6 +10,7 @@ api:
 
 models:
   llm:
+    backend: "ovms"             # inference backend. Permitted values: ovms | openvino
     hf_id: "Qwen/Qwen3-4B-Instruct-2507"
     device: "GPU"               # inference device. Permitted values: CPU | GPU
     weight_format: "int8"       # OpenVINO export precision. Permitted values: int8 | fp16 | fp32
