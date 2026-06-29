@@ -16,6 +16,7 @@ const BACKEND_SERVICE_URLS = {
 export async function startStreamSession(
   sampleRate: number,
   history: HistoryTurn[],
+  conversationId?: string,
 ): Promise<StartStreamResponse> {
   const res = await fetch(endpoints.startStream, {
     method: 'POST',
@@ -31,6 +32,9 @@ export async function startStreamSession(
       tts_model: 'speecht5',
       tts_language: 'English',
       history,
+      // Persistent conversation ID — reused across all voice turns so the
+      // agent retains cart/order state between microphone presses.
+      ...(conversationId ? { conversation_id: conversationId } : {}),
       // Backend service URLs (kiosk-core will call these internally)
       ...BACKEND_SERVICE_URLS,
     }),

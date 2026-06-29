@@ -42,6 +42,9 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
   const framesRef = useRef<Float32Array[]>([]);
   const ctxRateRef = useRef<number>(48000);
   const sessionIdRef = useRef<string | null>(null);
+  // Persistent conversation ID — generated once per hook mount and reused
+  // across all voice turns so the agent retains order context (cart, order_id).
+  const conversationIdRef = useRef<string>(crypto.randomUUID());
   const recordingRef = useRef(false);
   const eosRef = useRef(false);
   const pollTimerRef = useRef<number | null>(null);
@@ -210,7 +213,11 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
       recordingRef.current = true;
 
       // Open the streaming session up-front to avoid first-chunk races.
-      const { session_id } = await startStreamSession(TARGET_RATE, buildHistory());
+      const { session_id } = await startStreamSession(
+        TARGET_RATE,
+        buildHistory(),
+        conversationIdRef.current,
+      );
       sessionIdRef.current = session_id;
 
       // Begin the poll loop (partial transcript while listening).

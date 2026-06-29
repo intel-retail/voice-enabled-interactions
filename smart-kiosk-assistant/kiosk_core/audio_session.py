@@ -52,6 +52,10 @@ class BaseAudioSession:
         on_complete: Callable[[str], None] | None = None,
     ):
         self.session_id = str(uuid4())
+        # Persistent agent session ID — reused across all voice turns in the same
+        # conversation so the ADK agent retains order state between mic presses.
+        # Falls back to the audio session UUID if no conversation_id was supplied.
+        self.agent_session_id: str = request.conversation_id or self.session_id
         self.request = request
         self.on_complete = on_complete
         self.client = AnalyzerClient(request.analyzer_url)
@@ -264,10 +268,11 @@ class BaseAudioSession:
 
         # Route through the ordering agent when enabled; fall back to direct RAG.
         if self.agent_client is not None:
-            logger.info("[SESSION] Routing turn to agent: session=%s message=%r", self.session_id, transcript[:80])
+            logger.info("[SESSION] Routing turn to agent: session=%s (conv=%s) message=%r",
+                        self.session_id, self.agent_session_id, transcript[:80])
             token_source = self.agent_client.get_reply(
                 transcription=transcript,
-                session_id=self.session_id,
+                session_id=self.agent_session_id,  # persistent across voice turns
                 user_id=getattr(self.request, "user_id", "anonymous") or "anonymous",
                 history=history,
             )

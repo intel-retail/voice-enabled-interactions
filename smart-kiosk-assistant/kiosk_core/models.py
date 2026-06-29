@@ -28,6 +28,12 @@ class SessionStartRequest(BaseModel):
     # Recent conversation turns prior to this question, oldest-first.
     # Forwarded verbatim to the RAG service so follow-ups have context.
     history: list[dict[str, str]] = Field(default_factory=list)
+    # Persistent conversation session ID — reused across all voice turns in the
+    # same customer conversation so the agent retains order state (order_id,
+    # cart contents, etc.) between microphone presses.
+    # The UI should generate this once per conversation and keep passing it.
+    # If omitted, kiosk-core falls back to using the audio session UUID (old behaviour).
+    conversation_id: str | None = None
 
 
 class FileSessionStartRequest(SessionStartRequest):
