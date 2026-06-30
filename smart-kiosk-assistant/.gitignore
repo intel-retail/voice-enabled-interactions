@@ -16,3 +16,6 @@ chunks/
 # Session storage
 storage/
 .ui-dev/
+
+# Large sample video — kept locally, not pushed (copy/manage separately)
+Sample_data/sample2.mp4

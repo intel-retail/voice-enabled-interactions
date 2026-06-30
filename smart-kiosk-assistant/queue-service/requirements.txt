@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+#
+# GStreamer, the gva* elements, and OpenVINO are provided by the
+# intel/dlstreamer:2026.1.0-ubuntu24 base image and are NOT installed here.
+
+PyYAML==6.0.2
+numpy==1.26.4
+opencv-python-headless

@@ -14,6 +14,51 @@
 services:
 
   # ---------------------------------------------------------------------------
+  # rtsp-streamer: publishes every *.mp4 under /media as an RTSP stream via
+  # MediaMTX + ffmpeg (see ./rtsp-streamer/start.sh).
+  #
+  # Stream path = <filename-without-extension>. With the bundled sample:
+  #   rtsp://rtsp-streamer:8554/istockphoto-2248308153-640_adpp_is
+  # (rename the file in Sample_data/ for a cleaner path, e.g. /queue).
+  #
+  # Feeds the queue-service person-counting pipeline (queue-service/).
+  # ---------------------------------------------------------------------------
+  rtsp-streamer:
+    build:
+      context: ./rtsp-streamer
+      dockerfile: Dockerfile
+    image: ${REGISTRY:-intel}/rtsp-streamer:${RELEASE_TAG:-latest}
+    container_name: rtsp-streamer
+    user: "1000:1000"
+    ports:
+      - "8554:8554"
+    environment:
+      MEDIA_DIR:      /media
+      # Stream this specific file. Both videos stay in Sample_data/; only the
+      # one named here is published. Switch back to the previous clip by
+      # changing just this line to:
+      #   MEDIA_FILE:   /media/istockphoto-2248308153-640_adpp_is.mp4
+      MEDIA_FILE:     /media/sample1.mp4
+      # Keep the published RTSP path stable so the queue-service URL
+      # (rtsp://rtsp-streamer:8554/istockphoto-2248308153-640_adpp_is) keeps
+      # working regardless of which MEDIA_FILE is selected.
+      STREAM_NAME:    istockphoto-2248308153-640_adpp_is
+      RTSP_PORT:      "8554"
+      LOOP_COUNT:     "-1"      # -1 = infinite loop for a continuous feed
+      BLANK_DURATION: "0"       # seconds of black frames between loops
+      NO_PROXY: "localhost,127.0.0.1,rtsp-streamer,queue-management,kiosk-core"
+      no_proxy: "localhost,127.0.0.1,rtsp-streamer,queue-management,kiosk-core"
+    volumes:
+      - ./Sample_data:/media:ro
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "8554"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
   # metrics-collector: OS-level hardware utilization collector.
   # Built on intel/retail-benchmark which provides supervisord, qmassa (Intel
   # GPU), Intel NPU tool, Intel PCM (power), sar (CPU), and free (memory).

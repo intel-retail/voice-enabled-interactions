@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+# Minimal MediaMTX configuration for rtsp-streamer (MediaMTX v1.11.3).
+#
+# Why this file exists:
+#   Without a config file MediaMTX loads an EMPTY configuration that defines
+#   zero paths, so every dynamic publish is rejected with
+#   "path '<name>' is not configured". start.sh derives the RTSP path from each
+#   video filename (e.g. queue.mp4 -> /queue), so the path set is not known
+#   ahead of time.
+#
+# The 'all_others' catch-all (renamed from 'all' in MediaMTX v1.4.0) re-enables
+# publishing and reading of ANY path name using built-in defaults. The RTSP
+# server keeps its default address (:8554), matching RTSP_PORT in start.sh.
+
+paths:
+  all_others:

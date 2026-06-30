@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+#
+# queue-service runtime configuration (scaffolding placeholder).
+# Values below are defaults/placeholders only — pipeline, detection,
+# tracking, and counting logic are not implemented yet.
+
+source:
+  # RTSP feed published by the existing rtsp-streamer service.
+  rtsp_url: "rtsp://rtsp-streamer:8554/istockphoto-2248308153-640_adpp_is"
+  rtsp_transport: "tcp"
+
+model:
+  # Detector under test. Switch between models by changing this section only --
+  # pipeline, tracker, ROI and queue counting stay identical (A/B test).
+  #   Intel OMZ: name person-detection-retail-0013, provider omz,
+  #              ir_path ./models/person-detection-retail-0013.xml, proc_path "",
+  #              class_label "" (person-only, no other classes emitted)
+  #   YOLO26n:   name yolo26n, provider local,
+  #              ir_path ./models/yolo26n.xml, proc_path ./models/yolo26n.json
+  #              (end-to-end NMS-free [1,300,6] output -> "yolo_v10" converter),
+  #              class_label "person" / class_id 0 (filters out
+  #              car/chair/bottle/etc. before gvatrack).
+  name: "yolo26n"               # yolo26n | person-detection-retail-0013
+  provider: "local"             # omz | local
+  ir_path: "./models/yolo26n.xml"
+  proc_path: "./models/yolo26n.json"   # yolo_v10 end-to-end converter + COCO labels
+  class_label: "person"         # only this class is tracked/counted; "" => all
+  class_id: 0                   # numeric class id kept when label is absent (COCO person=0)
+  device: "GPU"                 # inference device. Permitted values: CPU | GPU
+  threshold: 0.5
+  inference_interval: 1
+
+tracker:
+  # DLStreamer gvatrack tracking algorithm.
+  tracking_type: "short-term-imageless"
+
+roi:
+  # Normalized polygon points (0.0-1.0). Default covers the full frame.
+  point_mode: "foot"            # foot | centroid
+  polygon:
+    - [0.0, 0.0]
+    - [1.0, 0.0]
+    - [1.0, 1.0]
+    - [0.0, 1.0]
+
+counter:
+  dwell_timeout_seconds: 2.0
+  log_mode: "on_change"         # on_change | interval
+  log_interval_seconds: 5.0
+  # Queue Status thresholds: count <= medium_max => LOW, <= high_max => MEDIUM,
+  # otherwise HIGH. Used for the debug overlay only.
+  medium_threshold: 3
+  high_threshold: 7
+
+debug:
+  # Debug visualization: when true the pipeline ends with gvawatermark + a
+  # display sink instead of fakesink and renders boxes, IDs, ROI, count, status
+  # and FPS. Counting/logging is unchanged. For validation only.
+  visualization: true
+  sink: "autovideosink"         # autovideosink | ximagesink | xvimagesink
+  # When true, gvafpscounter is inserted before the sink to log pipeline
+  # throughput (fps). Useful for A/B comparing detector models. No effect on
+  # counting/tracking. For validation only.
+  fps_logging: false
+
+logging:
+  level: "INFO"

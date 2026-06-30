@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+#
+# queue-service DLStreamer pipeline definition (scaffolding placeholder).
+# The element graph below documents the intended pipeline ordering only;
+# the build/run logic is not implemented yet.
+#
+#   urisourcebin -> decode -> videoconvert -> gvadetect -> gvatrack
+#                -> gvapython (ROI + queue count) -> fakesink
+
+elements:
+  - name: source
+    type: urisourcebin
+  - name: decode
+    type: decodebin
+  - name: convert
+    type: videoconvert
+  - name: detect
+    type: gvadetect
+  - name: track
+    type: gvatrack
+  - name: count
+    type: gvapython
+  - name: sink
+    type: fakesink
