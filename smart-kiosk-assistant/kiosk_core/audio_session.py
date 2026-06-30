@@ -233,6 +233,24 @@ class BaseAudioSession:
         return final_status, end_reason
 
     def _finalize_run(self, final_status: str, end_reason: str) -> None:
+        # If speaker-filter buffered segments but primary was never locked
+        # (pyannote returned UNKNOWN for the whole session — common for short
+        # utterances), flush pending as primary speech so the transcript is not lost.
+        if self.pending_segments and not self.primary_speaker_id:
+            pending_text = " ".join(
+                seg.get("text", "") for seg in self.pending_segments
+            ).strip()
+            if pending_text:
+                pending_text = _WHISPER_JUNK.sub("", pending_text).strip()
+            if pending_text:
+                logger.info(
+                    "[SPEAKER-FILTER] session=%s | session end — flushing %d pending UNKNOWN segment(s) as primary transcript: %r",
+                    self.session_id, len(self.pending_segments), pending_text[:120],
+                )
+                with self._lock:
+                    self.transcript_parts.append(pending_text)
+            self.pending_segments = []
+
         # Attempt RAG whenever there is a transcript, even if the session
         # ended with an error mid-stream (e.g. a transient ASR failure on one
         # chunk).  Only skip entirely when NO audio was captured at all.
@@ -575,6 +593,18 @@ class BaseAudioSession:
                         "[SPEAKER-FILTER] session=%s | seg[%d] UNKNOWN → inheriting primary=%s → KEEP | text=%r",
                         self.session_id, i, self.primary_speaker_id, text[:80],
                     )
+                    kept_segments.append(segment)
+                elif len(self.pending_segments) >= 2:
+                    # Pyannote never assigned a speaker (short audio / single speaker).
+                    # After 2 buffered chunks, accept UNKNOWN as the primary.
+                    self.primary_speaker_id = "SPEAKER_00"
+                    logger.info(
+                        "[SPEAKER-FILTER] session=%s | seg[%d] UNKNOWN — pending limit reached, "
+                        "locking SPEAKER_00 as primary, flushing %d pending segment(s) | text=%r",
+                        self.session_id, i, len(self.pending_segments), text[:80],
+                    )
+                    kept_segments.extend(self.pending_segments)
+                    self.pending_segments = []
                     kept_segments.append(segment)
                 else:
                     # Pre-lock: buffer for retroactive assignment.
