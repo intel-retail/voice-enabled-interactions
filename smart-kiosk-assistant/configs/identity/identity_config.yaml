@@ -31,11 +31,18 @@ face_threshold: 0.80
 voice_threshold: 0.75
 
 # ── OpenVINO models (resolved relative to models_dir) ────────────────────────
+# Layout: <models_dir>/<identity_subdir>/<model>/<PRECISION>/<model>.xml for the
+# face IRs, and <models_dir>/<identity_subdir>/<voice_model>/openvino/<voice_model>.xml
+# for the converted ECAPA voice model.  Run ./setup_models.sh --identity to fetch.
 models_dir: /app/models
+identity_subdir: identity
+precision: FP16                   # FP16 | FP32 (must match downloaded IR)
 device: GPU                       # CPU | GPU | NPU (uppercase)
 face_detection_model: face-detection-retail-0005
 face_reid_model: face-reidentification-retail-0095
 voice_embedding_model: ecapa-tdnn-voice
+voice_backend: openvino           # openvino | speechbrain (Strategy switch)
+voice_sample_rate: 16000          # waveform rate the voice IR was exported for
 
 # Frame sampling for video enrolment (sample every Nth frame).
 video_frame_sample_rate: 10

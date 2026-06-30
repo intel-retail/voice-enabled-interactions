@@ -15,6 +15,7 @@ import logging
 
 from identity_core.challenge import ChallengeProvider
 from identity_core.config import Settings
+from identity_core.inference.factory import build_engines
 from identity_core.models import (
     ChallengeResponse,
     RegisterRequest,
@@ -50,9 +51,12 @@ class IdentityService:
             name="voice",
         )
 
-        # Wired in later phases:
-        #   self._face_engine / self._voice_engine : OpenVINO (Phase 4)
-        self._inference_ready = False
+        # ── Inference layer (Phase 4) ────────────────────────────────────────
+        # Engines are built from the model files mounted at settings.models_dir.
+        # If any model is missing they degrade to None and the service still
+        # serves /health, /challenge and /stats (inference_ready=False).
+        self._engines = build_engines(settings)
+        self._inference_ready = self._engines.ready
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -97,15 +101,21 @@ class IdentityService:
         if not self._inference_ready:
             return VerifyResponse(
                 verified=False,
-                reason="Inference pipeline not yet available (Phase 4–6 pending).",
+                reason="Inference engines unavailable (models not loaded).",
             )
-        # Phases 4–6 will:
+        # Engines are loaded (Phase 4).  The decode → embed → FAISS search →
+        # fusion pipeline is wired in Phases 5–6; until then report not-ready
+        # rather than raising so the endpoint stays well-behaved.
+        # Phases 5–6 will:
         #   1. decode image/audio
-        #   2. extract face (256-d) + voice (192-d) embeddings via OpenVINO
+        #   2. self._engines.face.embed(...) / self._engines.voice.embed(...)
         #   3. FAISS search both indices
         #   4. fuse: 0.6*face + 0.4*voice vs combined_threshold
         #   5. load profile from SQLite, return payload
-        raise NotImplementedError  # pragma: no cover
+        return VerifyResponse(
+            verified=False,
+            reason="Verification pipeline pending (Phase 5–6).",
+        )
 
     # ── Register (admin / bootstrap) ─────────────────────────────────────────
 
@@ -114,6 +124,11 @@ class IdentityService:
             return RegisterResponse(
                 user_id=request.user_id,
                 registered=False,
-                reason="Inference pipeline not yet available (Phase 4–6 pending).",
+                reason="Inference engines unavailable (models not loaded).",
             )
-        raise NotImplementedError  # pragma: no cover
+        # Enrolment pipeline (embed → FAISS add → SQLite insert) lands in Phase 5.
+        return RegisterResponse(
+            user_id=request.user_id,
+            registered=False,
+            reason="Registration pipeline pending (Phase 5).",
+        )

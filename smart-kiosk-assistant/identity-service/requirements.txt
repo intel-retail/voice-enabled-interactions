@@ -11,3 +11,5 @@ PyYAML==6.0.2
 aiosqlite==0.20.0
 numpy==2.2.6
 faiss-cpu==1.9.0
+# OpenCV for face crop/resize preprocessing (OpenVINO + GStreamer come from base).
+opencv-python-headless==4.10.0.84

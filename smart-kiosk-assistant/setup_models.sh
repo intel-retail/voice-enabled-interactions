@@ -21,12 +21,16 @@
 #   --device  CPU|GPU|NPU   Target inference device for OVMS  (default: GPU)
 #   --int4                  Use INT4 model instead of INT8 (smaller, less accurate)
 #   --skip-ovms             Skip the OVMS LLM model download
+#   --identity              Also download identity-service models (face + voice)
+#   --identity-only         Only download identity-service models (implies --skip-ovms)
 #   --hf-token  TOKEN       HuggingFace token (or export HF_TOKEN env var)
 #
 # Examples:
 #   ./setup_models.sh                        # GPU (default, INT8)
 #   ./setup_models.sh --device CPU           # CPU-only systems
 #   ./setup_models.sh --int4                 # INT4 (smaller, faster, less accurate)
+#   ./setup_models.sh --identity             # LLM + identity (face detect/reid + ECAPA voice)
+#   ./setup_models.sh --identity-only        # only identity-service models
 #   ./setup_models.sh --hf-token hf_xxx...   # explicit HF token
 
 set -e
@@ -44,9 +48,23 @@ OVMS_QUANT="int8"
 OVMS_SOURCE_MODEL="OpenVINO/Qwen3-4B-int8-ov"
 OVMS_MODEL_NAME="OpenVINO/Qwen3-4B-int8-ov"
 
+# ── Identity-service models (face detection/reid + ECAPA voice) ───────────────
+# Face IRs come straight from the Open Model Zoo storage; the ECAPA voice model
+# is converted from SpeechBrain to an OpenVINO IR at setup time.
+OMZ_BASE="https://storage.openvinotoolkit.org/repositories/open_model_zoo"
+OMZ_VERSION="2023.0"
+IDENTITY_PRECISION="FP16"
+IDENTITY_FACE_MODELS=(
+    "face-detection-retail-0005"
+    "face-reidentification-retail-0095"
+)
+IDENTITY_VOICE_MODEL="ecapa-tdnn-voice"
+IDENTITY_VOICE_SOURCE="speechbrain/spkrec-ecapa-voxceleb"
+
 # ── Argument parsing ──────────────────────────────────────────────────────────
 TARGET_DEVICE="GPU"
 SKIP_OVMS=false
+DO_IDENTITY=false
 HF_TOKEN="${HF_TOKEN:-}"
 
 while [[ $# -gt 0 ]]; do
@@ -62,6 +80,15 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --skip-ovms)
+            SKIP_OVMS=true
+            shift
+            ;;
+        --identity)
+            DO_IDENTITY=true
+            shift
+            ;;
+        --identity-only)
+            DO_IDENTITY=true
             SKIP_OVMS=true
             shift
             ;;
@@ -227,6 +254,72 @@ download_ovms_model() {
     fi
 }
 
+# ── Identity-service models ───────────────────────────────────────────────────
+download_face_model() {
+    local name="$1"
+    local dest="${MODELS_DIR}/identity/${name}/${IDENTITY_PRECISION}"
+    local url_base="${OMZ_BASE}/${OMZ_VERSION}/models_bin/1/${name}/${IDENTITY_PRECISION}"
+
+    if [ -f "${dest}/${name}.xml" ] && [ -f "${dest}/${name}.bin" ]; then
+        echo "  ✓ ${name} (${IDENTITY_PRECISION}) already present — skipping"
+        return 0
+    fi
+
+    mkdir -p "${dest}"
+    echo "  Downloading ${name} (${IDENTITY_PRECISION})..."
+    curl -fSL "${url_base}/${name}.xml" -o "${dest}/${name}.xml"
+    curl -fSL "${url_base}/${name}.bin" -o "${dest}/${name}.bin"
+
+    if [ -f "${dest}/${name}.xml" ] && [ -f "${dest}/${name}.bin" ]; then
+        echo "  ✓ ${name} downloaded → ${dest}"
+    else
+        echo "  ✗ Failed to download ${name}"
+        exit 1
+    fi
+}
+
+convert_voice_model() {
+    local out_dir="${MODELS_DIR}/identity/${IDENTITY_VOICE_MODEL}/openvino"
+
+    if [ -f "${out_dir}/${IDENTITY_VOICE_MODEL}.xml" ] && \
+       [ -f "${out_dir}/${IDENTITY_VOICE_MODEL}.bin" ]; then
+        echo "  ✓ Voice IR (${IDENTITY_VOICE_MODEL}) already present — skipping"
+        return 0
+    fi
+
+    ensure_venv
+    echo "  Installing conversion deps (torch, speechbrain, openvino)..."
+    pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+    pip install -q "speechbrain>=1.0" "openvino>=2024.0"
+
+    mkdir -p "${out_dir}"
+    echo "  Converting ${IDENTITY_VOICE_SOURCE} → OpenVINO IR..."
+    "${VENV_DIR}/bin/python" \
+        "${SCRIPT_DIR}/identity-service/tools/convert_ecapa_to_openvino.py" \
+        --output-dir "${out_dir}" \
+        --model-name "${IDENTITY_VOICE_MODEL}" \
+        --source "${IDENTITY_VOICE_SOURCE}"
+
+    if [ -f "${out_dir}/${IDENTITY_VOICE_MODEL}.xml" ]; then
+        echo "  ✓ Voice IR saved → ${out_dir}"
+    else
+        echo "  ✗ Voice model conversion failed"
+        echo "    (Identity-service will still run, but voice verification stays disabled.)"
+    fi
+}
+
+download_identity_models() {
+    print_section "Identity-service models → ${MODELS_DIR}/identity"
+    for model in "${IDENTITY_FACE_MODELS[@]}"; do
+        download_face_model "${model}"
+    done
+    convert_voice_model
+
+    # Ensure the identity-service app user (uid 1000) can read the models.
+    docker run --rm -v "${MODELS_DIR}:/models" alpine \
+        sh -c "chmod -R a+rX /models/identity" 2>/dev/null || true
+}
+
 # ── Update .env ───────────────────────────────────────────────────────────────
 update_env() {
     print_section "Updating .env"
@@ -274,6 +367,10 @@ if [ "${SKIP_OVMS}" = false ]; then
 else
     echo ""
     echo "  ⚠  Skipping OVMS model download (--skip-ovms)"
+fi
+
+if [ "${DO_IDENTITY}" = true ]; then
+    download_identity_models
 fi
 
 update_env
