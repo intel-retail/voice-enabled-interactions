@@ -340,6 +340,10 @@ services:
       KIOSK_CORE_RAG_URL:      http://rag-service:8020/api/v1/query
       KIOSK_CORE_TTS_URL:      http://text-to-speech:8011/v1/audio/speech
       KIOSK_CORE_METRICS_URL:  http://metrics-collector:9000
+      # Diarization — re-enable once HF terms are accepted for pyannote models.
+      # Accept terms at: https://huggingface.co/pyannote/speaker-diarization-3.1
+      #                  https://huggingface.co/pyannote/segmentation-3.0
+      KIOSK_CORE_DIARIZATION_ENABLED: "true"
       # Ordering & agent routing
       KIOSK_CORE_ORDERING_ENABLED: "true"
       KIOSK_CORE_AGENT_URL:        http://rag-service:8020/api/v1/agent/chat
