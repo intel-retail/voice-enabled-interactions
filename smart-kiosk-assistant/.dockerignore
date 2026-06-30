@@ -1,6 +1,7 @@
 .git
 .ui-dev
 .venv
+.setup-venv
 .vscode
 .idea
 __pycache__
@@ -12,17 +13,30 @@ __pycache__
 .DS_Store
 *.log
 
-generated_audio
+# Runtime artefacts
+generated_audio/
+storage/
 
+# Large assets — models, sample videos, metrics dumps (never needed in kiosk-core image)
+models/
+Sample_data/
+metrics/
+
+# Other service trees (each has its own Dockerfile + build context)
+rag-service/
+identity-service/
+queue-service/
+rtsp-streamer/
+kiosk-ui/
+
+# Config / docs (mounted at runtime via compose, not baked in)
 README.md
 docs/
 configs/
 docker-compose.yml
+
+# Dev / test files
 API_TEST_RESULTS.md
 test_streaming.py
 mic_session.py
 virtual_mic_session.py
-
-rag-service/
-
-kiosk_core/__pycache__
