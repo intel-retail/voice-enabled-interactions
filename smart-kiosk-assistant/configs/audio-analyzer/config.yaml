@@ -11,7 +11,11 @@ models:
     device: CPU # CPU recommended; CPU only for whispercpp, CPU or GPU for openvino provider
     weight_format: null # OpenVINO: int8 | fp16 | null. whispercpp: null | q5 | q5_0 | q5_1 | q8 | q8_0 | int5 | int8
     temperature: 0.0
-    diarization: True         # set True to enable pyannote speaker diarization
+    diarization: False        # set True to enable pyannote speaker diarization
+                              # REQUIRES: accept model license at HF before enabling:
+                              #   https://huggingface.co/pyannote/speaker-diarization-3.1
+                              #   https://huggingface.co/pyannote/segmentation-3.0
+                              # (403 on file download = terms not yet accepted)
     hf_token: null                # Set HF_TOKEN in .env — passed via docker-compose environment.
                               # The audio-analyzer service reads HF_TOKEN env var automatically
                               # when hf_token is null. See docker-compose.yml audio-analyzer.environment.

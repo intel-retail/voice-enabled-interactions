@@ -125,6 +125,10 @@ services:
       # HuggingFace token — required by Pyannote speaker diarization.
       # Set HF_TOKEN in .env (single source of truth).
       HF_TOKEN: ${HF_TOKEN:-}
+      # Map HF_TOKEN into the config loader's namespace so config.models.asr.hf_token
+      # resolves to the token instead of null. The config_loader uses AUDIO_ANALYZER__
+      # prefix with __ as path separator (models__asr__hf_token → models.asr.hf_token).
+      AUDIO_ANALYZER__MODELS__ASR__HF_TOKEN: ${HF_TOKEN:-}
     volumes:
       # Kiosk-pinned config (see ./configs/README.md) — mounted as the
       # service config without modifying edge-ai-libraries.
