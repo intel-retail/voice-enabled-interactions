@@ -403,7 +403,6 @@ services:
       KIOSK_CORE_UI_TTS_URL:      http://text-to-speech:8011/v1/audio/speech
     volumes:
       - generated_audio:/app/generated_audio
-    command: ["python3", "gradio_app.py"]
     depends_on:
       kiosk-core:
         condition: service_healthy
