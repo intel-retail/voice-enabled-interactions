@@ -44,7 +44,7 @@ OVMS_MODEL_NAME  ?= OpenVINO/Qwen3-4B-int8-ov
 EAL_PATH         := ../edge-ai-libraries/microservices
 
 # Services with fully local build contexts (no edge-ai-libraries needed)
-LOCAL_ONLY_SERVICES := metrics-collector rag-service kiosk-core kiosk-ui
+LOCAL_ONLY_SERVICES := metrics-collector rag-service kiosk-core kiosk-ui queue-service rtsp-streamer
 
 # Identity feature (profile-gated). Pass IDENTITY=true to build/start the
 # identity-service container AND tell kiosk-core to call it. Default off so the
