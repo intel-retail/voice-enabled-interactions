@@ -16,15 +16,13 @@ on:
       - "smart-kiosk-assistant/**"
       - ".github/workflows/kiosk-functional-tests.yml"
   push:
-    branches:
-      - main
     paths:
       - "smart-kiosk-assistant/**"
       - ".github/workflows/kiosk-functional-tests.yml"
   workflow_dispatch:
     inputs:
-      enable_tier2:
-        description: "Run Tier 2 Docker tests (default: false for forks)"
+      run_full_stack:
+        description: "Run Tier 2 full-stack tests (make up + agent chat)"
         required: false
         default: "false"
         type: choice
@@ -32,10 +30,10 @@ on:
           - "true"
           - "false"
 
-# Cancel any in-progress run for the same PR; unlimited for branch pushes
+# Cancel any in-progress run for the same PR; last push wins for branch pushes
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 # Minimal default permissions; jobs override where needed
 permissions:
@@ -47,10 +45,9 @@ defaults:
 
 # ---------------------------------------------------------------------------
 # TIER 1 — CI-safe functional tests
-# Covers: NEX-T24243, NEX-T24244, NEX-T24260, NEX-T24251,
-#         NEX-T24266, NEX-T24256 + defensive edge cases
+# Covers TC #1, #2, #4, #6, #7 from functional-test-cases-sheet.md
 # No Docker, no ML models, no audio hardware required.
-# Runs on every PR and push.
+# Runs on every push and PR.
 # ---------------------------------------------------------------------------
 jobs:
   tier1-functional-tests:
@@ -85,11 +82,14 @@ jobs:
           pip install \
             pytest==8.3.5 \
             pytest-timeout==2.3.1 \
-            pyyaml
+            pyyaml \
+            pydantic>=2.0
 
       - name: Run Tier 1 functional tests
         env:
           PYTHONPATH: .
+          # Ensure diarization is off so HF_TOKEN is not required at import time
+          KIOSK_CORE_DIARIZATION_ENABLED: "false"
         run: |
           python -m pytest tests/functional/ \
             -m "tier1" \
@@ -110,24 +110,25 @@ jobs:
           retention-days: 30
 
   # ---------------------------------------------------------------------------
-  # TIER 2 — Docker-required tests
-  # Covers: NEX-T24245, NEX-T24246, NEX-T24247, NEX-T24248, NEX-T24261
-  # Builds and runs kiosk-core container only (no ML model downloads).
-  # Runs on push to main or when ENABLE_TIER2_TESTS variable is set to 'true',
-  # or manually via workflow_dispatch with enable_tier2=true.
-  # Skipped on forks where secrets/variables may be unavailable.
+  # TIER 2A — Docker build tests
+  # Covers TC #5 from functional-test-cases-sheet.md
+  # Runs `make build REGISTRY=false` and verifies all images are present —
+  # including audio-analyzer and text-to-speech which are pulled (not built)
+  # when edge-ai-libraries is absent.
+  # Runs on every push.
   # ---------------------------------------------------------------------------
-  tier2-docker-tests:
-    name: "Tier 2 — Docker container tests"
+  tier2-build-tests:
+    name: "Tier 2A — Docker build tests"
     runs-on: ubuntu-latest
+    needs: tier1-functional-tests
 
     permissions:
       contents: read
 
-    if: >
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_dispatch' && inputs.enable_tier2 == 'true') ||
-      vars.ENABLE_TIER2_TESTS == 'true'
+    env:
+      RELEASE_TAG: "2026.1.0"
+      TARGET_DEVICE: "CPU"
+      RENDER_GID: "109"
 
     steps:
       - name: Checkout code
@@ -140,48 +141,222 @@ jobs:
           cache: "pip"
           cache-dependency-path: smart-kiosk-assistant/requirements.txt
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends libportaudio2
-
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
           pip install \
             pytest==8.3.5 \
             pytest-timeout==2.3.1 \
-            pyyaml
+            pyyaml \
+            pydantic>=2.0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
-      - name: Run Tier 2 Docker tests
+      # Cache Docker layer builds so repeated pushes don't rebuild from scratch.
+      # Key includes the hash of all Dockerfiles and requirement files.
+      - name: Cache Docker image layers
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
+        with:
+          path: /tmp/docker-cache
+          key: ${{ runner.os }}-docker-build-${{ hashFiles('smart-kiosk-assistant/**/Dockerfile', 'smart-kiosk-assistant/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-docker-build-
+
+      - name: Build all service images
+        timeout-minutes: 30
+        run: |
+          make build REGISTRY=false
+
+      - name: Run Tier 2 build tests
         env:
           PYTHONPATH: .
-        timeout-minutes: 20
+          RELEASE_TAG: "2026.1.0"
+        timeout-minutes: 5
         run: |
-          python -m pytest tests/functional/ \
+          python -m pytest tests/functional/test_make_build.py \
             -m "tier2" \
             --tb=short \
             --strict-markers \
             -v \
-            --timeout=900 \
-            --junitxml=test-results/tier2-results.xml
+            --timeout=60 \
+            --junitxml=test-results/tier2a-build-results.xml
 
-      - name: Upload Tier 2 test results
+      - name: Upload Tier 2A test results
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v4
         with:
-          name: tier2-docker-test-results
+          name: tier2a-build-test-results
           path: |
-            smart-kiosk-assistant/test-results/tier2-results.xml
+            smart-kiosk-assistant/test-results/tier2a-build-results.xml
             smart-kiosk-assistant/tests/functional/test_results.csv
           retention-days: 30
 
       - name: Docker cleanup
         if: always()
         run: |
-          docker rm -f kiosk-core-ci-test 2>/dev/null || true
-          docker rmi -f kiosk-core-ci-test:latest 2>/dev/null || true
+          docker image prune -f 2>/dev/null || true
+
+  # ---------------------------------------------------------------------------
+  # TIER 2B — Full-stack integration tests
+  # Covers TC #8–#13 from functional-test-cases-sheet.md:
+  #   #8  Health checks for all services
+  #   #9  CPU metrics via metrics-collector
+  #   #10 RAG ingestion and retrieval
+  #   #11 Product menu (26 items)
+  #   #12 Agent ordering flow (text-mode, no audio)
+  #   #13 End-to-end latency within bounds
+  #
+  # Runs on push to main branch or when manually triggered with run_full_stack=true.
+  # Requires ~6 GB disk for models + Docker images.
+  # Uses KIOSK_CORE_DIARIZATION_ENABLED=false so HF_TOKEN is NOT required.
+  # ---------------------------------------------------------------------------
+  tier2-full-stack-tests:
+    name: "Tier 2B — Full-stack integration tests"
+    runs-on: ubuntu-latest
+    needs: tier2-build-tests
+
+    permissions:
+      contents: read
+
+    # Only run on push to main or manual trigger with run_full_stack=true
+    if: >
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.run_full_stack == 'true')
+
+    env:
+      RELEASE_TAG: "2026.1.0"
+      TARGET_DEVICE: "CPU"
+      RENDER_GID: "109"
+      # Disable speaker diarization — avoids gated HF model download in CI
+      KIOSK_CORE_DIARIZATION_ENABLED: "false"
+      # Increase timeouts for CPU inference on GH-hosted runner
+      STACK_STARTUP_TIMEOUT: "600"
+      LLM_RESPONSE_TIMEOUT: "300"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: smart-kiosk-assistant/requirements.txt
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            pytest==8.3.5 \
+            pytest-timeout==2.3.1 \
+            pyyaml \
+            pydantic>=2.0 \
+            requests
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      # Cache downloaded ML models between runs.
+      # Key: hash of setup_models.sh — any change to downloads busts the cache.
+      - name: Cache ML models
+        id: cache-models
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
+        with:
+          path: |
+            smart-kiosk-assistant/models
+            smart-kiosk-assistant/storage
+          key: ${{ runner.os }}-models-${{ hashFiles('smart-kiosk-assistant/setup_models.sh') }}
+          restore-keys: |
+            ${{ runner.os }}-models-
+
+      - name: Download ML models (if cache miss)
+        if: steps.cache-models.outputs.cache-hit != 'true'
+        timeout-minutes: 30
+        run: |
+          chmod +x setup_models.sh
+          # CPU device, INT8 Qwen3-4B, skip identity models not needed for kiosk tests
+          ./setup_models.sh --device CPU --skip-identity 2>&1 | tee /tmp/model-download.log
+        env:
+          # HF_TOKEN is not required for Qwen3-4B (public model)
+          # It would be required for Pyannote but diarization is disabled in CI
+          HF_TOKEN: ""
+
+      - name: Build all service images
+        timeout-minutes: 30
+        run: |
+          make build REGISTRY=false
+
+      - name: Start all services (diarization disabled)
+        timeout-minutes: 5
+        run: |
+          # Start the full stack with diarization disabled
+          KIOSK_CORE_DIARIZATION_ENABLED=false make up
+        env:
+          KIOSK_CORE_DIARIZATION_ENABLED: "false"
+          TARGET_DEVICE: "CPU"
+
+      - name: Wait for core services to become healthy
+        timeout-minutes: 10
+        run: |
+          echo "Waiting for kiosk-core to be healthy..."
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8012/health > /dev/null 2>&1; then
+              echo "kiosk-core is healthy after ${i}0s"
+              break
+            fi
+            echo "Attempt $i/60 — waiting 10s..."
+            sleep 10
+          done
+
+          echo "Waiting for rag-service to be healthy..."
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8020/health > /dev/null 2>&1; then
+              echo "rag-service is healthy after ${i}0s"
+              break
+            fi
+            echo "Attempt $i/60 — waiting 10s..."
+            sleep 10
+          done
+
+      - name: Show service logs (pre-test snapshot)
+        if: always()
+        run: |
+          docker compose logs --tail=50 kiosk-core rag-service metrics-collector 2>/dev/null || true
+
+      - name: Run Tier 2 full-stack tests
+        env:
+          PYTHONPATH: .
+          STACK_STARTUP_TIMEOUT: "600"
+          LLM_RESPONSE_TIMEOUT: "300"
+        timeout-minutes: 60
+        run: |
+          python -m pytest tests/functional/test_full_stack.py \
+            -m "tier2" \
+            --tb=short \
+            --strict-markers \
+            -v \
+            --timeout=360 \
+            --junitxml=test-results/tier2b-stack-results.xml
+
+      - name: Show service logs (post-test)
+        if: always()
+        run: |
+          docker compose logs --tail=100 2>/dev/null || true
+
+      - name: Upload Tier 2B test results
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v4
+        with:
+          name: tier2b-full-stack-test-results
+          path: |
+            smart-kiosk-assistant/test-results/tier2b-stack-results.xml
+            smart-kiosk-assistant/tests/functional/test_results.csv
+          retention-days: 30
+
+      - name: Tear down all services
+        if: always()
+        run: |
+          make down 2>/dev/null || docker compose down --remove-orphans --volumes 2>/dev/null || true
+          docker image prune -f 2>/dev/null || true

@@ -239,12 +239,11 @@ build: check-env ## Build (REGISTRY=false) or pull (REGISTRY=true) all images
 		echo "$(YELLOW)  REGISTRY=false → Building local services from source$(NC)"; \
 		REGISTRY=$(_DOCKER_REGISTRY) docker compose -f $(COMPOSE_FILE) $(_IDENTITY_PROFILE) build $(LOCAL_ONLY_SERVICES) $(_IDENTITY_SVC); \
 		if [ -d "$(EAL_PATH)/audio-analyzer" ] && [ -d "$(EAL_PATH)/text-to-speech" ]; then \
-			echo "$(YELLOW)  Building EAL services (audio-analyzer, text-to-speech)...$(NC)"; \
+			echo "$(YELLOW)  Building EAL services (audio-analyzer, text-to-speech) from source...$(NC)"; \
 			REGISTRY=$(_DOCKER_REGISTRY) docker compose -f $(COMPOSE_FILE) build audio-analyzer text-to-speech; \
 		else \
-			echo "$(YELLOW)  ⚠ edge-ai-libraries not found at $(EAL_PATH)$(NC)"; \
-			echo "    audio-analyzer and text-to-speech use pre-built images ($(_DOCKER_REGISTRY)/*:$(RELEASE_TAG))"; \
-			echo "    To build from source: see docs/user-guide/get-started.md (edge-ai-libraries sparse clone)"; \
+			echo "$(YELLOW)  ⚠ edge-ai-libraries not found at $(EAL_PATH) — pulling pre-built images...$(NC)"; \
+			REGISTRY=$(_ENV_REGISTRY) docker compose -f $(COMPOSE_FILE) pull audio-analyzer text-to-speech; \
 		fi; \
 	else \
 		echo "$(YELLOW)  REGISTRY=$(REGISTRY) → Pulling images from registry$(NC)"; \
