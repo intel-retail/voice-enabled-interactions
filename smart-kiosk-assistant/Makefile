@@ -165,9 +165,15 @@ check-env: ## Validate .env and all required variables before running the stack
 	fi; \
 	\
 	if [ -z "$(HF_TOKEN)" ]; then \
-		echo "  $(RED)✗ HF_TOKEN is not set$(NC)"; \
-		echo "    Set it in .env  →  https://huggingface.co/settings/tokens"; \
-		ERRORS=$$((ERRORS+1)); \
+		if [ "$(KIOSK_CORE_DIARIZATION_ENABLED)" = "false" ]; then \
+			echo "  $(YELLOW)⚠ HF_TOKEN is not set$(NC) (OK — diarization is disabled)"; \
+		else \
+			echo "  $(RED)✗ HF_TOKEN is not set$(NC)"; \
+			echo "    Required for speaker diarization (pyannote/segmentation-3.0)."; \
+			echo "    Set it in .env  →  https://huggingface.co/settings/tokens"; \
+			echo "    Or add KIOSK_CORE_DIARIZATION_ENABLED=false to .env to skip diarization."; \
+			ERRORS=$$((ERRORS+1)); \
+		fi; \
 	else \
 		echo "  $(GREEN)✓ HF_TOKEN is set$(NC)"; \
 	fi; \

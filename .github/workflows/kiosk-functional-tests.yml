@@ -162,10 +162,17 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-docker-build-
 
+      - name: Create CI .env
+        # check-env requires .env to exist. HF_TOKEN is not needed because
+        # KIOSK_CORE_DIARIZATION_ENABLED=false (pyannote is never downloaded).
+        run: |
+          cp .env.example .env
+          echo "KIOSK_CORE_DIARIZATION_ENABLED=false" >> .env
+
       - name: Build all service images
         timeout-minutes: 30
         run: |
-          make build REGISTRY=false
+          make build REGISTRY=false KIOSK_CORE_DIARIZATION_ENABLED=false
 
       - name: Run Tier 2 build tests
         env:
@@ -281,10 +288,15 @@ jobs:
           # It would be required for Pyannote but diarization is disabled in CI
           HF_TOKEN: ""
 
+      - name: Create CI .env
+        run: |
+          cp .env.example .env
+          echo "KIOSK_CORE_DIARIZATION_ENABLED=false" >> .env
+
       - name: Build all service images
         timeout-minutes: 30
         run: |
-          make build REGISTRY=false
+          make build REGISTRY=false KIOSK_CORE_DIARIZATION_ENABLED=false
 
       - name: Start all services (diarization disabled)
         timeout-minutes: 5
