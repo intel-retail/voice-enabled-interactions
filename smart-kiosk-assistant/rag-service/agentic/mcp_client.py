@@ -127,8 +127,15 @@ async def _get_session(server: MCPServerConfig):
             _sessions[server.name] = (session, stack)  # keep stack alive
             logger.info("[MCP] Persistent session opened for server=%s", server.name)
             return session
-        except Exception as exc:
-            await stack.aclose()
+        except BaseException as exc:
+            # Suppress cleanup errors — the MCP library's anyio TaskGroup may
+            # raise CancelledError or RuntimeError during teardown after a
+            # connection failure; swallowing them here prevents double-exception
+            # noise and lets the original error propagate cleanly.
+            try:
+                await stack.aclose()
+            except Exception:
+                pass
             logger.error("[MCP] Failed to open session for %s: %s", server.name, exc)
             raise
 

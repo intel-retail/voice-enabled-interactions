@@ -30,7 +30,13 @@ async def lifespan(app: FastAPI):
         agent = get_ordering_agent()
         await agent.bootstrap()
         logger.info("[STARTUP] OrderingAgent bootstrapped ✓")
-    except Exception as exc:
+    except BaseException as exc:
+        # KeyboardInterrupt / SystemExit must propagate; everything else
+        # (including asyncio.CancelledError from MCP's anyio TaskGroup when
+        # kiosk-core is not yet reachable) is non-fatal — the agent will
+        # retry MCP discovery on the first chat() call.
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
         logger.warning("[STARTUP] OrderingAgent bootstrap failed (non-fatal): %s", exc)
 
     try:
