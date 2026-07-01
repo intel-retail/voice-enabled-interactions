@@ -106,14 +106,15 @@ export function QsrPanel({ orderActive }: QsrPanelProps) {
       {/* 1 ── Live queue feed (MJPEG) ───────────────────────────────────── */}
       <div className="overflow-hidden rounded-lg border border-gray-200 bg-black shadow-sm">
         {streamErr ? (
-          <div className="flex h-36 items-center justify-center text-xs text-gray-400">
+          <div className="flex items-center justify-center text-xs text-gray-400" style={{ height: '280px' }}>
             📷 Queue feed unavailable
           </div>
         ) : (
           <img
             src={QUEUE_STREAM_URL}
             alt="Live queue feed with person detection"
-            className="h-44 w-full object-contain"
+            className="w-full object-contain"
+            style={{ height: '280px' }}
             onError={() => setStreamErr(true)}
           />
         )}
