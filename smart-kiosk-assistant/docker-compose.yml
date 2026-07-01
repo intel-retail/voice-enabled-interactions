@@ -78,6 +78,9 @@ services:
     ports:
       - "8090:8090"
     environment:
+      # Derive RTSP URL from the same STREAM_NAME that rtsp-streamer publishes,
+      # so changing the media file in one place keeps the pipeline in sync.
+      QUEUE_SERVICE__SOURCE__RTSP_URL: "rtsp://rtsp-streamer:8554/${STREAM_NAME:-istockphoto-2248308153-640_adpp_is}"
       NO_PROXY: "localhost,127.0.0.1,rtsp-streamer,queue-service"
       no_proxy: "localhost,127.0.0.1,rtsp-streamer,queue-service"
     volumes:

@@ -201,7 +201,11 @@ class QueuePipeline:
         if etype == "autovideosink":
             return {"sync": False}
         if etype == "appsink":
-            return {"emit-signals": True, "max-buffers": 1, "drop": True, "sync": False}
+            # Assign a stable name so get_by_name() works reliably across
+            # reconnects: GStreamer increments the auto-name counter globally
+            # (appsink0, appsink1, …) every time a new pipeline is built, so
+            # the auto-name differs on every reconnect attempt.
+            return {"name": "mjpeg_appsink", "emit-signals": True, "max-buffers": 1, "drop": True, "sync": False}
         if etype == "capsfilter":
             return {"caps": "video/x-raw,format=BGRx"}
         # decodebin, videoconvert and any other elements need no properties.
@@ -299,10 +303,7 @@ class QueuePipeline:
 
         # Wire appsink new-sample signal → frame_buffer when API streaming is on.
         if self._api_enabled and not self._debug:
-            appsink = self.pipeline.get_by_name("appsink0")
-            if appsink is None:
-                # parse_launch auto-names elements; try without index suffix too.
-                appsink = self.pipeline.get_by_name("appsink")
+            appsink = self.pipeline.get_by_name("mjpeg_appsink")
             if appsink is not None:
                 appsink.connect("new-sample", self._on_new_sample)
                 logger.info("Appsink wired for MJPEG streaming")

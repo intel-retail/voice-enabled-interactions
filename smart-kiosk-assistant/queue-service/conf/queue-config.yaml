@@ -7,8 +7,9 @@
 
 source:
   # RTSP feed published by the existing rtsp-streamer service.
-  # stream name = mp4 filename without extension (sample1.mp4 → sample1)
-  rtsp_url: "rtsp://rtsp-streamer:8554/sample1"
+  # stream name = mp4 filename without extension (matches STREAM_NAME in docker-compose).
+  # Override at runtime: QUEUE_SERVICE__SOURCE__RTSP_URL=rtsp://rtsp-streamer:8554/<name>
+  rtsp_url: "rtsp://rtsp-streamer:8554/istockphoto-2248308153-640_adpp_is"
   rtsp_transport: "tcp"
 
 model:
