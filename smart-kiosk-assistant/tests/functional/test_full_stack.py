@@ -28,7 +28,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import requests
+
+try:
+    import requests
+except ModuleNotFoundError:  # pragma: no cover
+    requests = None  # type: ignore[assignment]
 
 _KIOSK_ROOT = Path(__file__).resolve().parents[2]
 
@@ -69,6 +73,8 @@ LLM_RESPONSE_TIMEOUT    = int(os.environ.get("LLM_RESPONSE_TIMEOUT", "300"))
 
 def _wait_for_http(url: str, timeout: int = STARTUP_TIMEOUT_SECONDS) -> bool:
     """Poll `url` until it returns 2xx or timeout elapses. Returns True on success."""
+    if requests is None:
+        return False
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:

@@ -83,9 +83,8 @@ jobs:
             pytest==8.3.5 \
             pytest-timeout==2.3.1 \
             pyyaml \
-            pydantic>=2.0
-
-      - name: Run Tier 1 functional tests
+            pydantic>=2.0 \
+            requests
         env:
           PYTHONPATH: .
           # Ensure diarization is off so HF_TOKEN is not required at import time
