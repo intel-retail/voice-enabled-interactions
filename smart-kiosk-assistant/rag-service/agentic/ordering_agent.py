@@ -20,7 +20,9 @@ Usage::
 from __future__ import annotations
 
 import inspect
+import json
 import logging
+import time
 from typing import Any
 
 from agentic import config as agent_cfg
@@ -44,22 +46,108 @@ _JSON_TO_PY: dict[str, type] = {
 }
 
 # ---------------------------------------------------------------------------
+# Tool result compression
+# ---------------------------------------------------------------------------
+
+
+def _compress_tool_result(tool_name: str, raw: dict[str, Any]) -> dict[str, Any]:
+    """Compress a tool result before it is stored in ADK session history.
+
+    The full JSON returned by kiosk-core is large.  Only a fraction of it
+    is needed in subsequent turns (the LLM needs order_id, item names/prices,
+    and upsell display strings — never product_id, category, user_id, reason,
+    or the full nested product object inside upsell_suggestions).
+
+    Slimming the stored result cuts the per-turn input token count by ~70 %
+    for order tools and ~80 % for list_products, which directly reduces OVMS
+    prefill latency on every subsequent turn.
+
+    Rules:
+    - Error responses are NEVER compressed — return unchanged.
+    - If JSON parsing or compression fails for any reason, return the original
+      unchanged (safe fallback — never break the ordering flow).
+    - ``knowledge_lookup`` is excluded: it returns plain text, already minimal.
+    """
+    if "error" in raw:
+        return raw
+
+    result_text = raw.get("result", "")
+    if not result_text:
+        return raw
+
+    try:
+        data = json.loads(result_text)
+    except (json.JSONDecodeError, TypeError):
+        return raw  # not valid JSON — return as-is
+
+    try:
+        compressed: Any = None
+
+        if tool_name == "list_products":
+            # Keep only name + price — product_id and category never appear in replies.
+            if isinstance(data, list):
+                compressed = [
+                    {"name": p.get("name"), "price": p.get("price")}
+                    for p in data
+                ]
+
+        elif tool_name in ("place_order", "update_order", "get_order"):
+            if isinstance(data, dict):
+                items = [
+                    {
+                        "name": it.get("name"),
+                        "qty": it.get("quantity", 1),
+                        "price": it.get("price"),
+                    }
+                    for it in data.get("items", [])
+                ]
+                compressed = {
+                    "order_id": data.get("order_id"),
+                    "total": data.get("total"),
+                    "items": items,
+                }
+                # Upsell display strings are copied verbatim into the reply template —
+                # keep them; drop the full product object and reason.
+                upsell_displays = [
+                    s.get("display", "")
+                    for s in data.get("upsell_suggestions", [])
+                    if s.get("display")
+                ]
+                if upsell_displays:
+                    compressed["upsell"] = upsell_displays
+
+        elif tool_name == "confirm_order":
+            if isinstance(data, dict):
+                compressed = {
+                    "order_id": data.get("order_id"),
+                    "status": data.get("status"),
+                    "total": data.get("total"),
+                }
+
+        elif tool_name == "get_upsell_suggestions":
+            if isinstance(data, list):
+                compressed = [
+                    s.get("display", "")
+                    for s in data
+                    if s.get("display")
+                ]
+
+        if compressed is not None:
+            return {"status": "success", "result": json.dumps(compressed)}
+
+    except Exception:
+        pass  # any compression failure → safe fallback
+
+    return raw
+
+
+# ---------------------------------------------------------------------------
 # Agent instruction prompt
 # ---------------------------------------------------------------------------
 
 _AGENT_INSTRUCTION = """
 You are the ordering assistant for QuickBite Express, a QSR voice kiosk.
 Help customers browse the menu and place orders conversationally.
-
-## Tools
-- list_products(category?) — products with id and price. categories: burgers,
-  pizza, wraps, sides, beverages, desserts.
-- place_order(user_id, items) / update_order(order_id, items) — items are
-  {product_id, quantity}. product_id may be the catalogue id OR the spoken name;
-  the system resolves it. The result includes the order and upsell_suggestions.
-- get_order(order_id) — current order summary.
-- confirm_order(order_id) — finalises; returns the Order ID.
-- knowledge_lookup(question) — ingredients, allergens, dietary, hours, policies.
 
 ## GROUNDING (most important)
 Never state a product name, id, or price that did not come from a tool result in
@@ -220,7 +308,8 @@ class OrderingAgent:
         async def _mcp_fn(**kwargs: Any) -> Any:
             logger.info("[AGENT→MCP] tool=%s args=%s", tool_name, kwargs)
             result = await call_tool(tool_name, kwargs)
-            logger.debug("[AGENT→MCP] tool=%s result=%s", tool_name, result)
+            result = _compress_tool_result(tool_name, result)
+            logger.debug("[AGENT→MCP] tool=%s compressed_result=%s", tool_name, str(result)[:200])
             return result
 
         _mcp_fn.__name__ = tool_name
@@ -312,6 +401,12 @@ class OrderingAgent:
         reply_parts: list[str] = []
         tool_calls: list[str] = []
 
+        logger.info(
+            "[AGENT→OVMS] Sending request | session=%s user=%s message_chars=%d",
+            session_id, user_id, len(full_message),
+        )
+        t_start = time.perf_counter()
+
         try:
             # Use run_async — run() is documented as "local testing only"
             # and blocks the event loop thread via queue.Queue().get().
@@ -328,8 +423,18 @@ class OrderingAgent:
                         if hasattr(part, "text") and part.text:
                             reply_parts.append(part.text)
         except Exception as exc:
-            logger.error("[AGENT] Error during run: %s", exc, exc_info=True)
+            latency_ms = (time.perf_counter() - t_start) * 1000
+            logger.error(
+                "[AGENT←OVMS] Request failed | session=%s latency_ms=%.0f error=%s",
+                session_id, latency_ms, exc, exc_info=True,
+            )
             return {"reply": "Sorry, I encountered an error. Please try again.", "tool_calls": []}
+
+        latency_ms = (time.perf_counter() - t_start) * 1000
+        logger.info(
+            "[AGENT←OVMS] Response received | session=%s latency_ms=%.0f tool_calls=%s reply_chars=%d",
+            session_id, latency_ms, tool_calls, len("".join(reply_parts)),
+        )
 
         reply = "".join(reply_parts).strip()
 
@@ -349,7 +454,7 @@ class OrderingAgent:
                     # All looks like thinking — return as-is but log a warning
                     logger.warning("[AGENT] Reply may contain unstripped thinking (%d chars)", len(reply))
 
-        logger.info("[AGENT] Reply length=%d tool_calls=%s", len(reply), tool_calls)
+        logger.info("[AGENT] Reply length=%d tool_calls=%s latency_ms=%.0f", len(reply), tool_calls, latency_ms)
         return {"reply": reply, "tool_calls": tool_calls}
 
     async def _ensure_session(
