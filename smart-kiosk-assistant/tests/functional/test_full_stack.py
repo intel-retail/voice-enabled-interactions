@@ -234,7 +234,10 @@ class TestRagIngestion:
         resp = requests.post(
             f"{RAG_BASE}/api/v1/context",
             json=payload,
-            timeout=60,
+            # Cold-start embedding-model load on CPU can be slow — reuse the
+            # same generous timeout as the LLM-backed tests rather than a
+            # fixed 60s (which timed out in CI on first ingest).
+            timeout=LLM_RESPONSE_TIMEOUT,
         )
         assert resp.status_code == 200, (
             f"RAG ingest failed: {resp.status_code} — {resp.text[:500]}"
