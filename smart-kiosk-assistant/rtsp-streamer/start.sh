@@ -32,7 +32,13 @@ if [ ! -x "$MEDIAMTX_BIN" ]; then
   exit 1
 fi
 
-# Input selection:
+# Input selection (checked in priority order):
+#   MEDIA_FILES - comma-separated list of clips played back-to-back and then
+#                 looped as a whole (e.g. "sample_1.mp4,sample_2.mp4"). Entries
+#                 are absolute paths or relative to MEDIA_DIR. The clips are
+#                 concatenated with ffmpeg's concat demuxer and published as ONE
+#                 stream, so exactly one ffmpeg process owns the RTSP path.
+#                 STREAM_NAME is required in this mode.
 #   MEDIA_FILE  - stream only this single file (absolute path, or relative to
 #                 MEDIA_DIR). When unset, every *.mp4 in MEDIA_DIR is published
 #                 (original behavior). Other .mp4 files in MEDIA_DIR are kept on
@@ -40,7 +46,48 @@ fi
 #   STREAM_NAME - override the published RTSP path. When unset, the path is the
 #                 input filename without extension. Set this to keep a stable
 #                 path for consumers when the underlying file changes.
-if [ -n "${MEDIA_FILE:-}" ]; then
+
+# PLAYLIST_FILE is non-empty only in multi-file (MEDIA_FILES) mode.
+PLAYLIST_FILE=""
+# Extra ffmpeg input-format args (e.g. concat demuxer flags). Empty for the
+# single-file/glob workflows so their ffmpeg invocation is unchanged.
+INPUT_FORMAT_ARGS=""
+
+if [ -n "${MEDIA_FILES:-}" ]; then
+  # Multi-file sequential playback via the concat demuxer.
+  if [ -z "${STREAM_NAME:-}" ]; then
+    log "ERROR STREAM_NAME must be set when MEDIA_FILES is used" >&2
+    exit 1
+  fi
+  PLAYLIST_FILE=$(mktemp "${TMPDIR:-/tmp}/playlist.XXXXXX")
+  saved_ifs=$IFS
+  IFS=,
+  for entry in $MEDIA_FILES; do
+    IFS=$saved_ifs
+    # Trim surrounding whitespace so "a.mp4, b.mp4" is also accepted.
+    entry=$(printf '%s' "$entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    if [ -z "$entry" ]; then
+      IFS=,
+      continue
+    fi
+    case "$entry" in
+      /*) resolved="$entry" ;;
+      *)  resolved="$MEDIA_DIR/$entry" ;;
+    esac
+    if [ ! -f "$resolved" ]; then
+      log "ERROR MEDIA_FILES entry '$resolved' not found" >&2
+      exit 1
+    fi
+    # concat demuxer playlist line; single-quote the path per ffmpeg syntax.
+    printf "file '%s'\n" "$resolved" >> "$PLAYLIST_FILE"
+    IFS=,
+  done
+  IFS=$saved_ifs
+  INPUT_FORMAT_ARGS="-f concat -safe 0"
+  log "Built concat playlist $PLAYLIST_FILE:"
+  while IFS= read -r pl_line; do log "  $pl_line"; done < "$PLAYLIST_FILE"
+  set -- "$PLAYLIST_FILE"
+elif [ -n "${MEDIA_FILE:-}" ]; then
   case "$MEDIA_FILE" in
     /*) selected_file="$MEDIA_FILE" ;;
     *)  selected_file="$MEDIA_DIR/$MEDIA_FILE" ;;
@@ -158,7 +205,16 @@ for file in "$@"; do
   log "[${station_label}] Preparing RTSP stream '${stream_name}' from $file (loop_count=$LOOP_COUNT, blank_duration=${BLANK_DURATION}s)"
   
   # Determine streaming mode
-  if [ "$LOOP_COUNT" -eq -1 ]; then
+  if [ -n "$PLAYLIST_FILE" ]; then
+    # Multi-file mode: the concat demuxer already sequences the clips, so we
+    # loop the whole playlist. Blank-frame insertion is not applicable here.
+    input_file="$file"
+    if [ "$LOOP_COUNT" -eq 1 ]; then
+      stream_loop_arg="0"
+    else
+      stream_loop_arg="-1"
+    fi
+  elif [ "$LOOP_COUNT" -eq -1 ]; then
     # Infinite loop mode (original behavior)
     stream_loop_arg="-1"
     input_file="$file"
@@ -200,6 +256,7 @@ for file in "$@"; do
     -loglevel info \
     -re \
     -stream_loop "$stream_loop_arg" \
+    $INPUT_FORMAT_ARGS \
     -i "$input_file" \
     -an \
     -c:v libx264 \
@@ -227,6 +284,9 @@ cleanup() {
       kill "$pid"
     fi
   done
+  if [ -n "${PLAYLIST_FILE:-}" ]; then
+    rm -f "$PLAYLIST_FILE"
+  fi
   log "Cleanup complete"
 }
 
