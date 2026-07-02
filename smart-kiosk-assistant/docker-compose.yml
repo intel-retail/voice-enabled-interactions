@@ -34,14 +34,15 @@ services:
       - "8554:8554"
     environment:
       MEDIA_DIR:      /media
-      # Stream this specific file. Both videos stay in Sample_data/; only the
-      # one named here is published. Switch back to the previous clip by
-      # changing just this line to:
-      #   MEDIA_FILE:   /media/istockphoto-2248308153-640_adpp_is.mp4
-      MEDIA_FILE:     /media/sample1.mp4
+      # Play these clips back-to-back, then loop the whole sequence forever
+      # (sample_1 -> sample_2 -> sample_1 -> ...). They are concatenated by
+      # ffmpeg's concat demuxer and published as ONE stream, so a single ffmpeg
+      # process owns the RTSP path. For a single continuous clip instead, remove
+      # MEDIA_FILES and set MEDIA_FILE (e.g. MEDIA_FILE: /media/sample1.mp4).
+      MEDIA_FILES:    /media/sample_1.mp4,/media/sample_2.mp4
       # Keep the published RTSP path stable so the queue-service URL
       # (rtsp://rtsp-streamer:8554/istockphoto-2248308153-640_adpp_is) keeps
-      # working regardless of which MEDIA_FILE is selected.
+      # working regardless of which clips are selected.
       STREAM_NAME:    istockphoto-2248308153-640_adpp_is
       RTSP_PORT:      "8554"
       LOOP_COUNT:     "-1"      # -1 = infinite loop for a continuous feed

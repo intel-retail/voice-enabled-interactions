@@ -5,7 +5,7 @@
 # Smart Kiosk Assistant - Makefile
 # =============================================================================
 
-.PHONY: help init-env setup-dirs setup-models check-env show-config \
+.PHONY: help init-env setup-dirs setup-models download-sample-video check-env show-config \
 		build up down restart status logs \
 		logs-ovms logs-rag logs-core logs-ui logs-audio logs-tts logs-metrics \
 		test clean dev-build
@@ -39,6 +39,13 @@ export TAG       := $(RELEASE_TAG)
 
 TARGET_DEVICE    ?= GPU
 OVMS_MODEL_NAME  ?= OpenVINO/Qwen3-4B-int8-ov
+
+# Sample videos for the queue-service RTSP feed. Directory and source URLs are
+# sourced from .env (see .env.example). Files are saved as sample_1.mp4 /
+# sample_2.mp4 to match docker-compose (MEDIA_FILES).
+SAMPLE_DATA_DIR    ?= ./Sample_data
+SAMPLE_VIDEO_1_URL ?=
+SAMPLE_VIDEO_2_URL ?=
 
 # edge-ai-libraries path (audio-analyzer + text-to-speech build contexts live here)
 EAL_PATH         := ../edge-ai-libraries/microservices
@@ -78,6 +85,7 @@ help: ## Show this help message
 	@echo "  make init-env          Create .env from .env.example"
 	@echo "  make setup-dirs        Create required runtime directories"
 	@echo "  make setup-models      Download OVMS LLM model (Qwen3-4B) via setup_models.sh"
+	@echo "  make download-sample-video  Download sample_1/sample_2 videos into SAMPLE_DATA_DIR"
 	@echo "  make check-env         Validate .env and required variables"
 	@echo "  make show-config       Print resolved configuration"
 	@echo ""
@@ -152,6 +160,42 @@ setup-models: ## Download the OVMS LLM model (Qwen3-4B) via setup_models.sh
 		./setup_models.sh --device $(TARGET_DEVICE); \
 	fi
 	@echo "$(GREEN)✓ Model download complete$(NC)"
+
+download-sample-video: setup-dirs ## Download sample videos (sample_1, sample_2) into SAMPLE_DATA_DIR (URLs from .env)
+	@echo "$(BLUE)Downloading sample videos into $(SAMPLE_DATA_DIR)...$(NC)"
+	@mkdir -p "$(SAMPLE_DATA_DIR)"
+	@_download() { \
+		name=$$1; url=$$2; dest=$$3; \
+		if [ -z "$$url" ]; then \
+			echo "  $(RED)✗ $$name URL is not set$(NC)  →  add it to .env"; \
+			return 1; \
+		fi; \
+		if [ -f "$$dest" ]; then \
+			echo "  $(GREEN)✓ $$name already exists: $$dest$(NC)"; \
+			return 0; \
+		fi; \
+		echo "  URL : $$url"; \
+		echo "  Dest: $$dest"; \
+		if command -v curl >/dev/null 2>&1; then \
+			curl -L --progress-bar -o "$$dest" "$$url" \
+				&& echo "  $(GREEN)✓ Download complete: $$dest$(NC)" \
+				|| { echo "  $(RED)✗ Download failed for $$name. Check the URL in .env or add the video manually.$(NC)"; rm -f "$$dest"; return 1; }; \
+		elif command -v wget >/dev/null 2>&1; then \
+			wget -q --show-progress -O "$$dest" "$$url" \
+				&& echo "  $(GREEN)✓ Download complete: $$dest$(NC)" \
+				|| { echo "  $(RED)✗ Download failed for $$name. Check the URL in .env or add the video manually.$(NC)"; rm -f "$$dest"; return 1; }; \
+		else \
+			echo "  $(RED)✗ Neither curl nor wget found. Install one or copy the video manually to $$dest$(NC)"; \
+			return 1; \
+		fi; \
+	}; \
+	_download "sample_1" "$(SAMPLE_VIDEO_1_URL)" "$(SAMPLE_DATA_DIR)/sample_1.mp4"; _rc1=$$?; \
+	_download "sample_2" "$(SAMPLE_VIDEO_2_URL)" "$(SAMPLE_DATA_DIR)/sample_2.mp4"; _rc2=$$?; \
+	if [ $$_rc1 -ne 0 ] || [ $$_rc2 -ne 0 ]; then \
+		echo "$(RED)✗ One or more sample videos failed to download.$(NC)"; \
+		exit 1; \
+	fi
+	@echo "$(GREEN)✓ Sample videos ready in $(SAMPLE_DATA_DIR)$(NC)"
 
 check-env: ## Validate .env and all required variables before running the stack
 	@echo "$(BLUE)Validating environment...$(NC)"
