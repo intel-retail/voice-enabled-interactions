@@ -159,7 +159,7 @@ jobs:
       KIOSK_CORE_DIARIZATION_ENABLED: "false"
       # Increase timeouts for CPU inference on GH-hosted runner
       STACK_STARTUP_TIMEOUT: "600"
-      LLM_RESPONSE_TIMEOUT: "300"
+      LLM_RESPONSE_TIMEOUT: "450"
 
     steps:
       - name: Checkout code
@@ -321,7 +321,7 @@ jobs:
         env:
           PYTHONPATH: .
           STACK_STARTUP_TIMEOUT: "600"
-          LLM_RESPONSE_TIMEOUT: "300"
+          LLM_RESPONSE_TIMEOUT: "450"
         timeout-minutes: 60
         run: |
           python -m pytest tests/functional/test_full_stack.py \
