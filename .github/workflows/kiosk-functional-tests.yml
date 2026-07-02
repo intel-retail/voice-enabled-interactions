@@ -39,6 +39,14 @@ concurrency:
 permissions:
   contents: read
 
+# CI-wide switch for which OVMS LLM quantization Tier 2 downloads/serves.
+# Set to "int8" to go back to the higher-accuracy/slower default; "int4" is
+# ~half the size/compute and keeps the CPU-only GitHub runner (which also runs
+# Whisper, TTS and embeddings concurrently) from starving on LLM inference.
+# This is the single place to flip it — no other workflow edits needed.
+env:
+  CI_OVMS_QUANT: int4 # int4 | int8
+
 defaults:
   run:
     working-directory: smart-kiosk-assistant
@@ -188,7 +196,9 @@ jobs:
             ${{ runner.os }}-docker-build-
 
       # Cache downloaded ML models between runs.
-      # Key: hash of setup_models.sh — any change to downloads busts the cache.
+      # Key: quant + hash of setup_models.sh — flipping CI_OVMS_QUANT or
+      # changing the download script both bust the cache (so switching quant
+      # doesn't reuse a stale model of the wrong size).
       - name: Cache ML models
         id: cache-models
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
@@ -196,9 +206,9 @@ jobs:
           path: |
             smart-kiosk-assistant/models
             smart-kiosk-assistant/storage
-          key: ${{ runner.os }}-models-${{ hashFiles('smart-kiosk-assistant/setup_models.sh') }}
+          key: ${{ runner.os }}-models-${{ env.CI_OVMS_QUANT }}-${{ hashFiles('smart-kiosk-assistant/setup_models.sh') }}
           restore-keys: |
-            ${{ runner.os }}-models-
+            ${{ runner.os }}-models-${{ env.CI_OVMS_QUANT }}-
 
       - name: Download ML models (if cache miss)
         if: steps.cache-models.outputs.cache-hit != 'true'
@@ -206,13 +216,23 @@ jobs:
         run: |
           set -o pipefail
           chmod +x setup_models.sh
-          # CPU device, INT8 Qwen3-4B. Identity-service models are opt-in via
-          # --identity and already skipped by default, so no flag is needed for
-          # them (passing the now-removed --skip-identity flag made the script
-          # exit 1 immediately with "Unknown argument", and because this step
+          # Quant is driven by the workflow-level CI_OVMS_QUANT env var (see
+          # top of file) so it can be flipped in one place. INT4 was chosen as
+          # the CI default because the GitHub-hosted runner is CPU-only and
+          # shares its few vCPUs across Whisper, TTS, embeddings and the LLM at
+          # once — INT8 was taking 100s-1300s+ per chat completion (growing
+          # over the run, i.e. resource starvation) and blowing every timeout.
+          # Identity-service models are opt-in via --identity and already
+          # skipped by default, so no flag is needed for them (passing the
+          # now-removed --skip-identity flag made the script exit 1
+          # immediately with "Unknown argument", and because this step
           # previously lacked `set -o pipefail`, the failure was masked by the
           # `tee` pipe — silently leaving the OVMS model undownloaded).
-          ./setup_models.sh --device CPU 2>&1 | tee /tmp/model-download.log
+          INT_FLAG=""
+          if [ "${CI_OVMS_QUANT}" = "int4" ]; then
+            INT_FLAG="--int4"
+          fi
+          ./setup_models.sh --device CPU ${INT_FLAG} 2>&1 | tee /tmp/model-download.log
         env:
           # HF_TOKEN is not required for Qwen3-4B (public model)
           # It would be required for Pyannote but diarization is disabled in CI
@@ -226,6 +246,9 @@ jobs:
           cp .env.example .env
           echo "KIOSK_CORE_DIARIZATION_ENABLED=false" >> .env
           echo "TARGET_DEVICE=CPU" >> .env
+          # .env.example hardcodes the INT8 model name; override it to match
+          # whichever quant CI_OVMS_QUANT (top of workflow) actually downloaded.
+          echo "OVMS_MODEL_NAME=OpenVINO/Qwen3-4B-${CI_OVMS_QUANT}-ov" >> .env
 
       - name: Build all service images
         timeout-minutes: 30
