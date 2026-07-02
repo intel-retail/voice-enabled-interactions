@@ -167,9 +167,13 @@ jobs:
       - name: Create CI .env
         # check-env requires .env to exist. HF_TOKEN is not needed because
         # KIOSK_CORE_DIARIZATION_ENABLED=false (pyannote is never downloaded).
+        # TARGET_DEVICE must be overridden here (not just via step env) because
+        # the Makefile does `-include .env`, so .env.example's TARGET_DEVICE=GPU
+        # default would otherwise win over the job-level TARGET_DEVICE=CPU env.
         run: |
           cp .env.example .env
           echo "KIOSK_CORE_DIARIZATION_ENABLED=false" >> .env
+          echo "TARGET_DEVICE=CPU" >> .env
 
       - name: Build all service images
         timeout-minutes: 30
@@ -292,9 +296,13 @@ jobs:
           HF_TOKEN: ""
 
       - name: Create CI .env
+        # TARGET_DEVICE must be overridden here (not just via step env) because
+        # the Makefile does `-include .env`, so .env.example's TARGET_DEVICE=GPU
+        # default would otherwise win over the job-level TARGET_DEVICE=CPU env.
         run: |
           cp .env.example .env
           echo "KIOSK_CORE_DIARIZATION_ENABLED=false" >> .env
+          echo "TARGET_DEVICE=CPU" >> .env
 
       - name: Build all service images
         timeout-minutes: 30
