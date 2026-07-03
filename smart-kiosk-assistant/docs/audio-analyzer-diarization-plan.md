@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-01  
 **Author:** Copilot  
-**Status:** Proposed — Not Yet Implemented  
+**Status:** Implemented (2026-07-03) — see "Implementation Notes" at the end for
+how the final design differs from the original proposal below.
 
 ---
 
@@ -257,3 +258,63 @@ Step 3 (Optional / advanced)
 - `audio-analyzer/config.yaml` — diarization section
 - `kiosk-core/kiosk_core/audio_session.py` — `_filter_target_speaker()` method
 - pyannote-audio docs: https://github.com/pyannote/pyannote-audio
+
+---
+
+## 8. Implementation Notes (2026-07-03)
+
+The final implementation deviates from Section 3/Phase 2 above at the
+explicit direction that kiosk-core must not load any additional model:
+**audio-analyzer resolves the stable primary speaker itself** and hands
+kiosk-core a simple `is_primary` boolean per segment. kiosk-core no longer
+holds any cross-chunk speaker state.
+
+What was implemented, in order:
+
+1. **Quick wins (audio-analyzer)** — `min_speakers`/`max_speakers` (1/2) passed
+   to the pyannote pipeline call; midpoint speaker assignment in
+   `asr_component.py` replaced with max-overlap assignment.
+2. **`components/asr/diarization/speaker_identity.py` (new)** — thread-safe,
+   in-memory `SpeakerIdentityStore`, keyed by `session_id`. Reuses the speaker
+   embeddings pyannote already computes during clustering
+   (`DiarizeOutput.speaker_embeddings`, confirmed public API in
+   pyannote-audio 4.0.4) — **no additional model is loaded**. Locks onto the
+   longest-speaking label in the first chunk that meets
+   `lock_min_duration_sec`, then cosine-compares every later chunk's speaker
+   embeddings against the frozen primary embedding
+   (`similarity_threshold`, default 0.75). Idle sessions are evicted after
+   `session_ttl_seconds` (default 1800s).
+3. **`pyannote_diarizer.py`** — `diarize()` now returns
+   `(turns, label_embeddings)`; `label_embeddings` maps each local speaker
+   label to its embedding via `output.speaker_diarization.labels()` /
+   `output.speaker_embeddings`.
+4. **`asr_component.py`** — calls `SpeakerIdentityStore.resolve()` per chunk
+   and stamps each transcribed segment with `is_primary: bool` alongside the
+   existing `speaker` label.
+5. **`config.yaml`** — new `diarization.min_speakers`, `max_speakers`, and
+   `diarization.identity.{enabled, similarity_threshold,
+   lock_min_duration_sec, session_ttl_seconds}`.
+6. **`kiosk_core/audio_session.py`** — `_filter_target_speaker()` rewritten to
+   trust `segment["is_primary"]` directly; removed `primary_speaker_id`,
+   `pending_segments`, the lock-on/buffering state machine, and the
+   `_meaningful_char_count()` helper. The domain-keyword semantic fallback
+   (for chunks where the primary was silent) is unchanged and still lives in
+   kiosk-core, since it is kiosk-specific vocabulary, not audio science.
+   The `primary_speaker_id` field was also removed from the session snapshot
+   API and `kiosk-ui/src/types.ts` (it was unused by the UI).
+
+Tests added:
+- `audio-analyzer/tests/test_speaker_identity.py` (7 cases: lock-on,
+  cross-chunk identity stability despite label reset, dissimilar-embedding
+  rejection, session isolation, TTL eviction, reset).
+- `audio-analyzer/tests/test_pyannote_diarizer.py` updated for the new
+  `(turns, label_embeddings)` return signature and `min/max_speakers` kwargs.
+- `smart-kiosk-assistant/tests/unit/test_speaker_filter.py` (6 cases) for the
+  simplified `_filter_target_speaker()`.
+
+Items from the original Section 3 that were **not** implemented (left for a
+future iteration, low priority): 1a/1b full non-exclusive `Annotation` output
+to recover simultaneous overlapping speech — the current fix targets the
+cross-chunk identity instability, which was the primary reported issue;
+overlapping-speech recovery is a separate, lower-frequency problem.
+
