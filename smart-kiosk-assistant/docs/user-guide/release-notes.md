@@ -1,5 +1,37 @@
 # Release Notes: Smart Kiosk Assistant
 
+## 2026.2.0.1
+
+This release expands Smart Kiosk Assistant with queue-aware ordering, a
+refreshed web experience, and a streamlined build workflow. This update
+includes the following changes:
+
+- The kiosk front end has been rebuilt as a React (Vite + TypeScript)
+  single-page application, replacing the previous Gradio interface for a
+  faster and more customizable web experience.
+- The ordering agent now runs its Qwen3-4B language model through OpenVINO
+  Model Server (OVMS) instead of an in-process OpenVINO model, providing a
+  dedicated, OpenAI-compatible inference endpoint for tool-calling.
+- A new queue analytics capability adds a person-counting service and an
+  RTSP streamer, using YOLO detection with OpenVINO to track queue length
+  from a video feed and expose a live MJPEG overlay stream.
+- The ordering flow can now adapt to real-time queue conditions, surfacing a
+  dynamic peak-hour menu driven by the queue-service integration.
+- Speaker diarization has been enabled across the audio-analyzer and
+  kiosk-core pipeline, improving turn attribution during multi-speaker
+  interactions.
+- An optional multimodal identity service adds Face ID and voiceprint
+  authentication, combining OpenVINO face and ECAPA voice inference with a
+  FAISS index and SQLite loyalty profiles, enabled through a dedicated
+  deployment profile.
+- A Makefile-based workflow simplifies setup and operations with targets for
+  environment initialization, model download, sample-video retrieval, image
+  build, service startup, health checks, and cleanup.
+- Sample-video tooling downloads and provisions the RTSP feed clips used by
+  the queue analytics pipeline, configurable through the environment file.
+
+
+
 ## 2026.1.0
 
 The initial release of Smart Kiosk Assistant marks the launch of a voice-enabled
@@ -27,5 +59,4 @@ environments. The application has the following features:
   deploy, adapt, and scale across enterprise environments.
 - This launch establishes Smart Kiosk Assistant as a strong foundation for
   immersive, intelligent, and voice-first digital engagement experiences.
-
 
