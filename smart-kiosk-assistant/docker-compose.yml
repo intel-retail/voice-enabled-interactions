@@ -118,7 +118,9 @@ services:
     build:
       context: ./kiosk_core/metrics-collector
       dockerfile: Dockerfile
-    image: ${REGISTRY:-intel}/metrics-collector:${RELEASE_TAG:-latest}
+    # Pinned independently of RELEASE_TAG: metrics-collector is excluded from
+    # this release cycle, so it stays on the last released image.
+    image: ${REGISTRY:-intel}/metrics-collector:2026.1.0
     container_name: metrics-collector
     privileged: true
     pid: host
