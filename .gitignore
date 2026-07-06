@@ -1,4 +1,7 @@
 smart-kiosk-assistant/rag-service/.venv
+
+# Node.js dependencies (installed via npm/yarn, never committed)
+node_modules/
 .github/copilot-instructions.md
 
 # Local-only MCP config (contains credentials — do not commit)
