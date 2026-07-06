@@ -23,8 +23,9 @@ Sample_data/
 metrics/
 
 # Other service trees (each has its own Dockerfile + build context)
+# Note: identity-service is intentionally NOT excluded — its Dockerfile builds
+# from the repo root context (like kiosk-core) and needs identity-service/ copied in.
 rag-service/
-identity-service/
 queue-service/
 rtsp-streamer/
 kiosk-ui/
