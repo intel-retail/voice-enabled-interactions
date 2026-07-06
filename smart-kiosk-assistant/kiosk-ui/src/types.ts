@@ -26,7 +26,6 @@ export interface SessionSnapshot {
   tts_audio_segments: TtsAudioSegment[];
   tts_errors: string[];
   error: string | null;
-  primary_speaker_id: string | null;
 }
 
 export interface StartStreamResponse {
