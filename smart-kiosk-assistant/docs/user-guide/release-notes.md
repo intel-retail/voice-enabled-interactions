@@ -1,6 +1,6 @@
 # Release Notes: Smart Kiosk Assistant
 
-## 2026.2.0.1
+## 2026.2.0-rc1
 
 This release expands Smart Kiosk Assistant with queue-aware ordering, a
 refreshed web experience, and a streamlined build workflow. This update
