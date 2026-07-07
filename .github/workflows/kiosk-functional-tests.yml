@@ -242,10 +242,16 @@ jobs:
         # TARGET_DEVICE must be overridden here (not just via step env) because
         # the Makefile does `-include .env`, so .env.example's TARGET_DEVICE=GPU
         # default would otherwise win over the job-level TARGET_DEVICE=CPU env.
+        # RELEASE_TAG must also be overridden here for the same reason: the
+        # Makefile's `-include .env` processes .env.example's RELEASE_TAG (which
+        # can be a newer rc/dev tag) before its own `RELEASE_TAG ?= 2026.1.0`
+        # default, causing `make build` to pull non-existent rc images from
+        # Docker Hub. Appending here ensures the last assignment in .env wins.
         run: |
           cp .env.example .env
           echo "KIOSK_CORE_DIARIZATION_ENABLED=false" >> .env
           echo "TARGET_DEVICE=CPU" >> .env
+          echo "RELEASE_TAG=${RELEASE_TAG}" >> .env
           # .env.example hardcodes the INT8 model name; override it to match
           # whichever quant CI_OVMS_QUANT (top of workflow) actually downloaded.
           echo "OVMS_MODEL_NAME=OpenVINO/Qwen3-4B-${CI_OVMS_QUANT}-ov" >> .env
