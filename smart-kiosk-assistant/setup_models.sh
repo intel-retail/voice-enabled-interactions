@@ -328,6 +328,11 @@ download_ovms_model() {
 
     if check_ovms_model "${target_path}"; then
         echo "  ✓ Model already present — skipping download"
+        # Always fix permissions so OVMS (uid 5000) can read every file.
+        # actions/cache restores files owned by the runner user; without this
+        # chown/chmod Docker bind-mount exposes them with runner ownership and
+        # OVMS (uid 5000) cannot traverse or read the directory tree.
+        _fix_ovms_permissions
         return 0
     fi
 
@@ -339,6 +344,7 @@ download_ovms_model() {
         generate_graph_pbtxt "${target_path}" "${TARGET_DEVICE}"
         if check_ovms_model "${target_path}"; then
             echo "  ✓ Model configuration restored"
+            _fix_ovms_permissions
             return 0
         fi
         echo "  ✗ graph.pbtxt generation failed — falling through to full download"
@@ -380,14 +386,24 @@ download_ovms_model() {
     if check_ovms_model "${target_path}"; then
         echo ""
         echo "  ✓ ${OVMS_SOURCE_MODEL} downloaded successfully"
-        # Ensure OVMS (uid 5000) can read all model files
-        docker run --rm -v "${MODELS_DIR}:/models" alpine \
-            sh -c "chown -R 5000:5000 /models/OpenVINO && chmod -R 755 /models/OpenVINO" 2>/dev/null || true
+        _fix_ovms_permissions
     else
         echo "  ✗ Download failed or model files are missing"
         echo "    Check ${target_path}"
         exit 1
     fi
+}
+
+# Set ownership and permissions on the OVMS model tree so that the OVMS
+# container (uid 5000) can read all files via the Docker bind mount.
+# Must be called on every code path that exits download_ovms_model() early,
+# not just on fresh downloads — actions/cache restores with runner ownership
+# and Docker bind mounts expose that ownership as-is inside the container.
+_fix_ovms_permissions() {
+    docker run --rm -v "${MODELS_DIR}:/models" alpine \
+        sh -c "chown -R 5000:5000 /models/OpenVINO && chmod -R 755 /models/OpenVINO" \
+        2>/dev/null || \
+        chmod -R a+rX "${MODELS_DIR}/${OVMS_SOURCE_MODEL}" 2>/dev/null || true
 }
 
 # ── Identity-service models ───────────────────────────────────────────────────
