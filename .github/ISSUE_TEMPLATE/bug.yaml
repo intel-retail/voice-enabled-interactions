@@ -1,0 +1,62 @@
+name: Bug Report
+description: Report a bug to help us improve Smart Kiosk Assistant
+title: "[BUG] <Component> - <Short summary>"
+labels: ["bug", "triage"]
+type: "Bug"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        <br>
+
+        > [!TIP]
+        > Before submitting, please search [open and closed issues](../../issues?q=is%3Aissue) to avoid duplicates.
+        > Existing issues often contain workarounds or resolution details.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: >
+        Describe the bug: what did you do, what actually happened,
+        and what you expected to happen instead.
+      placeholder: |
+        **What I did:** Started the stack and spoke into the microphone.
+        **What happened:** The UI froze and no response was returned.
+        **What I expected:** A spoken response played back within few seconds.
+    validations:
+      required: true
+
+  - type: textarea
+    id: system-setup
+    attributes:
+      label: System Setup
+      description: Describe your hardware and software environment.
+      placeholder: |
+        - OS: Ubuntu 22.04
+        - CPU/GPU: Intel Core Ultra 7 165H / Intel Arc GPU
+        - OpenVINO version: 2025.x
+        - Docker version: 27.x
+        - Browser (if UI issue): Chrome 126
+        - Deployment mode: Docker Compose / standalone
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Minimal, reliable steps to reproduce the issue.
+      placeholder: |
+        1. Start the stack with `docker compose up`
+        2. Open the Gradio UI at http://localhost:7860
+        3. Click the microphone button and speak
+        4. Observe the error in the terminal / UI
+    validations:
+      required: true
+
+  - type: textarea
+    id: rca
+    attributes:
+      label: Root Cause Analysis
+      description: If you have already investigated the issue, share your findings here.
