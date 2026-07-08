@@ -17,9 +17,8 @@ services:
   # rtsp-streamer: publishes every *.mp4 under /media as an RTSP stream via
   # MediaMTX + ffmpeg (see ./rtsp-streamer/start.sh).
   #
-  # Stream path = <filename-without-extension>. With the bundled sample:
-  #   rtsp://rtsp-streamer:8554/istockphoto-2248308153-640_adpp_is
-  # (rename the file in Sample_data/ for a cleaner path, e.g. /queue).
+  # Stream path is set by STREAM_NAME (see rtsp-streamer environment below).
+  # Default: rtsp://rtsp-streamer:8554/queue
   #
   # Feeds the queue-service person-counting pipeline (queue-service/).
   # ---------------------------------------------------------------------------
@@ -38,12 +37,11 @@ services:
       # (sample_1 -> sample_2 -> sample_1 -> ...). They are concatenated by
       # ffmpeg's concat demuxer and published as ONE stream, so a single ffmpeg
       # process owns the RTSP path. For a single continuous clip instead, remove
-      # MEDIA_FILES and set MEDIA_FILE (e.g. MEDIA_FILE: /media/sample1.mp4).
+      # MEDIA_FILES and set MEDIA_FILE (e.g. MEDIA_FILE: /media/sample_1.mp4).
       MEDIA_FILES:    /media/sample_1.mp4,/media/sample_2.mp4
-      # Keep the published RTSP path stable so the queue-service URL
-      # (rtsp://rtsp-streamer:8554/istockphoto-2248308153-640_adpp_is) keeps
-      # working regardless of which clips are selected.
-      STREAM_NAME:    istockphoto-2248308153-640_adpp_is
+      # STREAM_NAME is required when MEDIA_FILES is used (the concat demuxer
+      # publishes a single stream so there is no filename to derive a path from).
+      STREAM_NAME:    queue
       RTSP_PORT:      "8554"
       LOOP_COUNT:     "-1"      # -1 = infinite loop for a continuous feed
       BLANK_DURATION: "0"       # seconds of black frames between loops
@@ -81,7 +79,7 @@ services:
     environment:
       # Derive RTSP URL from the same STREAM_NAME that rtsp-streamer publishes,
       # so changing the media file in one place keeps the pipeline in sync.
-      QUEUE_SERVICE__SOURCE__RTSP_URL: "rtsp://rtsp-streamer:8554/${STREAM_NAME:-istockphoto-2248308153-640_adpp_is}"
+      QUEUE_SERVICE__SOURCE__RTSP_URL: "rtsp://rtsp-streamer:8554/${STREAM_NAME:-queue}"
       NO_PROXY: "localhost,127.0.0.1,rtsp-streamer,queue-service"
       no_proxy: "localhost,127.0.0.1,rtsp-streamer,queue-service"
     volumes:
