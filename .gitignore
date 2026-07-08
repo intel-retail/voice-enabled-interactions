@@ -17,3 +17,5 @@ smart-kiosk-assistant/metrics/
 smart-kiosk-assistant/models/
 smart-kiosk-assistant/.setup-venv/
 .github/workflows/copilot-setup-steps.yml
+smart-kiosk-assistant/Sample_data/sample_1.mp4
+smart-kiosk-assistant/Sample_data/sample_2.mp4
