@@ -334,13 +334,13 @@ class TestQueueConfigYaml:
 
     @pytest.mark.tier1
     def test_queue_rtsp_url_references_correct_stream(self):
-        """RTSP URL must reference the correct istockphoto stream name."""
+        """RTSP URL must reference the 'queue' stream name."""
         data = _load_yaml(_QUEUE_CONFIG)
         rtsp_url = data["source"]["rtsp_url"]
-        assert "istockphoto-2248308153-640_adpp_is" in rtsp_url, (
+        assert "queue" in rtsp_url, (
             f"queue-config.yaml rtsp_url '{rtsp_url}' does not reference "
-            f"the expected stream 'istockphoto-2248308153-640_adpp_is'. "
-            f"This was a known bug — the fix must not be reverted."
+            f"the expected stream 'queue'. "
+            f"STREAM_NAME was renamed from the istock filename to 'queue'."
         )
 
     @pytest.mark.tier1
