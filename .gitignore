@@ -16,3 +16,4 @@ smart-kiosk-assistant/metrics/
 # Model files and setup virtualenv (large / local only)
 smart-kiosk-assistant/models/
 smart-kiosk-assistant/.setup-venv/
+.github/workflows/copilot-setup-steps.yml
