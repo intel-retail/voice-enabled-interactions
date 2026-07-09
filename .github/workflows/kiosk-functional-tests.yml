@@ -273,6 +273,9 @@ jobs:
         # can be a newer rc/dev tag) before its own `RELEASE_TAG ?= 2026.1.0`
         # default, causing `make build` to pull non-existent rc images from
         # Docker Hub. Appending here ensures the last assignment in .env wins.
+        env:
+          SAMPLE_VIDEO_1_URL: ${{ secrets.SAMPLE_VIDEO_1_URL }}
+          SAMPLE_VIDEO_2_URL: ${{ secrets.SAMPLE_VIDEO_2_URL }}
         run: |
           cp .env.example .env
           echo "KIOSK_CORE_DIARIZATION_ENABLED=false" >> .env
@@ -281,6 +284,14 @@ jobs:
           # .env.example hardcodes the INT8 model name; override it to match
           # whichever quant CI_OVMS_QUANT (top of workflow) actually downloaded.
           echo "OVMS_MODEL_NAME=OpenVINO/Qwen3-4B-${CI_OVMS_QUANT}-ov" >> .env
+          # Inject direct-download URLs for sample videos (secrets override the
+          # Pexels page URLs in .env.example which are not direct download links).
+          if [ -n "$SAMPLE_VIDEO_1_URL" ]; then
+            echo "SAMPLE_VIDEO_1_URL=${SAMPLE_VIDEO_1_URL}" >> .env
+          fi
+          if [ -n "$SAMPLE_VIDEO_2_URL" ]; then
+            echo "SAMPLE_VIDEO_2_URL=${SAMPLE_VIDEO_2_URL}" >> .env
+          fi
 
       - name: Build all service images
         timeout-minutes: 30
@@ -312,19 +323,16 @@ jobs:
             smart-kiosk-assistant/tests/functional/test_results.csv
           retention-days: 30
 
-      - name: Create synthetic sample videos for rtsp-streamer
+      - name: Download sample videos for rtsp-streamer
+        timeout-minutes: 10
         working-directory: smart-kiosk-assistant
         run: |
           # Sample_data/sample_*.mp4 are gitignored (large files kept locally).
-          # Generate minimal synthetic mp4s so rtsp-streamer can start in CI.
-          mkdir -p Sample_data
-          ffmpeg -y -f lavfi -i "color=c=blue:s=640x480:r=25:d=5" \
-            -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
-            Sample_data/sample_1.mp4
-          ffmpeg -y -f lavfi -i "color=c=green:s=640x480:r=25:d=5" \
-            -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
-            Sample_data/sample_2.mp4
-          echo "✓ Synthetic sample videos created"
+          # Download actual sample videos so rtsp-streamer can start in CI.
+          # SAMPLE_VIDEO_1_URL / SAMPLE_VIDEO_2_URL are injected into .env above
+          # from GitHub secrets (must be direct download URLs, not page links).
+          make download-sample-video
+          echo "✓ Sample videos ready"
           ls -lh Sample_data/
 
       - name: Start all services (diarization disabled)
