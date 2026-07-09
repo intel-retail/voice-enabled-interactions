@@ -293,7 +293,18 @@ build: check-env ## Build (REGISTRY=false) or pull (REGISTRY=true) all images
 			REGISTRY=$(_DOCKER_REGISTRY) docker compose -f $(COMPOSE_FILE) build audio-analyzer text-to-speech; \
 		else \
 			echo "$(YELLOW)  ⚠ edge-ai-libraries not found at $(EAL_PATH) — pulling pre-built images...$(NC)"; \
-			REGISTRY=$(_ENV_REGISTRY) docker compose -f $(COMPOSE_FILE) pull audio-analyzer text-to-speech; \
+			_aa_image="$(_ENV_REGISTRY)/audio-analyzer:$(RELEASE_TAG)"; \
+			_tts_image="$(_ENV_REGISTRY)/text-to-speech:2026.1.0"; \
+			if docker image inspect "$$_aa_image" >/dev/null 2>&1; then \
+				echo "$(GREEN)  ✓ $$_aa_image already present locally — skipping pull$(NC)"; \
+			else \
+				REGISTRY=$(_ENV_REGISTRY) docker compose -f $(COMPOSE_FILE) pull audio-analyzer; \
+			fi; \
+			if docker image inspect "$$_tts_image" >/dev/null 2>&1; then \
+				echo "$(GREEN)  ✓ $$_tts_image already present locally — skipping pull$(NC)"; \
+			else \
+				REGISTRY=$(_ENV_REGISTRY) docker compose -f $(COMPOSE_FILE) pull text-to-speech; \
+			fi; \
 		fi; \
 	else \
 		echo "$(YELLOW)  REGISTRY=$(REGISTRY) → Pulling images from registry$(NC)"; \
