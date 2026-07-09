@@ -211,7 +211,7 @@ services:
     build:
       context: ../edge-ai-libraries/microservices/text-to-speech
       dockerfile: Dockerfile
-    image: ${REGISTRY:-intel}/text-to-speech:${RELEASE_TAG:-latest}
+    image: ${REGISTRY:-intel}/text-to-speech:2026.1.0
     container_name: text-to-speech
     user: "1000:1000"
     ports:
