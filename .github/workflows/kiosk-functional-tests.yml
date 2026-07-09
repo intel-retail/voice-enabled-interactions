@@ -312,6 +312,21 @@ jobs:
             smart-kiosk-assistant/tests/functional/test_results.csv
           retention-days: 30
 
+      - name: Create synthetic sample videos for rtsp-streamer
+        working-directory: smart-kiosk-assistant
+        run: |
+          # Sample_data/sample_*.mp4 are gitignored (large files kept locally).
+          # Generate minimal synthetic mp4s so rtsp-streamer can start in CI.
+          mkdir -p Sample_data
+          ffmpeg -y -f lavfi -i "color=c=blue:s=640x480:r=25:d=5" \
+            -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
+            Sample_data/sample_1.mp4
+          ffmpeg -y -f lavfi -i "color=c=green:s=640x480:r=25:d=5" \
+            -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
+            Sample_data/sample_2.mp4
+          echo "✓ Synthetic sample videos created"
+          ls -lh Sample_data/
+
       - name: Start all services (diarization disabled)
         timeout-minutes: 5
         run: |
