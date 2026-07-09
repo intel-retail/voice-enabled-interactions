@@ -84,10 +84,14 @@ class BaseAudioSession:
         self.tts_errors: list[str] = []
         self.stop_requested_at: datetime | None = None
 
-        # Primary-speaker resolution is now performed upstream by the
-        # audio-analyzer service (stable across chunk boundaries via speaker
-        # embeddings — see docs/audio-analyzer-diarization-plan.md). kiosk-core
-        # no longer needs its own cross-chunk lock-on state.
+        # ── Primary-speaker lock-on ────────────────────────────────────────────
+        # The audio-analyzer does not set is_primary on segments. kiosk-core
+        # locks onto the first speaker label seen in the session and treats all
+        # subsequent segments from that label as the customer (primary).
+        # Segments from any different label are unconditionally dropped — the
+        # semantic fallback is only used before the primary is established.
+        self._primary_speaker_id: str | None = None
+        # ───────────────────────────────────────────────────────────────────────
 
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -530,68 +534,94 @@ class BaseAudioSession:
     def _filter_target_speaker(self, segments: list[dict]) -> str:
         """Filter diarized segments to keep only the primary customer's speech.
 
-        Cross-chunk primary-speaker identity is now resolved upstream by the
-        audio-analyzer service using speaker embeddings (stable across chunk
-        boundaries — see docs/audio-analyzer-diarization-plan.md). Each
-        segment already carries ``is_primary`` when audio-analyzer could
-        assign it a speaker. kiosk-core simply trusts that flag — no local
-        lock-on state, no cross-chunk buffering.
+        Primary speaker is determined by lock-on: the first speaker label seen
+        in this session is treated as the customer. Every subsequent segment
+        from that same label is kept; any other label is unconditionally
+        dropped — no semantic fallback can override a confirmed non-primary.
 
-        Semantic fallback: if *no* segment was flagged primary this chunk
-        (e.g. the customer was silent while a staff member spoke), score each
-        remaining segment against DOMAIN_KEYWORDS and surface the best match
-        above threshold, so a legitimate ordering utterance is not dropped.
+        Semantic fallback is used only before the primary speaker is
+        established (i.e. on the very first chunk that has no clear speaker
+        label), so a legitimate opening utterance is never lost.
         """
         if not segments:
             return ""
 
-        kept_segments: list[dict] = [seg for seg in segments if seg.get("is_primary")]
-        discarded_segments: list[dict] = [seg for seg in segments if not seg.get("is_primary")]
+        # ── Lock on to the first speaker seen in this session ────────────────
+        if self._primary_speaker_id is None:
+            for seg in segments:
+                label = seg.get("speaker", "")
+                if label:
+                    self._primary_speaker_id = label
+                    logger.info(
+                        "[SPEAKER-LOCK] session=%s | primary speaker locked → %s (first speaker rule)",
+                        self.session_id, self._primary_speaker_id,
+                    )
+                    break
+
+        # ── Classify segments as primary / non-primary ───────────────────────
+        if self._primary_speaker_id:
+            kept_segments = [s for s in segments if s.get("speaker") == self._primary_speaker_id]
+            discarded_segments = [s for s in segments if s.get("speaker") != self._primary_speaker_id]
+        else:
+            # No speaker label at all — treat everything as potentially primary
+            kept_segments = []
+            discarded_segments = list(segments)
 
         logger.info(
             "[SPEAKER-FILTER] session=%s | processing %d segment(s): %d primary, %d non-primary",
             self.session_id, len(segments), len(kept_segments), len(discarded_segments),
         )
         for i, segment in enumerate(segments):
+            is_primary = self._primary_speaker_id is not None and segment.get("speaker") == self._primary_speaker_id
             logger.info(
                 "[SPEAKER-FILTER] session=%s | seg[%d] speaker=%s is_primary=%s → %s | text=%r",
-                self.session_id, i, segment.get("speaker", "UNKNOWN"), segment.get("is_primary", False),
-                "KEEP" if segment.get("is_primary") else "DISCARD", segment.get("text", "")[:80],
+                self.session_id, i, segment.get("speaker", "UNKNOWN"), is_primary,
+                "KEEP" if is_primary else "DISCARD", segment.get("text", "")[:80],
             )
 
-        # ── Semantic fallback ────────────────────────────────────────────────
+        # ── Semantic fallback — only before primary is established ───────────
         if not kept_segments and discarded_segments:
-            logger.info(
-                "[SPEAKER-FILTER] session=%s | no primary segment this chunk — running semantic fallback on %d segment(s)",
-                self.session_id, len(discarded_segments),
-            )
-            best_score = 0.0
-            best_segment: dict | None = None
-            for segment in discarded_segments:
-                words = segment.get("text", "").lower().split()
-                if not words:
-                    continue
-                overlap = sum(1 for w in words if w in _DOMAIN_KEYWORDS)
-                score = overlap / max(len(words), 1)
+            if self._primary_speaker_id:
+                # Primary is known — non-primary utterances are noise, drop them.
                 logger.info(
-                    "[SPEAKER-FILTER] session=%s | fallback score speaker=%s score=%.2f | text=%r",
-                    self.session_id, segment.get("speaker", "UNKNOWN"), score, segment.get("text", "")[:80],
+                    "[SPEAKER-FILTER] session=%s | non-primary speech only, primary=%s — chunk DROPPED (no fallback)",
+                    self.session_id, self._primary_speaker_id,
                 )
-                if score > best_score:
-                    best_score = score
-                    best_segment = segment
-
-            if best_segment is not None and best_score >= config.DEFAULT_SEMANTIC_FALLBACK_THRESHOLD:
-                logger.info(
-                    "[SPEAKER-FILTER] session=%s | semantic fallback ACCEPTED speaker=%s score=%.2f | text=%r",
-                    self.session_id, best_segment.get("speaker", "UNKNOWN"), best_score, best_segment.get("text", "")[:80],
-                )
-                kept_segments = [best_segment]
             else:
+                # Primary not yet established — run semantic fallback so the
+                # very first domain utterance (before a clean speaker label
+                # arrives) is not silently discarded.
                 logger.info(
-                    "[SPEAKER-FILTER] session=%s | semantic fallback found no domain match (best_score=%.2f, threshold=%.2f) → chunk DROPPED",
-                    self.session_id, best_score, config.DEFAULT_SEMANTIC_FALLBACK_THRESHOLD,
+                    "[SPEAKER-FILTER] session=%s | primary not yet established — running semantic fallback on %d segment(s)",
+                    self.session_id, len(discarded_segments),
                 )
+                best_score = 0.0
+                best_segment: dict | None = None
+                for segment in discarded_segments:
+                    words = segment.get("text", "").lower().split()
+                    if not words:
+                        continue
+                    overlap = sum(1 for w in words if w in _DOMAIN_KEYWORDS)
+                    score = overlap / max(len(words), 1)
+                    logger.info(
+                        "[SPEAKER-FILTER] session=%s | fallback score speaker=%s score=%.2f | text=%r",
+                        self.session_id, segment.get("speaker", "UNKNOWN"), score, segment.get("text", "")[:80],
+                    )
+                    if score > best_score:
+                        best_score = score
+                        best_segment = segment
+
+                if best_segment is not None and best_score >= config.DEFAULT_SEMANTIC_FALLBACK_THRESHOLD:
+                    logger.info(
+                        "[SPEAKER-FILTER] session=%s | semantic fallback ACCEPTED speaker=%s score=%.2f | text=%r",
+                        self.session_id, best_segment.get("speaker", "UNKNOWN"), best_score, best_segment.get("text", "")[:80],
+                    )
+                    kept_segments = [best_segment]
+                else:
+                    logger.info(
+                        "[SPEAKER-FILTER] session=%s | semantic fallback found no domain match (best_score=%.2f, threshold=%.2f) → chunk DROPPED",
+                        self.session_id, best_score, config.DEFAULT_SEMANTIC_FALLBACK_THRESHOLD,
+                    )
 
         final_text = " ".join(seg.get("text", "") for seg in kept_segments).strip()
         logger.info(
