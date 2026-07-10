@@ -70,7 +70,7 @@ Skip this block and set `TARGET_DEVICE=CPU` in `.env` if no Intel GPU is availab
 ## Step 2: Clone the Repository
 
 ```bash
-git clone https://github.com/sainijit/voice-enabled-interactions.git
+git clone https://github.com/intel-retail/voice-enabled-interactions.git
 cd voice-enabled-interactions/smart-kiosk-assistant
 ```
 
