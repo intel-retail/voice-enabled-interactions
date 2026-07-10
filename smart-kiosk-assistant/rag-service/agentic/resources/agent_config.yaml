@@ -1,0 +1,17 @@
+# Agent configuration — QuickBite Express ordering agent
+
+agent:
+  name: kiosk_ordering_agent
+  description: "AI ordering assistant for QuickBite Express kiosk"
+  # OVMS model (overridden by AGENT_LLM_MODEL env var)
+  model: Qwen3-4B
+  # Generation parameters passed to LiteLlm
+  temperature: 0.2
+  max_output_tokens: 512
+  # Session TTL in seconds (overridden by AGENT_SESSION_TTL)
+  session_ttl: 3600
+
+observability:
+  # INFO shows high-level events (intent, tool selected, order id)
+  # DEBUG shows full prompts and tool args/results
+  log_level: INFO

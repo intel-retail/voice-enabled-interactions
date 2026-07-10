@@ -1,0 +1,15 @@
+# identity-service runtime dependencies.
+#
+# NOTE: OpenVINO, GStreamer and DL Streamer are provided by the base image
+# (intel/dlstreamer:2026.1.0-ubuntu24), so they are intentionally NOT pinned
+# here.  faiss/opencv/numpy/etc. are added in Phase 3–4 as the pipeline lands.
+fastapi==0.116.1
+uvicorn==0.35.0
+httpx==0.28.1
+pydantic==2.11.7
+PyYAML==6.0.2
+aiosqlite==0.20.0
+numpy==2.2.6
+faiss-cpu==1.9.0
+# OpenCV for face crop/resize preprocessing (OpenVINO + GStreamer come from base).
+opencv-python-headless==4.10.0.84

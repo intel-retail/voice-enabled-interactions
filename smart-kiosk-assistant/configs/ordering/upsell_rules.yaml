@@ -1,0 +1,138 @@
+# Upsell Rules — QuickBite Express
+# Defines complementary product pairings used by the AI ordering agent
+# for cross-sell/upsell suggestions.
+#
+# Rule structure:
+#   trigger_product_ids: list of product IDs that activate this rule  (optional)
+#   trigger_categories:  list of categories that activate this rule   (optional)
+#   suggest_product_ids: list of products to suggest                  (required)
+#   reason:              human-readable rationale shown to the user   (required)
+#
+# At least one of trigger_product_ids or trigger_categories must be set.
+# All suggest_product_ids MUST exist in configs/ordering/products.yaml.
+#
+# Catalogue reference (id → name, ₹):
+#   SIDE-001 Classic French Fries 89 | SIDE-002 Peri Peri Fries 99
+#   SIDE-003 Onion Rings 109        | SIDE-004 Garlic Bread 99
+#   DRINK-001 Pepsi 59 | DRINK-002 7UP 59 | DRINK-003 Mango Lassi 89
+#   DRINK-004 Cold Coffee 99 | DRINK-005 Fresh Lime Soda 69
+#   DESSERT-001 Chocolate Brownie 89 | DESSERT-002 Vanilla Soft Serve 59
+
+rules:
+  # -------------------------------------------------------------------------
+  # BURGERS — fries, a cold drink, then a dessert to finish
+  # -------------------------------------------------------------------------
+  - trigger_categories:
+      - burgers
+    suggest_product_ids:
+      - SIDE-001
+      - SIDE-002
+    reason: "Add crispy fries to complete your meal?"
+
+  - trigger_categories:
+      - burgers
+    suggest_product_ids:
+      - DRINK-001
+      - DRINK-002
+    reason: "Customers love pairing a cold drink with their burger!"
+
+  - trigger_categories:
+      - burgers
+    suggest_product_ids:
+      - DRINK-004
+    reason: "Try our Cold Coffee for a perfect finish!"
+
+  - trigger_categories:
+      - burgers
+    suggest_product_ids:
+      - DESSERT-001
+      - DESSERT-002
+    reason: "Leave room for dessert — our brownie and soft serve are must-tries!"
+
+  # -------------------------------------------------------------------------
+  # PIZZA — drink, garlic bread, dessert
+  # -------------------------------------------------------------------------
+  - trigger_categories:
+      - pizza
+    suggest_product_ids:
+      - DRINK-001
+      - DRINK-003
+    reason: "A refreshing drink goes perfectly with pizza!"
+
+  - trigger_categories:
+      - pizza
+    suggest_product_ids:
+      - SIDE-004
+    reason: "Garlic bread is a classic pizza companion."
+
+  - trigger_categories:
+      - pizza
+    suggest_product_ids:
+      - DESSERT-001
+    reason: "Finish your pizza with a warm chocolate brownie."
+
+  # -------------------------------------------------------------------------
+  # WRAPS & ROLLS — fries, a fresh drink, a sweet ending
+  # -------------------------------------------------------------------------
+  - trigger_categories:
+      - wraps
+    suggest_product_ids:
+      - SIDE-001
+      - DRINK-005
+    reason: "Round off your wrap with fries or a fresh lime soda!"
+
+  - trigger_categories:
+      - wraps
+    suggest_product_ids:
+      - DESSERT-002
+    reason: "A vanilla soft serve is the perfect light finish to your wrap."
+
+  # -------------------------------------------------------------------------
+  # SIDES — a drink and a dip-friendly companion
+  # -------------------------------------------------------------------------
+  - trigger_categories:
+      - sides
+    suggest_product_ids:
+      - DRINK-001
+      - DRINK-005
+    reason: "Grab a chilled drink to go with your sides!"
+
+  - trigger_product_ids:
+      - SIDE-001
+      - SIDE-002
+    suggest_product_ids:
+      - SIDE-003
+    reason: "Make it a basket — add crispy onion rings!"
+
+  # -------------------------------------------------------------------------
+  # BEVERAGES — nudge a snack or sweet treat
+  # -------------------------------------------------------------------------
+  - trigger_categories:
+      - beverages
+    suggest_product_ids:
+      - SIDE-001
+      - DESSERT-002
+    reason: "Pair your drink with crispy fries or a soft serve!"
+
+  # -------------------------------------------------------------------------
+  # DESSERTS — a hot coffee to go alongside
+  # -------------------------------------------------------------------------
+  - trigger_categories:
+      - desserts
+    suggest_product_ids:
+      - DRINK-004
+    reason: "A Cold Coffee pairs beautifully with dessert."
+
+  # -------------------------------------------------------------------------
+  # BESTSELLER cross-sell — dessert nudge on popular mains
+  # -------------------------------------------------------------------------
+  - trigger_product_ids:
+      - BURGER-VEG-001
+      - BURGER-NV-001
+      - PIZZA-NV-002
+      - BURGER-NV-003
+      - WRAP-NV-001
+    suggest_product_ids:
+      - DESSERT-001
+      - DESSERT-002
+    reason: "Treat yourself — our brownies and soft serve are customer favourites!"

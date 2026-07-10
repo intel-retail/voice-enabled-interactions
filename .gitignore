@@ -1,1 +1,21 @@
 smart-kiosk-assistant/rag-service/.venv
+
+# Node.js dependencies (installed via npm/yarn, never committed)
+node_modules/
+.github/copilot-instructions.md
+
+# Local-only MCP config (contains credentials — do not commit)
+.mcp.json
+
+# Secrets — never commit
+smart-kiosk-assistant/.env
+
+# Runtime-generated metrics logs
+smart-kiosk-assistant/metrics/
+
+# Model files and setup virtualenv (large / local only)
+smart-kiosk-assistant/models/
+smart-kiosk-assistant/.setup-venv/
+.github/workflows/copilot-setup-steps.yml
+smart-kiosk-assistant/Sample_data/sample_1.mp4
+smart-kiosk-assistant/Sample_data/sample_2.mp4

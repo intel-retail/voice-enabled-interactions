@@ -1,52 +1,37 @@
 # Run With Docker Compose
 
-`docker compose up` starts `audio-analyzer`, `text-to-speech`,
-`rag-service`, `kiosk-core` (REST API), and `kiosk-ui` (Gradio interface)
-as containers, using the prebuilt images published on Docker Hub.
+This guide covers building the images from source and running the full
+stack with `docker compose`. For source code changes to any service, see
+[Build from Source](./build-from-source.md).
 
 Microphone audio is captured by the browser and uploaded to `kiosk-core`
 as a WAV file. No host audio device is passed into the containers.
 
-To rebuild the images from source instead of pulling, see
-[Build from Source](./build-from-source.md). To run `kiosk-core` and
-the UI directly on the host, see [Run On the Host](./run-standalone.md).
+## Prerequisites
 
-## Clone
+1. Complete Steps 1–4 of [Get Started](../get-started.md) (Docker, GPU
+   drivers, repo clone, HuggingFace token).
+2. Run `./setup_models.sh` to download the OVMS LLM model (Step 5 of
+   Get Started). The stack will not start correctly without it.
 
-```bash
-git clone https://github.com/intel-retail/voice-enabled-interactions.git
-cd voice-enabled-interactions/smart-kiosk-assistant
-```
-
-## Pull And Start
+## Build and Start
 
 From `smart-kiosk-assistant/`:
 
 ```bash
-docker compose pull
+docker compose build
 docker compose up -d
 ```
 
-`docker compose pull` fetches all five images from Docker Hub:
-
-- `intel/audio-analyzer:${RELEASE_TAG}`
-- `intel/text-to-speech:${RELEASE_TAG}`
-- `intel/rag-service:${RELEASE_TAG}`
-- `intel/kiosk-core:${RELEASE_TAG}`
-- `intel/kiosk-ui:${RELEASE_TAG}`
-
-`REGISTRY` and `RELEASE_TAG` are read from [.env](https://github.com/intel-retail/voice-enabled-interactions/blob/main/smart-kiosk-assistant/.env)
-(defaults: `REGISTRY=intel`, committed `RELEASE_TAG` pins the current release).
-
-This starts five containers:
-
 | Container | Port | Purpose |
 |---|---|---|
-| `audio-analyzer` | 8010 | Speech-to-text |
-| `text-to-speech` | 8011 | Speech synthesis |
-| `rag-service` | 8020 | Knowledge-base retrieval |
-| `kiosk-core` | 8012 | FastAPI session API |
-| `kiosk-ui` | 7860 | Gradio voice UI |
+| `ovms-llm` | 8000 | Serves Qwen3-4B via OpenAI-compatible API |
+| `metrics-collector` | 9000 | Hardware utilization metrics |
+| `audio-analyzer` | 8010 | Whisper ASR + speaker diarization |
+| `text-to-speech` | 8011 | SpeechT5 TTS synthesis |
+| `rag-service` | 8020 | RAG pipeline + ordering agent |
+| `kiosk-core` | 8012 | Session API + product ordering |
+| `kiosk-ui` | 7860 | React voice kiosk UI |
 
 Containers run as non-root; every image is built with UID/GID
 `1000:1000` and the named volumes are initialized with that ownership,
@@ -56,7 +41,11 @@ so no host UID/GID configuration is required.
 
 ```bash
 docker compose ps
-curl --noproxy '*' http://127.0.0.1:8012/health   # {"status":"ok"}
+curl --noproxy '*' http://127.0.0.1:8000/v3/models   # ovms-llm
+curl --noproxy '*' http://127.0.0.1:8010/health       # audio-analyzer
+curl --noproxy '*' http://127.0.0.1:8011/health       # text-to-speech
+curl --noproxy '*' http://127.0.0.1:8020/health       # rag-service
+curl --noproxy '*' http://127.0.0.1:8012/health       # kiosk-core
 ```
 
 Open `http://127.0.0.1:7860` in a browser, click the microphone, and
@@ -73,7 +62,7 @@ docker compose logs -f kiosk-ui
 
 ```bash
 docker compose restart            # after env var change
-docker compose pull && docker compose up -d   # after a new release tag
+docker compose build && docker compose up -d   # after a source code change
 docker compose down               # teardown
 ```
 

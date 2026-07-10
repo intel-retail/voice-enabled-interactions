@@ -10,6 +10,7 @@ api:
 
 models:
   llm:
+    backend: "ovms"             # inference backend. Permitted values: ovms | openvino
     hf_id: "Qwen/Qwen3-4B-Instruct-2507"
     device: "GPU"               # inference device. Permitted values: CPU | GPU
     weight_format: "int8"       # OpenVINO export precision. Permitted values: int8 | fp16 | fp32
@@ -18,7 +19,7 @@ models:
     cache_dir: "./storage/ov_cache"
   embedding:
     hf_id: "BAAI/bge-large-en-v1.5"
-    device: "CPU"               # inference device. Permitted values: CPU | GPU
+    device: "GPU"               # inference device. Permitted values: CPU | GPU
     backend: "openvino"         # inference backend. Permitted values: openvino
     weight_format: "int8"       # OpenVINO export precision. Permitted values: int8 | fp16 | fp32
     max_seq_length: 512

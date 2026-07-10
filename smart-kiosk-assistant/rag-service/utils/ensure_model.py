@@ -240,7 +240,11 @@ def ensure_embedding_model(force: bool = False) -> str:
 
 
 def ensure_model(force: bool = False) -> None:
-    ensure_llm_model(force=force)
+    _llm_backend = str(getattr(config.models.llm, "backend", "openvino")).lower()
+    if _llm_backend == "ovms":
+        logger.info("[ensure_model] LLM backend=ovms — skipping local model export")
+    else:
+        ensure_llm_model(force=force)
     emb_backend = (getattr(config.models.embedding, "backend", "") or "").lower()
     if emb_backend == "openvino":
         ensure_embedding_openvino(force=force)

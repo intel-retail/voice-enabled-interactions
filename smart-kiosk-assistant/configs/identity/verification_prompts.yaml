@@ -1,0 +1,20 @@
+# Voice challenge prompts for liveness / anti-replay.
+#
+# On each verification attempt the identity-service picks ONE prompt at random
+# and shows it to the user.  Verification is text-INDEPENDENT (ECAPA voiceprint),
+# so any utterance verifies the speaker — the randomness exists purely to defeat
+# replayed-recording attacks.
+#
+# Keep prompts short, neutral, and easy to read aloud.
+
+prompts:
+  - "My voice is my password."
+  - "Please verify my identity now."
+  - "The quick brown fox jumps over the lazy dog."
+  - "I would like to access my account."
+  - "Authentication keeps my money safe."
+  - "Today is a good day to bank securely."
+  - "My identity is unique to me."
+  - "Open my account with my voice."
+  - "Security and trust go hand in hand."
+  - "I confirm this transaction is mine."

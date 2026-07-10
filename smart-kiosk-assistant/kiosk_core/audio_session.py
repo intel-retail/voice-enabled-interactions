@@ -15,8 +15,13 @@ import numpy as np
 import sounddevice as sd
 
 from kiosk_core import config
+from kiosk_core.agent_client import AgentClient
 from kiosk_core.analyzer_client import AnalyzerClient
 from kiosk_core.models import FileSessionStartRequest, SessionStartRequest
+from kiosk_core.pipeline_latency import (
+    AgentSpan, AsrSpan, LlmSpan, PipelineLatencyStore, RetrievalSpan,
+    TtsSpan, TurnTrace, WallTimes, pipeline_store,
+)
 from kiosk_core.rag_client import RagClient
 from kiosk_core.tts_client import TtsClient
 
@@ -29,6 +34,20 @@ _WHISPER_JUNK = re.compile(
     re.IGNORECASE,
 )
 
+# Domain vocabulary for the semantic fallback in _filter_target_speaker.
+# When the primary customer is silent for an entire chunk this set is used
+# to decide whether a background speaker said something kiosk-relevant enough
+# to warrant re-assigning the primary (e.g. a new customer stepped up).
+_DOMAIN_KEYWORDS: frozenset[str] = frozenset({
+    "order", "orders", "ordering", "menu", "item", "items",
+    "burger", "pizza", "sandwich", "wrap", "salad", "combo",
+    "fries", "drink", "water", "coffee", "tea", "juice", "soda",
+    "price", "cost", "how much", "pay", "payment", "card", "cash",
+    "checkout", "bill", "receipt", "change",
+    "ticket", "seat", "flight", "hotel", "book", "booking", "reserve",
+    "help", "assist", "please", "want", "need", "like", "get",
+})
+
 class BaseAudioSession:
     def __init__(
         self,
@@ -36,11 +55,23 @@ class BaseAudioSession:
         on_complete: Callable[[str], None] | None = None,
     ):
         self.session_id = str(uuid4())
+        # Persistent agent session ID — reused across all voice turns in the same
+        # conversation so the ADK agent retains order state between mic presses.
+        # Falls back to the audio session UUID if no conversation_id was supplied.
+        self.agent_session_id: str = request.conversation_id or self.session_id
         self.request = request
         self.on_complete = on_complete
         self.client = AnalyzerClient(request.analyzer_url)
         self.rag_client = RagClient(request.rag_url)
         self.tts_client = TtsClient(request.tts_url)
+        # Agent client is used when the ordering feature is enabled.
+        # All turns go through the agent — it decides Q&A vs ordering.
+        if config.ORDERING_ENABLED:
+            agent_url = getattr(request, "agent_url", None) or config.DEFAULT_AGENT_URL
+            self.agent_client: AgentClient | None = AgentClient(agent_url)
+            logger.info("[SESSION] Agent routing enabled → %s", agent_url)
+        else:
+            self.agent_client = None
         self.created_at = datetime.now(UTC)
         self.started_at: datetime | None = None
         self.completed_at: datetime | None = None
@@ -53,6 +84,11 @@ class BaseAudioSession:
         self.tts_errors: list[str] = []
         self.stop_requested_at: datetime | None = None
 
+        # Primary-speaker resolution is now performed upstream by the
+        # audio-analyzer service (stable across chunk boundaries via speaker
+        # embeddings — see docs/audio-analyzer-diarization-plan.md). kiosk-core
+        # no longer needs its own cross-chunk lock-on state.
+
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._audio_queue: Queue[np.ndarray] = Queue()
@@ -60,6 +96,18 @@ class BaseAudioSession:
         self._speech_started = False
         self._captured_samples = 0
         self._source_kind = "audio"
+
+        # ── Pipeline timing (monotonic clock) ──────────────────────────────────
+        # All _t_* fields are set during _finalize_run / _stream_rag_response.
+        # Using time.monotonic() for accurate durations; datetime only for display.
+        self._t_turn_start: float | None = None     # start of _finalize_run
+        self._t_agent_start: float | None = None    # just before agent HTTP call
+        self._t_agent_end: float | None = None      # agent reply received
+        self._t_first_tts: float | None = None      # first TTS sentence queued
+        self._t_last_tts: float | None = None       # last TTS segment written (in worker thread)
+        self._t_turn_end: float | None = None       # after worker.join()
+        self._tts_segment_count: int = 0
+        # ───────────────────────────────────────────────────────────────────────
 
         self._frame_samples = max(1, int(self.request.sample_rate * config.DEFAULT_BLOCK_DURATION_SECONDS))
         self._frame_duration_seconds = self._frame_samples / self.request.sample_rate
@@ -186,6 +234,7 @@ class BaseAudioSession:
         # Attempt RAG whenever there is a transcript, even if the session
         # ended with an error mid-stream (e.g. a transient ASR failure on one
         # chunk).  Only skip entirely when NO audio was captured at all.
+        self._t_turn_start = time.monotonic()
         transcript = " ".join(part for part in self.transcript_parts if part).strip()
         if transcript:
             try:
@@ -230,29 +279,143 @@ class BaseAudioSession:
         worker = threading.Thread(target=self._tts_worker, args=(sentence_queue,), daemon=True)
         worker.start()
 
-        print(f"\nRAG response for session {self.session_id}:\n", end="", flush=True)
-        sentence_index = 0
         history = list(getattr(self.request, "history", []) or [])
+
+        # Route through the ordering agent when enabled; fall back to direct RAG.
+        if self.agent_client is not None:
+            logger.info("[SESSION] Routing turn to agent: session=%s (conv=%s) message=%r",
+                        self.session_id, self.agent_session_id, transcript[:80])
+        if self.agent_client is not None:
+            logger.info("[SESSION] Routing turn to agent: session=%s (conv=%s) message=%r",
+                        self.session_id, self.agent_session_id, transcript[:80])
+            token_source = self.agent_client.get_reply(
+                transcription=transcript,
+                session_id=self.agent_session_id,  # persistent across voice turns
+                user_id=getattr(self.request, "user_id", None) or "kiosk-user",
+                history=history,
+            )
+            label = "Agent"
+        else:
+            token_source = self.rag_client.stream_answer(transcript, history=history)
+            label = "RAG"
+
+        print(f"\n{label} response for session {self.session_id}:\n", end="", flush=True)
+        sentence_index = 0
+        _first_token_seen = False
+        _tool_calls: list[str] = []
+        # t_agent_start set here — generator body (HTTP call) runs on first iteration
+        if self.agent_client is not None:
+            self._t_agent_start = time.monotonic()
         try:
-            for token in self.rag_client.stream_answer(transcript, history=history):
+            for token in token_source:
+                # Handle metadata sentinel from AgentClient BEFORE appending to response_parts
+                # to avoid dict items in response_parts (which causes TypeError in snapshot())
+                if isinstance(token, dict) and "_tool_calls" in token:
+                    _tool_calls = token["_tool_calls"]
+                    continue
+
                 with self._lock:
                     self.response_parts.append(token)
                 print(token, end="", flush=True)
+
+                if not _first_token_seen:
+                    _first_token_seen = True
+                    self._t_agent_end = time.monotonic()
 
                 pending_text += token
                 complete_sentences, pending_text = self._drain_complete_sentences(pending_text)
                 for sentence in complete_sentences:
                     sentence_index += 1
+                    if sentence_index == 1:
+                        self._t_first_tts = time.monotonic()
                     sentence_queue.put((sentence_index, sentence))
 
             trailing_text = pending_text.strip()
             if trailing_text:
                 sentence_index += 1
+                if sentence_index == 1:
+                    self._t_first_tts = time.monotonic()
                 sentence_queue.put((sentence_index, trailing_text))
+
+            # If agent_end wasn't set (empty reply), set it now
+            if self._t_agent_start is not None and self._t_agent_end is None:
+                self._t_agent_end = time.monotonic()
+
         finally:
             sentence_queue.put((None, None))
             worker.join()
+            self._t_turn_end = time.monotonic()
+            self._tts_segment_count = sentence_index
             print(flush=True)
+
+        # ── Record pipeline turn trace ──────────────────────────────────────
+        self._record_turn_trace(_tool_calls)
+
+    def _record_turn_trace(self, tool_calls: list[str]) -> None:
+        """Build and persist a TurnTrace for the completed voice turn."""
+        t0 = self._t_turn_start
+        t_agent_s = self._t_agent_start
+        t_agent_e = self._t_agent_end
+        t_first = self._t_first_tts
+        t_last = self._t_last_tts
+        t_end = self._t_turn_end
+
+        def _ms(a: float | None, b: float | None) -> float | None:
+            if a is None or b is None:
+                return None
+            return round((b - a) * 1000, 1)
+
+        # ASR = from turn_start to when agent was called (includes VAD→transcribe)
+        asr_ms = _ms(t0, t_agent_s)
+        # Agent TTFT = from agent_start to when first token (reply) arrived
+        ttft_ms = _ms(t_agent_s, t_agent_e)
+        # Agent total = from agent_start to last TTS segment done (whole orchestration)
+        agent_total_ms = _ms(t_agent_s, t_end)
+        # TTS = from first sentence queued to last segment written
+        tts_ms = _ms(t_first, t_last)
+        # Time to first audio = from agent call start to first TTS sentence queued
+        ttfa_ms = _ms(t_agent_s, t_first)
+        # Wall E2E: measured end-to-end (turn_start → turn_end), never summed
+        wall_total_ms = _ms(t0, t_end)
+
+        retrieval_invoked = any(
+            "retrieval" in tc.lower() or "knowledge" in tc.lower() or "lookup" in tc.lower()
+            for tc in tool_calls
+        )
+
+        trace = TurnTrace(
+            turn_id=self.session_id,
+            conversation_id=self.agent_session_id,
+            started_at=self.started_at.isoformat() if self.started_at else datetime.now(UTC).isoformat(),
+            ended_at=datetime.now(UTC).isoformat(),
+            wall=WallTimes(
+                turn_total_ms=wall_total_ms,
+                time_to_first_audio_ms=ttfa_ms,
+            ),
+            asr=AsrSpan(ms=asr_ms),
+            agent=AgentSpan(
+                ttft_ms=ttft_ms,
+                total_ms=agent_total_ms,
+                retrieval=RetrievalSpan(invoked=retrieval_invoked),
+                llm=LlmSpan(device="GPU"),
+            ),
+            tts=TtsSpan(
+                ms=tts_ms,
+                segments=self._tts_segment_count,
+                overlapped_with_agent=True,
+            ),
+        )
+        pipeline_store.record(trace)
+        logger.info(
+            "[PIPELINE] turn=%s wall=%.0fms asr=%.0fms ttft=%.0fms tts=%.0fms retrieval=%s tools=%s",
+            self.session_id,
+            wall_total_ms or 0,
+            asr_ms or 0,
+            ttft_ms or 0,
+            tts_ms or 0,
+            retrieval_invoked,
+            tool_calls,
+        )
 
     @staticmethod
     def _drain_complete_sentences(buffer: str) -> tuple[list[str], str]:
@@ -285,6 +448,7 @@ class BaseAudioSession:
                     instructions=self.request.tts_instructions,
                 )
                 with self._lock:
+                    self._t_last_tts = time.monotonic()
                     self.tts_audio_segments.append(
                         {
                             "index": sentence_index,
@@ -316,19 +480,128 @@ class BaseAudioSession:
         audio = np.concatenate(frames, axis=0)
         temp_path = self._write_temp_wav(audio)
         try:
-            text = self.client.transcribe_file(
+            duration = len(audio) / self.request.sample_rate
+            logger.info(
+                "[CHUNK] session=%s | flushing %.2fs of audio, diarization=%s",
+                self.session_id, duration, config.DEFAULT_DIARIZATION_ENABLED,
+            )
+            payload = self.client.transcribe_file(
                 temp_path,
                 language=self.request.language,
                 temperature=self.request.temperature,
+                diarization=config.DEFAULT_DIARIZATION_ENABLED,
             )
+            segments: list[dict] = payload.get("segments", []) if isinstance(payload, dict) else []
+            raw_text = str(payload.get("text", "")).strip() if isinstance(payload, dict) else str(payload).strip()
+
+            logger.info(
+                "[CHUNK] session=%s | audio-analyzer response: %d segment(s), flat_text=%r",
+                self.session_id, len(segments), raw_text[:120],
+            )
+
+            if segments and config.DEFAULT_DIARIZATION_ENABLED:
+                text = self._filter_target_speaker(segments)
+            else:
+                if config.DEFAULT_DIARIZATION_ENABLED and not segments:
+                    logger.info(
+                        "[CHUNK] session=%s | diarization enabled but no segments returned — using flat text",
+                        self.session_id,
+                    )
+                text = raw_text
+
             if text:
                 # Strip Whisper hallucination tokens (e.g. [BLANK_AUDIO], [Music])
                 text = _WHISPER_JUNK.sub("", text).strip()
             if text:
+                logger.info(
+                    "[CHUNK] session=%s | appending to transcript: %r",
+                    self.session_id, text[:120],
+                )
                 with self._lock:
                     self.transcript_parts.append(text)
+            else:
+                logger.info(
+                    "[CHUNK] session=%s | chunk produced no usable text (filtered or empty)",
+                    self.session_id,
+                )
         finally:
             Path(temp_path).unlink(missing_ok=True)
+
+    def _filter_target_speaker(self, segments: list[dict]) -> str:
+        """Filter diarized segments to keep only the primary customer's speech.
+
+        Cross-chunk primary-speaker identity is now resolved upstream by the
+        audio-analyzer service using speaker embeddings (stable across chunk
+        boundaries — see docs/audio-analyzer-diarization-plan.md). Each
+        segment already carries ``is_primary`` when audio-analyzer could
+        assign it a speaker. kiosk-core simply trusts that flag — no local
+        lock-on state, no cross-chunk buffering.
+
+        Semantic fallback: if *no* segment was flagged primary this chunk
+        (e.g. the customer was silent while a staff member spoke), score each
+        remaining segment against DOMAIN_KEYWORDS and surface the best match
+        above threshold, so a legitimate ordering utterance is not dropped.
+        """
+        if not segments:
+            return ""
+
+        kept_segments: list[dict] = [seg for seg in segments if seg.get("is_primary")]
+        discarded_segments: list[dict] = [seg for seg in segments if not seg.get("is_primary")]
+
+        logger.info(
+            "[SPEAKER-FILTER] session=%s | processing %d segment(s): %d primary, %d non-primary",
+            self.session_id, len(segments), len(kept_segments), len(discarded_segments),
+        )
+        for i, segment in enumerate(segments):
+            logger.info(
+                "[SPEAKER-FILTER] session=%s | seg[%d] speaker=%s is_primary=%s → %s | text=%r",
+                self.session_id, i, segment.get("speaker", "UNKNOWN"), segment.get("is_primary", False),
+                "KEEP" if segment.get("is_primary") else "DISCARD", segment.get("text", "")[:80],
+            )
+
+        # ── Semantic fallback ────────────────────────────────────────────────
+        if not kept_segments and discarded_segments:
+            logger.info(
+                "[SPEAKER-FILTER] session=%s | no primary segment this chunk — running semantic fallback on %d segment(s)",
+                self.session_id, len(discarded_segments),
+            )
+            best_score = 0.0
+            best_segment: dict | None = None
+            for segment in discarded_segments:
+                words = segment.get("text", "").lower().split()
+                if not words:
+                    continue
+                overlap = sum(1 for w in words if w in _DOMAIN_KEYWORDS)
+                score = overlap / max(len(words), 1)
+                logger.info(
+                    "[SPEAKER-FILTER] session=%s | fallback score speaker=%s score=%.2f | text=%r",
+                    self.session_id, segment.get("speaker", "UNKNOWN"), score, segment.get("text", "")[:80],
+                )
+                if score > best_score:
+                    best_score = score
+                    best_segment = segment
+
+            if best_segment is not None and best_score >= config.DEFAULT_SEMANTIC_FALLBACK_THRESHOLD:
+                logger.info(
+                    "[SPEAKER-FILTER] session=%s | semantic fallback ACCEPTED speaker=%s score=%.2f | text=%r",
+                    self.session_id, best_segment.get("speaker", "UNKNOWN"), best_score, best_segment.get("text", "")[:80],
+                )
+                kept_segments = [best_segment]
+            else:
+                logger.info(
+                    "[SPEAKER-FILTER] session=%s | semantic fallback found no domain match (best_score=%.2f, threshold=%.2f) → chunk DROPPED",
+                    self.session_id, best_score, config.DEFAULT_SEMANTIC_FALLBACK_THRESHOLD,
+                )
+
+        final_text = " ".join(seg.get("text", "") for seg in kept_segments).strip()
+        logger.info(
+            "[SPEAKER-FILTER] session=%s | RESULT: kept=%d dropped=%d | final_text=%r",
+            self.session_id,
+            len(kept_segments),
+            len(discarded_segments) - (1 if kept_segments and discarded_segments else 0),
+            final_text[:120],
+        )
+        return final_text
 
     def _write_temp_wav(self, audio: np.ndarray) -> str:
         with tempfile.NamedTemporaryFile(prefix=f"{self.session_id}-", suffix=".wav", delete=False) as temp_file:

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "MCP server configuration for the kiosk ordering agent",
+  "servers": [
+    {
+      "name": "kiosk-core",
+      "enabled": true,
+      "transport": "http",
+      "url": "http://kiosk-core:8012/mcp/mcp",
+      "description": "Kiosk ordering tools — list products, place/update/confirm orders, get upsell suggestions",
+      "timeout": 30.0
+    }
+  ]
+}

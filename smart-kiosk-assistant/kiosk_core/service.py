@@ -82,7 +82,14 @@ class SessionService:
             if self._active_session_id is not None:
                 active = self._sessions[self._active_session_id]
                 if active.snapshot()["status"] in {"running", "stopping"}:
-                    raise ValueError("Another audio session is already active")
+                    # Auto-stop the previous session — the user intentionally started
+                    # a new turn (new mic press). On a single-user kiosk this is always
+                    # the right behaviour; we never block the new request.
+                    try:
+                        active.stop(reason="superseded_by_new_session")
+                    except Exception:
+                        pass  # already stopped or stopping — continue
+                self._active_session_id = None
 
             session = BrowserStreamSession(request=request, on_complete=self._on_session_complete)
             self._sessions[session.session_id] = session

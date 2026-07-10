@@ -1,0 +1,150 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+/* ======================
+   PERFORMANCE DASHBOARD — Dark Theme Overrides
+   ====================== */
+
+/* Smooth scrollbar inside panels */
+.dash-scroll::-webkit-scrollbar { width: 4px; }
+.dash-scroll::-webkit-scrollbar-track { background: transparent; }
+.dash-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 2px; }
+.dash-scroll::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+/* ======================
+   PIPELINE FLOW ANIMATIONS
+   ====================== */
+
+/* Animated dashes along pipeline arrows */
+@keyframes dash-flow {
+  from { stroke-dashoffset: 12; }
+  to   { stroke-dashoffset: 0; }
+}
+
+/* Active stage glow pulse */
+@keyframes stage-glow-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.65; }
+}
+
+/* ======================
+   KPI CARD ANIMATIONS
+   ====================== */
+
+/* Subtle blue glow when data updates */
+@keyframes kpi-glow {
+  0%   { box-shadow: 0 0 0 0   rgba(0, 113, 197, 0); }
+  40%  { box-shadow: 0 0 14px 3px rgba(0, 113, 197, 0.3); }
+  100% { box-shadow: 0 0 0 0   rgba(0, 113, 197, 0); }
+}
+.animate-kpi-glow { animation: kpi-glow 1.2s ease-out; }
+
+/* Number tick when value changes */
+@keyframes number-tick {
+  from { opacity: 0; transform: translateY(-5px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ======================
+   STAGE PULSE (active pipeline node)
+   ====================== */
+
+@keyframes stage-pulse {
+  0%, 100% { transform: scale(1);    opacity: 1; }
+  50%       { transform: scale(1.04); opacity: 0.8; }
+}
+.animate-stage-pulse { animation: stage-pulse 1.6s ease-in-out infinite; }
+
+/* ======================
+   HARDWARE CHART ANIMATIONS
+   ====================== */
+
+/* Spinner for loading state */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+.animate-spin-slow { animation: spin 1.8s linear infinite; }
+
+/* ======================
+   CHAT AREA ANIMATIONS
+   ====================== */
+
+/* Message slide-in */
+@keyframes messageSlideIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.kiosk-message-fade-in { animation: messageSlideIn 0.3s ease-out; }
+
+/* Streaming cursor blink */
+@keyframes kiosk-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+.kiosk-cursor { animation: kiosk-blink 1s steps(1) infinite; }
+
+/* Typing indicator dots */
+@keyframes typingDot {
+  0%, 60%, 100% { transform: translateY(0);   opacity: 0.6; }
+  30%            { transform: translateY(-8px); opacity: 1; }
+}
+.kiosk-typing-dot {
+  display: inline-block;
+  width: 6px; height: 6px;
+  margin: 0 2px;
+  background-color: #64748b;
+  border-radius: 50%;
+  animation: typingDot 1.4s ease-in-out infinite;
+}
+
+/* Assistant waveform bars */
+@keyframes kiosk-bar {
+  0%, 100% { transform: scaleY(0.35); }
+  50%       { transform: scaleY(1); }
+}
+.kiosk-bar {
+  transform-origin: bottom;
+  animation: kiosk-bar 0.9s ease-in-out infinite;
+}
+.kiosk-bar:nth-child(2) { animation-delay: 0.15s; }
+.kiosk-bar:nth-child(3) { animation-delay: 0.3s; }
+.kiosk-bar:nth-child(4) { animation-delay: 0.45s; }
+
+/* Pulsing mic (idle) */
+@keyframes kiosk-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(0, 104, 181, 0.45); transform: scale(1); }
+  50%  { box-shadow: 0 0 0 12px rgba(0, 104, 181, 0); transform: scale(1.05); }
+  100% { box-shadow: 0 0 0 0 rgba(0, 104, 181, 0);   transform: scale(1); }
+}
+
+/* Recording pulse (red) */
+@keyframes kiosk-pulse-red {
+  0%   { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.45); transform: scale(1); }
+  50%  { box-shadow: 0 0 0 12px rgba(239, 68, 68, 0); transform: scale(1.05); }
+  100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);   transform: scale(1); }
+}
+.kiosk-pulse-recording { animation: kiosk-pulse-red 1.5s infinite; }
+
+/* Welcome bounce */
+@keyframes bounce-slow {
+  0%, 100% { transform: translateY(0); }
+  50%       { transform: translateY(-10px); }
+}
+.animate-bounce-slow { animation: bounce-slow 2s ease-in-out infinite; }
+
+/* ======================
+   GLOBAL SCROLLBAR
+   ====================== */
+::-webkit-scrollbar         { width: 6px; height: 6px; }
+::-webkit-scrollbar-track   { background: transparent; }
+::-webkit-scrollbar-thumb   { background: #cbd5e1; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+* { scrollbar-width: thin; scrollbar-color: #cbd5e1 transparent; }

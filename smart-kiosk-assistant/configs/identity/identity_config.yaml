@@ -1,0 +1,62 @@
+# Smart Kiosk — Identity Service configuration
+#
+# All values are env-var overridable (see identity_core/config.py).  This file
+# documents the defaults; production overrides come from docker-compose env.
+
+# Master bootstrap switch — when false, the service skips automatic test
+# registration on startup (BOOTSTRAP_ON_START).
+bootstrap_on_start: true
+
+# ── Storage ──────────────────────────────────────────────────────────────────
+# Shared SQLite database (same file kiosk-core mounts).  The loyalty_profiles
+# table is created here idempotently on startup.
+db_path: /app/data/kiosk.db
+
+# FAISS index files (kept in the identity-service's own volume, NEVER in SQLite).
+faiss_dir: /app/data/identity
+face_index_file: face_index.bin
+voice_index_file: voice_index.bin
+
+# Embedding dimensions (must match the chosen OpenVINO models).
+face_embedding_dim: 256
+voice_embedding_dim: 192
+
+# ── Verification thresholds & fusion ─────────────────────────────────────────
+# Authentication requires BOTH modalities. The fused score must clear the
+# combined threshold.  Per-modality thresholds are retained for diagnostics.
+fusion_face_weight: 0.6
+fusion_voice_weight: 0.4
+combined_threshold: 0.78
+face_threshold: 0.80
+voice_threshold: 0.75
+
+# ── OpenVINO models (resolved relative to models_dir) ────────────────────────
+# Layout: <models_dir>/<identity_subdir>/<model>/<PRECISION>/<model>.xml for the
+# face IRs, and <models_dir>/<identity_subdir>/<voice_model>/openvino/<voice_model>.xml
+# for the converted ECAPA voice model.  Run ./setup_models.sh --identity to fetch.
+models_dir: /app/models
+identity_subdir: identity
+precision: FP16                   # FP16 | FP32 (must match downloaded IR)
+device: GPU                       # CPU | GPU | NPU (uppercase)
+face_detection_model: face-detection-retail-0005
+face_reid_model: face-reidentification-retail-0095
+voice_embedding_model: ecapa-tdnn-voice
+voice_backend: openvino           # openvino | speechbrain (Strategy switch)
+voice_sample_rate: 16000          # waveform rate the voice IR was exported for
+
+# Frame sampling for video enrolment (sample every Nth frame).
+video_frame_sample_rate: 10
+face_detection_min_confidence: 0.7
+
+# ── Bootstrap loyalty profiles (automatic test registration) ─────────────────
+# Each entry is registered on startup unless its user_id already exists.
+# audio_path / video_path point at the sample data (provided later) mounted
+# into the container.  Leave the list empty to register nothing on boot.
+profiles: []
+  # Example shape (fill in once sample data is provided):
+  # - user_id: USR-0001
+  #   name: "Asha Verma"
+  #   favorites: ["cappuccino", "blueberry muffin"]
+  #   restrictions: ["no peanuts"]
+  #   video_path: /app/sample-data/asha.mp4
+  #   audio_path: /app/sample-data/asha.wav

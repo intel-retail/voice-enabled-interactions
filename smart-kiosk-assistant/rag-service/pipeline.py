@@ -19,6 +19,7 @@ from services import (
     ChromaEmbeddingAdapter,
     IngestionService,
     LLMService,
+    OVMSLLMService,
     PromptBuilder,
     RetrievalRecord,
     RetrievalService,
@@ -43,8 +44,15 @@ __all__ = [
 
 class RagPipeline:
     def __init__(self) -> None:
-        # Ensure model is exported to OpenVINO IR before anything else
-        ensure_llm_model()
+        llm_cfg = config.models.llm
+        _llm_backend = str(getattr(llm_cfg, "backend", "openvino")).lower()
+
+        if _llm_backend == "ovms":
+            # OVMS serves the model; no local OV export needed.
+            logger.info("[RAG] LLM backend=ovms — skipping in-process model export")
+        else:
+            # In-process OpenVINO path: ensure model is exported to OV IR first.
+            ensure_llm_model()
 
         self.embedding_component = EmbeddingComponent()
 
@@ -52,19 +60,26 @@ class RagPipeline:
         self.persist_directory = storage_cfg.persist_directory
         self.collection_name = storage_cfg.collection_name
 
-        llm_cfg = config.models.llm
-        self._llm_service = LLMService(
-            model_path=get_llm_model_path(),
-            hf_id=llm_cfg.hf_id,
-            device=str(getattr(llm_cfg, "device", "CPU")),
-            temperature=float(getattr(llm_cfg, "temperature", 0.0)),
-            default_max_new_tokens=int(getattr(config.answering, "max_tokens", 192)),
-            max_generations_before_reload=int(
-                getattr(config.answering, "max_generations_before_reload", 25)
-            ),
-            generation_timeout=float(getattr(config.answering, "generation_timeout_secs", 90.0)),
-            cache_dir=getattr(llm_cfg, "cache_dir", None),
-        )
+        if _llm_backend == "ovms":
+            self._llm_service: LLMService | OVMSLLMService = OVMSLLMService(
+                hf_id=llm_cfg.hf_id,
+                temperature=float(getattr(llm_cfg, "temperature", 0.0)),
+                default_max_new_tokens=int(getattr(config.answering, "max_tokens", 192)),
+                generation_timeout=float(getattr(config.answering, "generation_timeout_secs", 90.0)),
+            )
+        else:
+            self._llm_service = LLMService(
+                model_path=get_llm_model_path(),
+                hf_id=llm_cfg.hf_id,
+                device=str(getattr(llm_cfg, "device", "CPU")),
+                temperature=float(getattr(llm_cfg, "temperature", 0.0)),
+                default_max_new_tokens=int(getattr(config.answering, "max_tokens", 192)),
+                max_generations_before_reload=int(
+                    getattr(config.answering, "max_generations_before_reload", 25)
+                ),
+                generation_timeout=float(getattr(config.answering, "generation_timeout_secs", 90.0)),
+                cache_dir=getattr(llm_cfg, "cache_dir", None),
+            )
 
         self.vectorstore = self._build_vectorstore()
 

@@ -14,6 +14,94 @@
 services:
 
   # ---------------------------------------------------------------------------
+  # rtsp-streamer: publishes every *.mp4 under /media as an RTSP stream via
+  # MediaMTX + ffmpeg (see ./rtsp-streamer/start.sh).
+  #
+  # Stream path is set by STREAM_NAME (see rtsp-streamer environment below).
+  # Default: rtsp://rtsp-streamer:8554/queue
+  #
+  # Feeds the queue-service person-counting pipeline (queue-service/).
+  # ---------------------------------------------------------------------------
+  rtsp-streamer:
+    build:
+      context: ./rtsp-streamer
+      dockerfile: Dockerfile
+    image: ${REGISTRY:-intel}/rtsp-streamer:${RELEASE_TAG:-latest}
+    container_name: rtsp-streamer
+    user: "1000:1000"
+    ports:
+      - "8554:8554"
+    environment:
+      MEDIA_DIR:      /media
+      # Play these clips back-to-back, then loop the whole sequence forever
+      # (sample_1 -> sample_2 -> sample_1 -> ...). They are concatenated by
+      # ffmpeg's concat demuxer and published as ONE stream, so a single ffmpeg
+      # process owns the RTSP path. For a single continuous clip instead, remove
+      # MEDIA_FILES and set MEDIA_FILE (e.g. MEDIA_FILE: /media/sample_1.mp4).
+      MEDIA_FILES:    /media/sample_1.mp4,/media/sample_2.mp4
+      # STREAM_NAME is required when MEDIA_FILES is used (the concat demuxer
+      # publishes a single stream so there is no filename to derive a path from).
+      STREAM_NAME:    queue
+      RTSP_PORT:      "8554"
+      LOOP_COUNT:     "-1"      # -1 = infinite loop for a continuous feed
+      BLANK_DURATION: "0"       # seconds of black frames between loops
+      NO_PROXY: "localhost,127.0.0.1,rtsp-streamer,queue-management,kiosk-core"
+      no_proxy: "localhost,127.0.0.1,rtsp-streamer,queue-management,kiosk-core"
+    volumes:
+      - ./Sample_data:/media:ro
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "8554"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # queue-service: YOLOv8 + OpenVINO person-counting pipeline.
+  #
+  # Reads the RTSP stream from rtsp-streamer, runs person detection + tracking,
+  # counts people in a configurable ROI, and exposes:
+  #   GET /api/v1/queue/count  — JSON { count, status, timestamp }
+  #   GET /stream              — MJPEG video with bounding-box overlay
+  #
+  # The kiosk-ui nginx proxy routes /queue-svc/* → http://queue-service:8090/
+  # ---------------------------------------------------------------------------
+  queue-service:
+    build:
+      context: ./queue-service
+      dockerfile: docker/Dockerfile
+    image: ${REGISTRY:-intel}/queue-service:${RELEASE_TAG:-latest}
+    container_name: queue-service
+    user: "1000:1000"
+    ports:
+      - "8090:8090"
+    environment:
+      # Derive RTSP URL from the same STREAM_NAME that rtsp-streamer publishes,
+      # so changing the media file in one place keeps the pipeline in sync.
+      QUEUE_SERVICE__SOURCE__RTSP_URL: "rtsp://rtsp-streamer:8554/${STREAM_NAME:-queue}"
+      NO_PROXY: "localhost,127.0.0.1,rtsp-streamer,queue-service"
+      no_proxy: "localhost,127.0.0.1,rtsp-streamer,queue-service"
+    volumes:
+      - ./queue-service/conf:/app/queue-service/conf:ro
+      - ./queue-service/models:/app/queue-service/models:ro
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - "${RENDER_GID:-992}"
+    depends_on:
+      rtsp-streamer:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=5)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
   # metrics-collector: OS-level hardware utilization collector.
   # Built on intel/retail-benchmark which provides supervisord, qmassa (Intel
   # GPU), Intel NPU tool, Intel PCM (power), sar (CPU), and free (memory).
@@ -28,6 +116,9 @@ services:
     build:
       context: ./kiosk_core/metrics-collector
       dockerfile: Dockerfile
+    # Pinned independently of RELEASE_TAG: metrics-collector is excluded from
+    # this release cycle, so it stays on the last released image.
+    image: ${REGISTRY:-intel}/metrics-collector:2026.1.0
     container_name: metrics-collector
     privileged: true
     pid: host
@@ -77,6 +168,21 @@ services:
       # ./.cache mount persists every model cache the service uses
       # (huggingface, openai-whisper, torch hub, etc.).
       HF_HOME: /app/audio_analyzer/.cache/huggingface
+      # HuggingFace token — required by Pyannote speaker diarization.
+      # Set HF_TOKEN in .env (single source of truth).
+      HF_TOKEN: ${HF_TOKEN:-}
+      # Map HF_TOKEN into the config loader's namespace so config.models.asr.hf_token
+      # resolves to the token instead of null. The config_loader uses AUDIO_ANALYZER__
+      # prefix with __ as path separator (models__asr__hf_token → models.asr.hf_token).
+      AUDIO_ANALYZER__MODELS__ASR__HF_TOKEN: ${HF_TOKEN:-}
+      # Gate pyannote speaker-diarization + segmentation model preload with the
+      # same flag kiosk-core uses to decide whether to request diarization.
+      # ./configs/audio-analyzer/config.yaml pins models.asr.diarization: True,
+      # which makes preload_models() load pyannote at startup unconditionally —
+      # this override lets KIOSK_CORE_DIARIZATION_ENABLED=false (e.g. in CI,
+      # where no HF_TOKEN/model-licence acceptance is available) also skip that
+      # preload, instead of crashing with an unauthenticated 403 download.
+      AUDIO_ANALYZER__MODELS__ASR__DIARIZATION: ${KIOSK_CORE_DIARIZATION_ENABLED:-true}
     volumes:
       # Kiosk-pinned config (see ./configs/README.md) — mounted as the
       # service config without modifying edge-ai-libraries.
@@ -105,7 +211,7 @@ services:
     build:
       context: ../edge-ai-libraries/microservices/text-to-speech
       dockerfile: Dockerfile
-    image: ${REGISTRY:-intel}/text-to-speech:${RELEASE_TAG:-latest}
+    image: ${REGISTRY:-intel}/text-to-speech:2026.1.0
     container_name: text-to-speech
     user: "1000:1000"
     ports:
@@ -160,6 +266,22 @@ services:
       - "${RENDER_GID:-992}"
     environment:
       MPLCONFIGDIR: /tmp/matplotlib
+      # Agent LLM — points at the OVMS container
+      AGENT_LLM_URL:   http://ovms-llm:8000/v3
+      AGENT_LLM_MODEL: ${OVMS_MODEL_NAME:-OpenVINO/Qwen3-4B-int4-ov}
+      AGENT_MCP_CONFIG: /app/rag-service/agentic/resources/mcp_servers.json
+      # Embedding + reranker models are loaded in-process via OpenVINO at
+      # startup (config.yaml pins device: GPU for both). Override with
+      # TARGET_DEVICE=CPU (same variable used for the ovms-llm container) so
+      # environments without a GPU (e.g. CI runners) don't crash on startup
+      # with "[GPU] no supported devices found".
+      SMART_KIOSK_RAG__MODELS__EMBEDDING__DEVICE: ${TARGET_DEVICE:-GPU}
+      SMART_KIOSK_RAG__RETRIEVAL__RERANKER__DEVICE: ${TARGET_DEVICE:-GPU}
+      # Bypass corporate proxy for all intra-cluster traffic so that
+      # requests to ovms-llm, kiosk-core, etc. go directly on the
+      # Docker bridge network instead of through the Intel proxy.
+      NO_PROXY: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,172.16.0.0/12,10.0.0.0/8"
+      no_proxy: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,172.16.0.0/12,10.0.0.0/8"
     volumes:
       - rag_service_models:/app/rag-service/models
       - rag_service_storage:/app/rag-service/storage
@@ -172,6 +294,55 @@ services:
       interval: 15s
       timeout: 10s
       start_period: 600s
+      retries: 10
+    restart: unless-stopped
+
+  # OVMS — serves Qwen3-4B-int4-ov for the ordering agent (ADK → LiteLLM → OVMS).
+  #
+  # Uses OVMS pull mode: if ./models/OpenVINO/Qwen3-4B-int4-ov/ is present
+  # (pre-downloaded by setup_models.sh) the model loads from disk; otherwise
+  # OVMS pulls it from HuggingFace on first start.
+  #
+  # Pre-download recommended:
+  #   ./setup_models.sh            # GPU (default)
+  #   ./setup_models.sh --device CPU
+  #
+  # Why OpenVINO/Qwen3-4B-int4-ov + hermes3?
+  #   Pre-converted INT4 (~2 GB) with native tool-calling support per
+  #   https://docs.openvino.ai/2026/model-server/ovms_demos_continuous_batching_agent.html
+  ovms-llm:
+    image: openvino/model_server:latest-gpu
+    container_name: ovms-llm
+    ports:
+      - "9001:9000"  # gRPC (host 9001 avoids conflict with metrics-collector:9000)
+      - "8000:8000"  # REST / OpenAI-compatible /v3
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - "${RENDER_GID:-992}"
+    volumes:
+      # Bind-mount pre-downloaded models directory (populated by setup_models.sh).
+      # OVMS will pull from HuggingFace on first run if the directory is empty.
+      - ./models:/models
+      # OpenVINO compilation cache — avoids re-compiling IR on every startup
+      - ovms_ov_cache:/tmp/ov_cache
+    environment:
+      OV_CACHE_DIR: /tmp/ov_cache
+    command: >
+      --rest_port 8000
+      --port 9000
+      --source_model ${OVMS_MODEL_NAME:-OpenVINO/Qwen3-4B-int4-ov}
+      --model_repository_path /models
+      --task text_generation
+      --tool_parser hermes3
+      --target_device ${TARGET_DEVICE:-GPU}
+      --cache_dir /tmp/ov_cache
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/v3/models"]
+      interval: 20s
+      timeout: 10s
+      start_period: 300s
       retries: 10
     restart: unless-stopped
 
@@ -189,8 +360,30 @@ services:
       KIOSK_CORE_RAG_URL:      http://rag-service:8020/api/v1/query
       KIOSK_CORE_TTS_URL:      http://text-to-speech:8011/v1/audio/speech
       KIOSK_CORE_METRICS_URL:  http://metrics-collector:9000
+      # Diarization — re-enable once HF terms are accepted for pyannote models.
+      # Accept terms at: https://huggingface.co/pyannote/speaker-diarization-3.1
+      #                  https://huggingface.co/pyannote/segmentation-3.0
+      KIOSK_CORE_DIARIZATION_ENABLED: "true"
+      # Ordering & agent routing
+      KIOSK_CORE_ORDERING_ENABLED: "true"
+      KIOSK_CORE_AGENT_URL:        http://rag-service:8020/api/v1/agent/chat
+      KIOSK_CORE_DB_PATH:          /app/data/kiosk.db
+      KIOSK_CORE_PRODUCTS_YAML:    /app/configs/ordering/products.yaml
+      KIOSK_CORE_UPSELL_RULES_YAML: /app/configs/ordering/upsell_rules.yaml
+      # Identity / biometric auth feature (app-layer flag). Set to "true" AND
+      # start with `--profile identity` to bring up the identity-service.
+      KIOSK_CORE_IDENTITY_ENABLED: "${KIOSK_CORE_IDENTITY_ENABLED:-false}"
+      KIOSK_CORE_IDENTITY_URL:     http://identity-service:8013
+      # Queue-service integration (dynamic peak-hour menu)
+      KIOSK_CORE_QUEUE_SERVICE_ENABLED: "${KIOSK_CORE_QUEUE_SERVICE_ENABLED:-true}"
+      KIOSK_CORE_QUEUE_SERVICE_URL:     http://queue-service:8090
+      # Bypass corporate proxy for intra-cluster traffic
+      NO_PROXY: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,queue-service,172.16.0.0/12,10.0.0.0/8"
+      no_proxy: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,queue-service,172.16.0.0/12,10.0.0.0/8"
     volumes:
       - generated_audio:/app/generated_audio
+      - kiosk_db:/app/data
+      - ./configs/ordering:/app/configs/ordering:ro
     depends_on:
       audio-analyzer:
         condition: service_healthy
@@ -207,13 +400,68 @@ services:
       retries: 3
     restart: unless-stopped
 
-  kiosk-ui:
+  # ---------------------------------------------------------------------------
+  # identity-service: multimodal biometric authentication (Face ID + Voiceprint).
+  #
+  # Gated behind the `identity` compose profile (container-layer flag) — it only
+  # starts when you run, e.g.:
+  #     KIOSK_CORE_IDENTITY_ENABLED=true docker compose --profile identity up -d
+  # The app-layer flag KIOSK_CORE_IDENTITY_ENABLED tells kiosk-core to call it.
+  #
+  # Shares the same kiosk_db volume as kiosk-core (loyalty_profiles table lives
+  # in kiosk.db). FAISS indices live in the separate identity_data volume.
+  # ---------------------------------------------------------------------------
+  identity-service:
     build:
       context: .
+      dockerfile: identity-service/Dockerfile
+    image: ${REGISTRY:-intel}/identity-service:${RELEASE_TAG:-latest}
+    container_name: identity-service
+    profiles: ["identity"]
+    user: "1000:1000"
+    ports:
+      - "8013:8013"
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - "${RENDER_GID:-992}"
+    environment:
+      BOOTSTRAP_ON_START:        "${BOOTSTRAP_ON_START:-true}"
+      IDENTITY_DB_PATH:          /app/data/kiosk.db
+      IDENTITY_FAISS_DIR:        /app/data/identity
+      IDENTITY_MODELS_DIR:       /app/models
+      IDENTITY_DEVICE:           "${IDENTITY_DEVICE:-GPU}"
+      IDENTITY_CONFIG_YAML:      /app/configs/identity/identity_config.yaml
+      IDENTITY_PROMPTS_YAML:     /app/configs/identity/verification_prompts.yaml
+      NO_PROXY: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,identity-service,172.16.0.0/12,10.0.0.0/8"
+      no_proxy: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,identity-service,172.16.0.0/12,10.0.0.0/8"
+    volumes:
+      # Shared SQLite DB (same file kiosk-core uses).
+      - kiosk_db:/app/data
+      # FAISS indices live alongside the DB volume but in their own subdir.
+      - identity_data:/app/data/identity
+      # Pinned config (challenge prompts + bootstrap profiles).
+      - ./configs/identity:/app/configs/identity:ro
+      # OpenVINO models (face detection/reid, ECAPA-TDNN voice).
+      - ./models:/app/models
+      # Sample enrolment data is mounted here once provided (Phase 5):
+      # - ./identity-service/sample-data:/app/sample-data:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8013/health', timeout=5).read()"]
+      interval: 15s
+      timeout: 10s
+      start_period: 120s
+      retries: 5
+    restart: unless-stopped
+
+  kiosk-ui:
+    build:
+      context: ./kiosk-ui
       dockerfile: Dockerfile
     image: ${REGISTRY:-intel}/kiosk-ui:${RELEASE_TAG:-latest}
     container_name: kiosk-ui
-    user: "1000:1000"
     ports:
       - "7860:7860"
     environment:
@@ -223,7 +471,6 @@ services:
       KIOSK_CORE_UI_TTS_URL:      http://text-to-speech:8011/v1/audio/speech
     volumes:
       - generated_audio:/app/generated_audio
-    command: ["python3", "gradio_app.py"]
     depends_on:
       kiosk-core:
         condition: service_healthy
@@ -241,3 +488,8 @@ volumes:
   rag_service_models:
   rag_service_storage:
   rag_service_hf_cache:
+  kiosk_db:
+  # FAISS biometric indices for identity-service (face_index.bin / voice_index.bin)
+  identity_data:
+  # OpenVINO compilation cache for ovms-llm — avoids re-compiling model IR on restart
+  ovms_ov_cache:

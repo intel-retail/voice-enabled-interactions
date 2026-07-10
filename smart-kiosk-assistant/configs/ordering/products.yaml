@@ -1,0 +1,141 @@
+# QuickBite Express — Product Catalogue
+# Source: knowledge-base-samples/QuickBite-M.md
+# Format: product_id, name, category, price (INR)
+# Categories: burgers, wraps, pizza, beverages, sides, desserts, breakfast
+
+products:
+  # ── Burgers ─────────────────────────────────────────────────────────
+  - product_id: BURGER-VEG-001
+    name: "Crispy Veg Patty Burger"
+    category: burgers
+    price: 129.0
+
+  - product_id: BURGER-VEG-002
+    name: "Paneer Tikka Burger"
+    category: burgers
+    price: 159.0
+
+  - product_id: BURGER-VEG-003
+    name: "Aloo Tikki Burger"
+    category: burgers
+    price: 119.0
+
+  - product_id: BURGER-VEG-004
+    name: "Double Stack Veg"
+    category: burgers
+    price: 189.0
+
+  - product_id: BURGER-NV-001
+    name: "Classic Chicken Burger"
+    category: burgers
+    price: 169.0
+
+  - product_id: BURGER-NV-002
+    name: "Spicy Chicken Crunch Burger"
+    category: burgers
+    price: 179.0
+
+  - product_id: BURGER-NV-003
+    name: "Double Chicken Tower"
+    category: burgers
+    price: 219.0
+
+  # ── Wraps & Rolls ────────────────────────────────────────────────────
+  - product_id: WRAP-VEG-001
+    name: "Paneer Bhurji Kathi Roll"
+    category: wraps
+    price: 129.0
+
+  - product_id: WRAP-VEG-002
+    name: "Mixed Veg Fajita Wrap"
+    category: wraps
+    price: 149.0
+
+  - product_id: WRAP-NV-001
+    name: "Chicken Tikka Kathi Roll"
+    category: wraps
+    price: 149.0
+
+  - product_id: WRAP-NV-002
+    name: "Peri Peri Chicken Wrap"
+    category: wraps
+    price: 169.0
+
+  # ── Pizza ────────────────────────────────────────────────────────────
+  - product_id: PIZZA-VEG-001
+    name: "Margherita Pizza (Regular)"
+    category: pizza
+    price: 179.0
+
+  - product_id: PIZZA-VEG-002
+    name: "Paneer Makhani Pizza (Regular)"
+    category: pizza
+    price: 219.0
+
+  - product_id: PIZZA-NV-001
+    name: "Chicken BBQ Pizza (Regular)"
+    category: pizza
+    price: 249.0
+
+  - product_id: PIZZA-NV-002
+    name: "Pepperoni-Style Chicken Pizza (Regular)"
+    category: pizza
+    price: 269.0
+
+  # ── Sides ────────────────────────────────────────────────────────────
+  - product_id: SIDE-001
+    name: "Classic French Fries (Regular)"
+    category: sides
+    price: 89.0
+
+  - product_id: SIDE-002
+    name: "Peri Peri Fries (Regular)"
+    category: sides
+    price: 99.0
+
+  - product_id: SIDE-003
+    name: "Onion Rings"
+    category: sides
+    price: 109.0
+
+  - product_id: SIDE-004
+    name: "Garlic Bread (4 pcs)"
+    category: sides
+    price: 99.0
+
+  # ── Beverages ────────────────────────────────────────────────────────
+  - product_id: DRINK-001
+    name: "Pepsi (330 ml)"
+    category: beverages
+    price: 59.0
+
+  - product_id: DRINK-002
+    name: "7UP (330 ml)"
+    category: beverages
+    price: 59.0
+
+  - product_id: DRINK-003
+    name: "Mango Lassi (300 ml)"
+    category: beverages
+    price: 89.0
+
+  - product_id: DRINK-004
+    name: "Cold Coffee (300 ml)"
+    category: beverages
+    price: 99.0
+
+  - product_id: DRINK-005
+    name: "Fresh Lime Soda (300 ml)"
+    category: beverages
+    price: 69.0
+
+  # ── Desserts ─────────────────────────────────────────────────────────
+  - product_id: DESSERT-001
+    name: "Chocolate Brownie"
+    category: desserts
+    price: 89.0
+
+  - product_id: DESSERT-002
+    name: "Vanilla Soft Serve"
+    category: desserts
+    price: 59.0

@@ -23,7 +23,15 @@
   recent kernel.
 - Docker Engine and Docker Compose v2 for container deployment.
 - For GPU acceleration on Linux: Intel/OpenVINO host GPU runtime
-  (e.g. `intel-opencl-icd`, `level-zero`) installed on the host.
+  installed on the host:
+
+  ```bash
+  sudo apt-get install -y intel-opencl-icd intel-level-zero-gpu level-zero
+  sudo usermod -aG render $USER
+  ```
+
+  Verify with `ls /dev/dri/renderD*`. If the packages are not found,
+  follow the [Intel GPU driver guide](https://dgpu-docs.intel.com).
 
 ## Host Packages (Standalone Run Only)
 

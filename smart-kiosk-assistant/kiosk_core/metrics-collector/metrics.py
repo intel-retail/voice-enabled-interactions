@@ -449,9 +449,13 @@ def get_platform_info() -> Dict[str, Any]:
 # Metrics payload
 # ---------------------------------------------------------------------------
 
-def build_metrics_payload() -> Dict[str, Any]:
+def build_metrics_payload(window: int = 60) -> Dict[str, Any]:
     """
     Assemble the full metrics payload returned by GET /metrics.
+
+    Only the last ``window`` samples of each series are returned so the
+    JSON payload stays small (< 5 KB) and the UI 4-second fetch timeout
+    is never hit.  The UI trims further to its own display window.
 
     Shape:
     {
@@ -462,10 +466,13 @@ def build_metrics_payload() -> Dict[str, Any]:
         "power":           [[iso_ts, watts, ...], ...]
     }
     """
+    def tail(series: List[List], n: int) -> List[List]:
+        return series[-n:] if len(series) > n else series
+
     return {
-        "cpu_utilization": build_cpu_series(),
-        "gpu_utilization": build_gpu_series(),
-        "npu_utilization": build_npu_series(),
-        "memory":          build_memory_series(),
-        "power":           build_power_series(),
+        "cpu_utilization": tail(build_cpu_series(), window),
+        "gpu_utilization": tail(build_gpu_series(), window),
+        "npu_utilization": tail(build_npu_series(), window),
+        "memory":          tail(build_memory_series(), window),
+        "power":           tail(build_power_series(), window),
     }

@@ -1,0 +1,3 @@
+# Placeholder so the models/ directory is tracked.
+# OpenVINO IR + model_proc files are provisioned here at runtime by
+# src/model_manager.py and are intentionally not committed.

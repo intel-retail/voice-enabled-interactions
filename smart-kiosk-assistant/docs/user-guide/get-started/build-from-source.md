@@ -46,6 +46,26 @@ plain `git clone` of `edge-ai-libraries` also works if you do not mind
 the extra files. Only the build flow needs `edge-ai-libraries` on disk
 — the pull flow (see [Run With Docker Compose](./run-container.md)) does not.
 
+## Download the LLM Model for OVMS
+
+Before building or starting the stack, download the Qwen3-4B model that
+OVMS serves. This runs once and caches into `./models/`:
+
+```bash
+# GPU (recommended)
+./setup_models.sh
+
+# CPU only
+./setup_models.sh --device CPU
+
+# Smaller INT4 model
+./setup_models.sh --int4
+```
+
+`setup_models.sh` downloads the pre-converted OpenVINO model from
+HuggingFace Hub and updates `OVMS_MODEL_NAME`, `TARGET_DEVICE`, and
+`RENDER_GID` in `.env`. See `./setup_models.sh --help` for all options.
+
 ## Build All Images With Compose
 
 The top-level [docker-compose.yml](https://github.com/intel-retail/voice-enabled-interactions/blob/main/smart-kiosk-assistant/docker-compose.yml)
