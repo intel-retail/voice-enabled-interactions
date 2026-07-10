@@ -447,8 +447,8 @@ services:
       - ./configs/identity:/app/configs/identity:ro
       # OpenVINO models (face detection/reid, ECAPA-TDNN voice).
       - ./models:/app/models
-      # Sample enrolment data is mounted here once provided (Phase 5):
-      # - ./identity-service/sample-data:/app/sample-data:ro
+      # Sample enrolment data for bootstrap profiles.
+      - ./identity-service/sample-data:/app/sample-data:ro
     healthcheck:
       test: ["CMD", "python3", "-c",
              "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8013/health', timeout=5).read()"]
