@@ -1,7 +1,7 @@
 name: Bug Report
 description: Report a bug to help us improve Smart Kiosk Assistant
-title: "[BUG] <Component> - <Short summary>"
-labels: ["bug", "triage"]
+title: "[BUG] <Short summary>"
+labels: ['BUG','TRIAGE']
 type: "Bug"
 body:
   - type: markdown
