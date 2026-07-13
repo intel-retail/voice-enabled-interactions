@@ -60,6 +60,26 @@ models:
     device: CPU  # CPU or GPU
     models_base_path: "models"
 
+    # ── Clustering aggressiveness (single-mic kiosk tuning) ────────────────
+    # Force the pipeline to always split into at least 2 speaker clusters so
+    # a secondary voice on the same mic gets a distinct label (SPEAKER_01)
+    # even when its embedding is close to the primary speaker's. Combined
+    # with a lower clustering threshold this reliably surfaces the second
+    # speaker whom kiosk-core then hard-drops via first-speaker lock-on.
+    min_speakers: 2                # force ≥2 clusters per chunk
+    max_speakers: 4                # cap runaway clustering (customer + up to 3 bystanders)
+    clustering_threshold: 0.5      # default 0.7154; lower → more speakers detected
+    segmentation_threshold: 0.4    # default 0.4442; lower → more speech turns split
+
+    # ── Voice enrollment fallback (Option 3) ──────────────────────────────
+    # When pyannote's clustering fails to separate two co-located voices we
+    # fall back to per-session voice enrollment: the first sufficiently-long
+    # speech turn is treated as the "primary" speaker, and every subsequent
+    # turn is relabelled by cosine similarity to that reference embedding.
+    voice_enrollment_enabled: true
+    voice_match_threshold: 0.5     # cosine sim ≥ this → SPEAKER_00 (primary)
+    min_enrollment_duration: 1.0   # seconds; ignore very short turns for enrollment
+
 audio_preprocessing:
   chunk_duration_sec: 15
   silence_threshold: -35  # in dB

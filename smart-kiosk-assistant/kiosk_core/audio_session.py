@@ -91,6 +91,19 @@ class BaseAudioSession:
         # Segments from any different label are unconditionally dropped — the
         # semantic fallback is only used before the primary is established.
         self._primary_speaker_id: str | None = None
+        # Analyzer's own session_id — passed on every chunk so per-session
+        # state (e.g. pyannote enrolled speaker embedding) persists across
+        # the many chunked HTTP requests made in this kiosk session.
+        # Initialised from our own session_id; the analyzer echoes/normalises
+        # it via the X-Session-ID response header, which we then reuse.
+        self._analyzer_session_id: str = self.session_id
+        # Highest segment end-time already consumed from the analyzer. The
+        # analyzer runs in append_to_session mode (session_id is reused) and
+        # returns the cumulative segment list on every chunk with offset-
+        # adjusted timestamps; without this cursor kiosk-core would re-append
+        # every prior primary-speaker segment on each subsequent chunk,
+        # duplicating utterances in transcript_parts.
+        self._last_analyzer_segment_end: float = 0.0
         # ───────────────────────────────────────────────────────────────────────
 
         self._lock = threading.Lock()
@@ -494,7 +507,22 @@ class BaseAudioSession:
                 language=self.request.language,
                 temperature=self.request.temperature,
                 diarization=config.DEFAULT_DIARIZATION_ENABLED,
+                session_id=self._analyzer_session_id,
             )
+            # Latch the analyzer's assigned session id from the first
+            # response so subsequent chunks reuse the same server-side
+            # session (and its enrolled primary voice embedding).
+            assigned = (
+                payload.get("_analyzer_session_id")
+                if isinstance(payload, dict)
+                else None
+            )
+            if assigned and assigned != self._analyzer_session_id:
+                logger.info(
+                    "[CHUNK] session=%s | analyzer session pinned to %s",
+                    self.session_id, assigned,
+                )
+                self._analyzer_session_id = assigned
             segments: list[dict] = payload.get("segments", []) if isinstance(payload, dict) else []
             raw_text = str(payload.get("text", "")).strip() if isinstance(payload, dict) else str(payload).strip()
 
@@ -502,6 +530,41 @@ class BaseAudioSession:
                 "[CHUNK] session=%s | audio-analyzer response: %d segment(s), flat_text=%r",
                 self.session_id, len(segments), raw_text[:120],
             )
+
+            # ── Dedupe against analyzer's cumulative session state ──────────
+            # The analyzer reuses our session_id in append_to_session mode and
+            # returns EVERY segment ever produced for the session (with
+            # timestamps offset by the accumulated duration). Keep only the
+            # segments that start after the last end-time we've already seen;
+            # otherwise every prior utterance gets re-appended to the
+            # transcript on each new chunk.
+            if segments:
+                fresh_segments = [
+                    s for s in segments
+                    if float(s.get("start", 0.0)) >= self._last_analyzer_segment_end - 1e-3
+                ]
+                if len(fresh_segments) != len(segments):
+                    logger.info(
+                        "[CHUNK] session=%s | deduped %d cumulative segment(s) → %d fresh (cursor=%.2fs)",
+                        self.session_id,
+                        len(segments) - len(fresh_segments),
+                        len(fresh_segments),
+                        self._last_analyzer_segment_end,
+                    )
+                segments = fresh_segments
+                if segments:
+                    self._last_analyzer_segment_end = max(
+                        self._last_analyzer_segment_end,
+                        max(float(s.get("end", 0.0)) for s in segments),
+                    )
+                    # Rebuild raw_text from fresh segments so the flat-text
+                    # fallback (used when diarization is off or returns no
+                    # segments) is also free of the cumulative duplicates.
+                    raw_text = " ".join(
+                        s.get("text", "").strip() for s in segments if s.get("text", "").strip()
+                    ).strip()
+                else:
+                    raw_text = ""
 
             if segments and config.DEFAULT_DIARIZATION_ENABLED:
                 text = self._filter_target_speaker(segments)
