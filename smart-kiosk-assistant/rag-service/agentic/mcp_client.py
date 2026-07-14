@@ -1,9 +1,10 @@
 """MCP client — discovers tools on the kiosk-core MCP server and invokes them.
 
 Uses the official ``mcp`` Python library with streamable-HTTP transport.
-Maintains a persistent per-server session so that tool results delivered
-asynchronously over the SSE GET stream are received before the connection
-is torn down.
+Both ``discover_tools`` and ``call_tool`` open a fresh per-call session so
+that the entire ``anyio.TaskGroup`` lifecycle (enter → call → exit) is
+contained in a single asyncio task, avoiding
+``RuntimeError: Attempted to exit cancel scope in a different task``.
 """
 
 from __future__ import annotations
@@ -52,17 +53,6 @@ class MCPServerConfig:
 _servers: dict[str, MCPServerConfig] = {}
 _tools: dict[str, MCPTool] = {}
 
-# Persistent session pool: server_name → (ClientSession, AsyncExitStack)
-_sessions: dict[str, tuple[Any, Any]] = {}
-_session_lock: asyncio.Lock | None = None
-
-
-def _get_lock() -> asyncio.Lock:
-    global _session_lock
-    if _session_lock is None:
-        _session_lock = asyncio.Lock()
-    return _session_lock
-
 
 # ---------------------------------------------------------------------------
 # Config loading
@@ -101,54 +91,6 @@ def load_mcp_config(config_path: str) -> list[MCPServerConfig]:
 
 
 # ---------------------------------------------------------------------------
-# Persistent session management
-# ---------------------------------------------------------------------------
-
-
-async def _get_session(server: MCPServerConfig):
-    """Return a live ClientSession for the server, creating one if needed."""
-    from contextlib import AsyncExitStack
-    from mcp.client.streamable_http import streamablehttp_client
-    from mcp import ClientSession
-
-    async with _get_lock():
-        existing = _sessions.get(server.name)
-        if existing is not None:
-            session, _ = existing
-            return session
-
-        stack = AsyncExitStack()
-        try:
-            read, write, _ = await stack.enter_async_context(
-                streamablehttp_client(server.url)
-            )
-            session = await stack.enter_async_context(ClientSession(read, write))
-            await session.initialize()
-            _sessions[server.name] = (session, stack)  # keep stack alive
-            logger.info("[MCP] Persistent session opened for server=%s", server.name)
-            return session
-        except BaseException as exc:
-            # Suppress cleanup errors — the MCP library's anyio TaskGroup may
-            # raise CancelledError or RuntimeError during teardown after a
-            # connection failure; swallowing them here prevents double-exception
-            # noise and lets the original error propagate cleanly.
-            try:
-                await stack.aclose()
-            except Exception:
-                pass
-            logger.error("[MCP] Failed to open session for %s: %s", server.name, exc)
-            raise
-
-
-async def _close_sessions() -> None:
-    """Close all persistent sessions (call at shutdown)."""
-    async with _get_lock():
-        for session, stack in _sessions.values():
-            await stack.aclose()
-        _sessions.clear()
-
-
-# ---------------------------------------------------------------------------
 # Tool discovery & invocation
 # ---------------------------------------------------------------------------
 
@@ -172,7 +114,7 @@ async def discover_tools(server: MCPServerConfig) -> list[MCPTool]:
             )
             session = await stack.enter_async_context(ClientSession(read, write))
             await session.initialize()
-            result = await session.list_tools()
+            result = await asyncio.wait_for(session.list_tools(), timeout=server.timeout)
             for tool in result.tools:
                 schema = {}
                 if hasattr(tool, "inputSchema"):
@@ -187,6 +129,8 @@ async def discover_tools(server: MCPServerConfig) -> list[MCPTool]:
                 ))
         logger.info("[MCP] Discovered %d tool(s) on server %s: %s",
                     len(tools), server.name, [t.name for t in tools])
+    except asyncio.TimeoutError:
+        logger.error("[MCP] Tool discovery from %s timed out after %.0fs", server.name, server.timeout)
     except Exception as exc:
         logger.error("[MCP] Failed to discover tools from %s (%s): %s", server.name, server.url, exc)
     return tools

@@ -541,7 +541,7 @@ class BaseAudioSession:
             if segments:
                 fresh_segments = [
                     s for s in segments
-                    if float(s.get("start", 0.0)) >= self._last_analyzer_segment_end - 1e-3
+                    if float(s.get("end", 0.0)) > self._last_analyzer_segment_end + 1e-3
                 ]
                 if len(fresh_segments) != len(segments):
                     logger.info(
@@ -597,10 +597,12 @@ class BaseAudioSession:
     def _filter_target_speaker(self, segments: list[dict]) -> str:
         """Filter diarized segments to keep only the primary customer's speech.
 
-        Primary speaker is determined by lock-on: the first speaker label seen
-        in this session is treated as the customer. Every subsequent segment
-        from that same label is kept; any other label is unconditionally
-        dropped — no semantic fallback can override a confirmed non-primary.
+        Primary speaker is determined in order of precedence:
+        1. Analyzer-provided ``is_primary`` flag on the segment — honoured
+           directly when present, so the analyzer's own enrollment logic wins.
+        2. First-speaker lock-on — the first speaker label seen in this session
+           is treated as the customer.  Every subsequent segment from that label
+           is kept; any other label is unconditionally dropped.
 
         Semantic fallback is used only before the primary speaker is
         established (i.e. on the very first chunk that has no clear speaker
@@ -609,22 +611,47 @@ class BaseAudioSession:
         if not segments:
             return ""
 
+        # Defensive read — guard against subclasses or test stubs that may not
+        # have called BaseAudioSession.__init__.
+        primary_speaker_id: str | None = getattr(self, "_primary_speaker_id", None)
+
+        # ── Honor analyzer-provided is_primary when present ──────────────────
+        if any("is_primary" in s for s in segments):
+            primary_segments = [s for s in segments if s.get("is_primary")]
+            if primary_segments:
+                # Also update / initialise the lock-on label from the first
+                # primary segment so label-based filtering stays in sync.
+                label = primary_segments[0].get("speaker", "")
+                if label and primary_speaker_id is None:
+                    self._primary_speaker_id = label
+                    logger.info(
+                        "[SPEAKER-LOCK] session=%s | primary speaker locked → %s (is_primary flag)",
+                        self.session_id, label,
+                    )
+                final_text = " ".join(seg.get("text", "") for seg in primary_segments).strip()
+                logger.info(
+                    "[SPEAKER-FILTER] session=%s | is_primary path: kept=%d | final_text=%r",
+                    self.session_id, len(primary_segments), final_text[:120],
+                )
+                return final_text
+
         # ── Lock on to the first speaker seen in this session ────────────────
-        if self._primary_speaker_id is None:
+        if primary_speaker_id is None:
             for seg in segments:
                 label = seg.get("speaker", "")
                 if label:
                     self._primary_speaker_id = label
+                    primary_speaker_id = label
                     logger.info(
                         "[SPEAKER-LOCK] session=%s | primary speaker locked → %s (first speaker rule)",
-                        self.session_id, self._primary_speaker_id,
+                        self.session_id, primary_speaker_id,
                     )
                     break
 
         # ── Classify segments as primary / non-primary ───────────────────────
-        if self._primary_speaker_id:
-            kept_segments = [s for s in segments if s.get("speaker") == self._primary_speaker_id]
-            discarded_segments = [s for s in segments if s.get("speaker") != self._primary_speaker_id]
+        if primary_speaker_id:
+            kept_segments = [s for s in segments if s.get("speaker") == primary_speaker_id]
+            discarded_segments = [s for s in segments if s.get("speaker") != primary_speaker_id]
         else:
             # No speaker label at all — treat everything as potentially primary
             kept_segments = []
@@ -635,7 +662,7 @@ class BaseAudioSession:
             self.session_id, len(segments), len(kept_segments), len(discarded_segments),
         )
         for i, segment in enumerate(segments):
-            is_primary = self._primary_speaker_id is not None and segment.get("speaker") == self._primary_speaker_id
+            is_primary = primary_speaker_id is not None and segment.get("speaker") == primary_speaker_id
             logger.info(
                 "[SPEAKER-FILTER] session=%s | seg[%d] speaker=%s is_primary=%s → %s | text=%r",
                 self.session_id, i, segment.get("speaker", "UNKNOWN"), is_primary,
@@ -644,11 +671,11 @@ class BaseAudioSession:
 
         # ── Semantic fallback — only before primary is established ───────────
         if not kept_segments and discarded_segments:
-            if self._primary_speaker_id:
+            if primary_speaker_id:
                 # Primary is known — non-primary utterances are noise, drop them.
                 logger.info(
                     "[SPEAKER-FILTER] session=%s | non-primary speech only, primary=%s — chunk DROPPED (no fallback)",
-                    self.session_id, self._primary_speaker_id,
+                    self.session_id, primary_speaker_id,
                 )
             else:
                 # Primary not yet established — run semantic fallback so the
