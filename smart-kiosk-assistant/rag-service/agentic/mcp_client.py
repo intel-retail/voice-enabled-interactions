@@ -1,9 +1,10 @@
 """MCP client — discovers tools on the kiosk-core MCP server and invokes them.
 
 Uses the official ``mcp`` Python library with streamable-HTTP transport.
-Maintains a persistent per-server session so that tool results delivered
-asynchronously over the SSE GET stream are received before the connection
-is torn down.
+Both ``discover_tools`` and ``call_tool`` open a fresh per-call session so
+that the entire ``anyio.TaskGroup`` lifecycle (enter → call → exit) is
+contained in a single asyncio task, avoiding
+``RuntimeError: Attempted to exit cancel scope in a different task``.
 """
 
 from __future__ import annotations
@@ -52,17 +53,6 @@ class MCPServerConfig:
 _servers: dict[str, MCPServerConfig] = {}
 _tools: dict[str, MCPTool] = {}
 
-# Persistent session pool: server_name → (ClientSession, AsyncExitStack)
-_sessions: dict[str, tuple[Any, Any]] = {}
-_session_lock: asyncio.Lock | None = None
-
-
-def _get_lock() -> asyncio.Lock:
-    global _session_lock
-    if _session_lock is None:
-        _session_lock = asyncio.Lock()
-    return _session_lock
-
 
 # ---------------------------------------------------------------------------
 # Config loading
@@ -101,85 +91,65 @@ def load_mcp_config(config_path: str) -> list[MCPServerConfig]:
 
 
 # ---------------------------------------------------------------------------
-# Persistent session management
-# ---------------------------------------------------------------------------
-
-
-async def _get_session(server: MCPServerConfig):
-    """Return a live ClientSession for the server, creating one if needed."""
-    from contextlib import AsyncExitStack
-    from mcp.client.streamable_http import streamablehttp_client
-    from mcp import ClientSession
-
-    async with _get_lock():
-        existing = _sessions.get(server.name)
-        if existing is not None:
-            session, _ = existing
-            return session
-
-        stack = AsyncExitStack()
-        try:
-            read, write, _ = await stack.enter_async_context(
-                streamablehttp_client(server.url)
-            )
-            session = await stack.enter_async_context(ClientSession(read, write))
-            await session.initialize()
-            _sessions[server.name] = (session, stack)  # keep stack alive
-            logger.info("[MCP] Persistent session opened for server=%s", server.name)
-            return session
-        except BaseException as exc:
-            # Suppress cleanup errors — the MCP library's anyio TaskGroup may
-            # raise CancelledError or RuntimeError during teardown after a
-            # connection failure; swallowing them here prevents double-exception
-            # noise and lets the original error propagate cleanly.
-            try:
-                await stack.aclose()
-            except Exception:
-                pass
-            logger.error("[MCP] Failed to open session for %s: %s", server.name, exc)
-            raise
-
-
-async def _close_sessions() -> None:
-    """Close all persistent sessions (call at shutdown)."""
-    async with _get_lock():
-        for session, stack in _sessions.values():
-            await stack.aclose()
-        _sessions.clear()
-
-
-# ---------------------------------------------------------------------------
 # Tool discovery & invocation
 # ---------------------------------------------------------------------------
 
 
 async def discover_tools(server: MCPServerConfig) -> list[MCPTool]:
-    """Discover available tools using the persistent session."""
+    """Discover available tools using a fresh per-call session.
+
+    Same rationale as ``call_tool``: keep the streamable-HTTP session
+    lifecycle contained in a single asyncio task to avoid anyio
+    cancel-scope errors.
+    """
+    from contextlib import AsyncExitStack
+    from mcp.client.streamable_http import streamablehttp_client
+    from mcp import ClientSession
+
     tools: list[MCPTool] = []
     try:
-        session = await _get_session(server)
-        result = await session.list_tools()
-        for tool in result.tools:
-            schema = {}
-            if hasattr(tool, "inputSchema"):
-                schema = tool.inputSchema if isinstance(tool.inputSchema, dict) else {}
-            elif hasattr(tool, "input_schema"):
-                schema = tool.input_schema if isinstance(tool.input_schema, dict) else {}
-            tools.append(MCPTool(
-                name=tool.name,
-                server=server.name,
-                description=tool.description or "",
-                input_schema=schema,
-            ))
+        async with AsyncExitStack() as stack:
+            read, write, _ = await stack.enter_async_context(
+                streamablehttp_client(server.url)
+            )
+            session = await stack.enter_async_context(ClientSession(read, write))
+            await session.initialize()
+            result = await asyncio.wait_for(session.list_tools(), timeout=server.timeout)
+            for tool in result.tools:
+                schema = {}
+                if hasattr(tool, "inputSchema"):
+                    schema = tool.inputSchema if isinstance(tool.inputSchema, dict) else {}
+                elif hasattr(tool, "input_schema"):
+                    schema = tool.input_schema if isinstance(tool.input_schema, dict) else {}
+                tools.append(MCPTool(
+                    name=tool.name,
+                    server=server.name,
+                    description=tool.description or "",
+                    input_schema=schema,
+                ))
         logger.info("[MCP] Discovered %d tool(s) on server %s: %s",
                     len(tools), server.name, [t.name for t in tools])
+    except asyncio.TimeoutError:
+        logger.error("[MCP] Tool discovery from %s timed out after %.0fs", server.name, server.timeout)
     except Exception as exc:
         logger.error("[MCP] Failed to discover tools from %s (%s): %s", server.name, server.url, exc)
     return tools
 
 
 async def call_tool(tool_name: str, arguments: dict[str, Any]) -> Any:
-    """Invoke a tool on its registered MCP server using the persistent session."""
+    """Invoke a tool on its registered MCP server.
+
+    Opens a fresh streamable-HTTP session per call so that the entire
+    ``anyio.TaskGroup`` lifecycle (enter → call → exit) happens inside a
+    single asyncio task. Reusing a persistent session across tasks (e.g.
+    from Google-ADK's tool-invocation task) triggers
+    ``RuntimeError: Attempted to exit cancel scope in a different task``
+    because the underlying MCP streamable-HTTP transport is task-scoped.
+    """
+    from contextlib import AsyncExitStack
+    from mcp.client.streamable_http import streamablehttp_client
+    from mcp import ClientSession
+
     tool = _tools.get(tool_name)
     if tool is None:
         raise ValueError(f"MCP tool not found: {tool_name}")
@@ -189,30 +159,30 @@ async def call_tool(tool_name: str, arguments: dict[str, Any]) -> Any:
         raise ValueError(f"MCP server not found: {tool.server}")
 
     logger.info("[MCP] Calling tool=%s on server=%s args=%s", tool_name, tool.server, arguments)
+
+    async def _invoke() -> Any:
+        async with AsyncExitStack() as stack:
+            read, write, _ = await stack.enter_async_context(
+                streamablehttp_client(server.url)
+            )
+            session = await stack.enter_async_context(ClientSession(read, write))
+            await session.initialize()
+            result = await session.call_tool(tool_name, arguments)
+            content = result.content or []
+            text = "\n".join(
+                c.text for c in content
+                if hasattr(c, "text") and c.text
+            )
+            logger.info("[MCP] Tool=%s result=%s", tool_name, text[:200])
+            return {"status": "success", "result": text or str(content)}
+
     try:
-        session = await _get_session(server)
-        result = await asyncio.wait_for(
-            session.call_tool(tool_name, arguments),
-            timeout=server.timeout,
-        )
-        content = result.content or []
-        text = "\n".join(
-            c.text for c in content
-            if hasattr(c, "text") and c.text
-        )
-        logger.info("[MCP] Tool=%s result=%s", tool_name, text[:200])
-        return {"status": "success", "result": text or str(content)}
+        return await asyncio.wait_for(_invoke(), timeout=server.timeout)
     except asyncio.TimeoutError:
         logger.error("[MCP] Tool=%s timed out after %.0fs", tool_name, server.timeout)
-        entry = _sessions.pop(server.name, None)
-        if entry:
-            await entry[1].aclose()
         return {"error": f"Tool {tool_name} timed out"}
     except Exception as exc:
         logger.error("[MCP] Tool=%s call failed: %s", tool_name, exc)
-        entry = _sessions.pop(server.name, None)
-        if entry:
-            await entry[1].aclose()
         return {"error": str(exc)}
 
 

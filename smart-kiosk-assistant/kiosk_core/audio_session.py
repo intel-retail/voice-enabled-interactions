@@ -84,10 +84,27 @@ class BaseAudioSession:
         self.tts_errors: list[str] = []
         self.stop_requested_at: datetime | None = None
 
-        # Primary-speaker resolution is now performed upstream by the
-        # audio-analyzer service (stable across chunk boundaries via speaker
-        # embeddings — see docs/audio-analyzer-diarization-plan.md). kiosk-core
-        # no longer needs its own cross-chunk lock-on state.
+        # ── Primary-speaker lock-on ────────────────────────────────────────────
+        # The audio-analyzer does not set is_primary on segments. kiosk-core
+        # locks onto the first speaker label seen in the session and treats all
+        # subsequent segments from that label as the customer (primary).
+        # Segments from any different label are unconditionally dropped — the
+        # semantic fallback is only used before the primary is established.
+        self._primary_speaker_id: str | None = None
+        # Analyzer's own session_id — passed on every chunk so per-session
+        # state (e.g. pyannote enrolled speaker embedding) persists across
+        # the many chunked HTTP requests made in this kiosk session.
+        # Initialised from our own session_id; the analyzer echoes/normalises
+        # it via the X-Session-ID response header, which we then reuse.
+        self._analyzer_session_id: str = self.session_id
+        # Highest segment end-time already consumed from the analyzer. The
+        # analyzer runs in append_to_session mode (session_id is reused) and
+        # returns the cumulative segment list on every chunk with offset-
+        # adjusted timestamps; without this cursor kiosk-core would re-append
+        # every prior primary-speaker segment on each subsequent chunk,
+        # duplicating utterances in transcript_parts.
+        self._last_analyzer_segment_end: float = 0.0
+        # ───────────────────────────────────────────────────────────────────────
 
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -490,7 +507,22 @@ class BaseAudioSession:
                 language=self.request.language,
                 temperature=self.request.temperature,
                 diarization=config.DEFAULT_DIARIZATION_ENABLED,
+                session_id=self._analyzer_session_id,
             )
+            # Latch the analyzer's assigned session id from the first
+            # response so subsequent chunks reuse the same server-side
+            # session (and its enrolled primary voice embedding).
+            assigned = (
+                payload.get("_analyzer_session_id")
+                if isinstance(payload, dict)
+                else None
+            )
+            if assigned and assigned != self._analyzer_session_id:
+                logger.info(
+                    "[CHUNK] session=%s | analyzer session pinned to %s",
+                    self.session_id, assigned,
+                )
+                self._analyzer_session_id = assigned
             segments: list[dict] = payload.get("segments", []) if isinstance(payload, dict) else []
             raw_text = str(payload.get("text", "")).strip() if isinstance(payload, dict) else str(payload).strip()
 
@@ -498,6 +530,41 @@ class BaseAudioSession:
                 "[CHUNK] session=%s | audio-analyzer response: %d segment(s), flat_text=%r",
                 self.session_id, len(segments), raw_text[:120],
             )
+
+            # ── Dedupe against analyzer's cumulative session state ──────────
+            # The analyzer reuses our session_id in append_to_session mode and
+            # returns EVERY segment ever produced for the session (with
+            # timestamps offset by the accumulated duration). Keep only the
+            # segments that start after the last end-time we've already seen;
+            # otherwise every prior utterance gets re-appended to the
+            # transcript on each new chunk.
+            if segments:
+                fresh_segments = [
+                    s for s in segments
+                    if float(s.get("end", 0.0)) > self._last_analyzer_segment_end + 1e-3
+                ]
+                if len(fresh_segments) != len(segments):
+                    logger.info(
+                        "[CHUNK] session=%s | deduped %d cumulative segment(s) → %d fresh (cursor=%.2fs)",
+                        self.session_id,
+                        len(segments) - len(fresh_segments),
+                        len(fresh_segments),
+                        self._last_analyzer_segment_end,
+                    )
+                segments = fresh_segments
+                if segments:
+                    self._last_analyzer_segment_end = max(
+                        self._last_analyzer_segment_end,
+                        max(float(s.get("end", 0.0)) for s in segments),
+                    )
+                    # Rebuild raw_text from fresh segments so the flat-text
+                    # fallback (used when diarization is off or returns no
+                    # segments) is also free of the cumulative duplicates.
+                    raw_text = " ".join(
+                        s.get("text", "").strip() for s in segments if s.get("text", "").strip()
+                    ).strip()
+                else:
+                    raw_text = ""
 
             if segments and config.DEFAULT_DIARIZATION_ENABLED:
                 text = self._filter_target_speaker(segments)
@@ -530,68 +597,121 @@ class BaseAudioSession:
     def _filter_target_speaker(self, segments: list[dict]) -> str:
         """Filter diarized segments to keep only the primary customer's speech.
 
-        Cross-chunk primary-speaker identity is now resolved upstream by the
-        audio-analyzer service using speaker embeddings (stable across chunk
-        boundaries — see docs/audio-analyzer-diarization-plan.md). Each
-        segment already carries ``is_primary`` when audio-analyzer could
-        assign it a speaker. kiosk-core simply trusts that flag — no local
-        lock-on state, no cross-chunk buffering.
+        Primary speaker is determined in order of precedence:
+        1. Analyzer-provided ``is_primary`` flag on the segment — honoured
+           directly when present, so the analyzer's own enrollment logic wins.
+        2. First-speaker lock-on — the first speaker label seen in this session
+           is treated as the customer.  Every subsequent segment from that label
+           is kept; any other label is unconditionally dropped.
 
-        Semantic fallback: if *no* segment was flagged primary this chunk
-        (e.g. the customer was silent while a staff member spoke), score each
-        remaining segment against DOMAIN_KEYWORDS and surface the best match
-        above threshold, so a legitimate ordering utterance is not dropped.
+        Semantic fallback is used only before the primary speaker is
+        established (i.e. on the very first chunk that has no clear speaker
+        label), so a legitimate opening utterance is never lost.
         """
         if not segments:
             return ""
 
-        kept_segments: list[dict] = [seg for seg in segments if seg.get("is_primary")]
-        discarded_segments: list[dict] = [seg for seg in segments if not seg.get("is_primary")]
+        # Defensive read — guard against subclasses or test stubs that may not
+        # have called BaseAudioSession.__init__.
+        primary_speaker_id: str | None = getattr(self, "_primary_speaker_id", None)
+
+        # ── Honor analyzer-provided is_primary when present ──────────────────
+        if any("is_primary" in s for s in segments):
+            primary_segments = [s for s in segments if s.get("is_primary")]
+            if primary_segments:
+                # Also update / initialise the lock-on label from the first
+                # primary segment so label-based filtering stays in sync.
+                label = primary_segments[0].get("speaker", "")
+                if label and primary_speaker_id is None:
+                    self._primary_speaker_id = label
+                    logger.info(
+                        "[SPEAKER-LOCK] session=%s | primary speaker locked → %s (is_primary flag)",
+                        self.session_id, label,
+                    )
+                final_text = " ".join(seg.get("text", "") for seg in primary_segments).strip()
+                logger.info(
+                    "[SPEAKER-FILTER] session=%s | is_primary path: kept=%d | final_text=%r",
+                    self.session_id, len(primary_segments), final_text[:120],
+                )
+                return final_text
+
+        # ── Lock on to the first speaker seen in this session ────────────────
+        if primary_speaker_id is None:
+            for seg in segments:
+                label = seg.get("speaker", "")
+                if label:
+                    self._primary_speaker_id = label
+                    primary_speaker_id = label
+                    logger.info(
+                        "[SPEAKER-LOCK] session=%s | primary speaker locked → %s (first speaker rule)",
+                        self.session_id, primary_speaker_id,
+                    )
+                    break
+
+        # ── Classify segments as primary / non-primary ───────────────────────
+        if primary_speaker_id:
+            kept_segments = [s for s in segments if s.get("speaker") == primary_speaker_id]
+            discarded_segments = [s for s in segments if s.get("speaker") != primary_speaker_id]
+        else:
+            # No speaker label at all — treat everything as potentially primary
+            kept_segments = []
+            discarded_segments = list(segments)
 
         logger.info(
             "[SPEAKER-FILTER] session=%s | processing %d segment(s): %d primary, %d non-primary",
             self.session_id, len(segments), len(kept_segments), len(discarded_segments),
         )
         for i, segment in enumerate(segments):
+            is_primary = primary_speaker_id is not None and segment.get("speaker") == primary_speaker_id
             logger.info(
                 "[SPEAKER-FILTER] session=%s | seg[%d] speaker=%s is_primary=%s → %s | text=%r",
-                self.session_id, i, segment.get("speaker", "UNKNOWN"), segment.get("is_primary", False),
-                "KEEP" if segment.get("is_primary") else "DISCARD", segment.get("text", "")[:80],
+                self.session_id, i, segment.get("speaker", "UNKNOWN"), is_primary,
+                "KEEP" if is_primary else "DISCARD", segment.get("text", "")[:80],
             )
 
-        # ── Semantic fallback ────────────────────────────────────────────────
+        # ── Semantic fallback — only before primary is established ───────────
         if not kept_segments and discarded_segments:
-            logger.info(
-                "[SPEAKER-FILTER] session=%s | no primary segment this chunk — running semantic fallback on %d segment(s)",
-                self.session_id, len(discarded_segments),
-            )
-            best_score = 0.0
-            best_segment: dict | None = None
-            for segment in discarded_segments:
-                words = segment.get("text", "").lower().split()
-                if not words:
-                    continue
-                overlap = sum(1 for w in words if w in _DOMAIN_KEYWORDS)
-                score = overlap / max(len(words), 1)
+            if primary_speaker_id:
+                # Primary is known — non-primary utterances are noise, drop them.
                 logger.info(
-                    "[SPEAKER-FILTER] session=%s | fallback score speaker=%s score=%.2f | text=%r",
-                    self.session_id, segment.get("speaker", "UNKNOWN"), score, segment.get("text", "")[:80],
+                    "[SPEAKER-FILTER] session=%s | non-primary speech only, primary=%s — chunk DROPPED (no fallback)",
+                    self.session_id, primary_speaker_id,
                 )
-                if score > best_score:
-                    best_score = score
-                    best_segment = segment
-
-            if best_segment is not None and best_score >= config.DEFAULT_SEMANTIC_FALLBACK_THRESHOLD:
-                logger.info(
-                    "[SPEAKER-FILTER] session=%s | semantic fallback ACCEPTED speaker=%s score=%.2f | text=%r",
-                    self.session_id, best_segment.get("speaker", "UNKNOWN"), best_score, best_segment.get("text", "")[:80],
-                )
-                kept_segments = [best_segment]
             else:
+                # Primary not yet established — run semantic fallback so the
+                # very first domain utterance (before a clean speaker label
+                # arrives) is not silently discarded.
                 logger.info(
-                    "[SPEAKER-FILTER] session=%s | semantic fallback found no domain match (best_score=%.2f, threshold=%.2f) → chunk DROPPED",
-                    self.session_id, best_score, config.DEFAULT_SEMANTIC_FALLBACK_THRESHOLD,
+                    "[SPEAKER-FILTER] session=%s | primary not yet established — running semantic fallback on %d segment(s)",
+                    self.session_id, len(discarded_segments),
                 )
+                best_score = 0.0
+                best_segment: dict | None = None
+                for segment in discarded_segments:
+                    words = segment.get("text", "").lower().split()
+                    if not words:
+                        continue
+                    overlap = sum(1 for w in words if w in _DOMAIN_KEYWORDS)
+                    score = overlap / max(len(words), 1)
+                    logger.info(
+                        "[SPEAKER-FILTER] session=%s | fallback score speaker=%s score=%.2f | text=%r",
+                        self.session_id, segment.get("speaker", "UNKNOWN"), score, segment.get("text", "")[:80],
+                    )
+                    if score > best_score:
+                        best_score = score
+                        best_segment = segment
+
+                if best_segment is not None and best_score >= config.DEFAULT_SEMANTIC_FALLBACK_THRESHOLD:
+                    logger.info(
+                        "[SPEAKER-FILTER] session=%s | semantic fallback ACCEPTED speaker=%s score=%.2f | text=%r",
+                        self.session_id, best_segment.get("speaker", "UNKNOWN"), best_score, best_segment.get("text", "")[:80],
+                    )
+                    kept_segments = [best_segment]
+                else:
+                    logger.info(
+                        "[SPEAKER-FILTER] session=%s | semantic fallback found no domain match (best_score=%.2f, threshold=%.2f) → chunk DROPPED",
+                        self.session_id, best_score, config.DEFAULT_SEMANTIC_FALLBACK_THRESHOLD,
+                    )
 
         final_text = " ".join(seg.get("text", "") for seg in kept_segments).strip()
         logger.info(
