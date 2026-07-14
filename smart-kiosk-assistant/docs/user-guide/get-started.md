@@ -74,23 +74,7 @@ git clone https://github.com/intel-retail/voice-enabled-interactions.git
 cd voice-enabled-interactions/smart-kiosk-assistant
 ```
 
-## Step 3: Clone `edge-ai-libraries` (Audio and TTS Source)
-
-The `audio-analyzer` and `text-to-speech` images are built from the
-[edge-ai-libraries](https://github.com/open-edge-platform/edge-ai-libraries)
-monorepo. The compose file expects them at `../edge-ai-libraries/microservices/`,
-so both repositories must sit side by side:
-
-```bash
-cd ..   # move to the parent directory that contains voice-enabled-interactions
-git clone --depth 1 --filter=blob:none --sparse \
-    https://github.com/open-edge-platform/edge-ai-libraries.git
-git -C edge-ai-libraries sparse-checkout set \
-    microservices/audio-analyzer microservices/text-to-speech
-cd voice-enabled-interactions/smart-kiosk-assistant
-```
-
-## Step 4:Create `.env` and Set Required Variables
+## Step 3: Create `.env` and Set Required Variables
 
 Create your environment file from the template:
 
@@ -119,7 +103,7 @@ getent group render | cut -d: -f3
 
 Set `TARGET_DEVICE=CPU` in `.env` if no Intel GPU is available.
 
-## Step 5: Download the LLM Model for OVMS
+## Step 4: Download the LLM Model for OVMS
 
 The ordering agent uses a Qwen3-4B model served by OVMS. Download it
 before starting the stack:
@@ -139,7 +123,7 @@ The script downloads the pre-converted OpenVINO model into `./models/`
 and updates `OVMS_MODEL_NAME`, `TARGET_DEVICE`, and `RENDER_GID` in `.env`.
 The download happens once — subsequent starts reuse the cached model.
 
-## Step 6: Download Sample Videos for Queue Analytics
+## Step 5: Download Sample Videos for Queue Analytics
 
 The `queue-service` person-counting pipeline consumes an RTSP stream published
 by `rtsp-streamer` from clips under `Sample_data/`. Set the download URLs in
@@ -153,7 +137,7 @@ The clips are saved as `Sample_data/sample_1.mp4` and `Sample_data/sample_2.mp4`
 to match the `MEDIA_FILES` entry in `docker-compose.yml`. You can also copy your
 own MP4 files to those paths manually.
 
-## Step 7: Build Images and Start the Stack
+## Step 6: Build Images and Start the Stack
 
 ```bash
 make build           # build local images (or `make build REGISTRY=true` to pull)
@@ -192,7 +176,7 @@ starts only when identity is enabled:
 make up IDENTITY=true
 ```
 
-## Step 8: Verify the Stack Is Healthy
+## Step 7: Verify the Stack Is Healthy
 
 Services start in dependency order. Allow 2–5 minutes on first run for
 model assets to download into Docker volumes.
@@ -217,7 +201,7 @@ curl --noproxy '*' http://127.0.0.1:8090/health       # queue-service
 Every health endpoint should return `{"status": "ok"}`. The OVMS endpoint
 returns the active model name (`OpenVINO/Qwen3-4B-int8-ov`).
 
-## Step 9: Open the Kiosk and Try Voice Ordering
+## Step 8: Open the Kiosk and Try Voice Ordering
 
 Open a browser on the same machine:
 
