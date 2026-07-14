@@ -44,16 +44,9 @@ async def lifespan(app: FastAPI):
     )
     # ── Storage bootstrap (Phase 3) ──────────────────────────────────────────
     await service.init_storage()
-    # ── Bootstrap automatic test registration (Phase 5) ──────────────────────
+    # ── Bootstrap automatic test registration ────────────────────────────
     if settings.bootstrap_on_start:
-        if settings.profiles:
-            logger.info(
-                "[STARTUP] BOOTSTRAP_ON_START=true — %d profile(s) configured "
-                "(registration wired in Phase 5)",
-                len(settings.profiles),
-            )
-        else:
-            logger.info("[STARTUP] BOOTSTRAP_ON_START=true but no profiles configured")
+        await service.bootstrap()
     else:
         logger.info("[STARTUP] BOOTSTRAP_ON_START=false — skipping auto registration")
     yield

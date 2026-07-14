@@ -52,7 +52,13 @@ face_detection_min_confidence: 0.7
 # Each entry is registered on startup unless its user_id already exists.
 # audio_path / video_path point at the sample data (provided later) mounted
 # into the container.  Leave the list empty to register nothing on boot.
-profiles: []
+profiles:
+  - user_id: kiosk_user_01
+    name: "Kiosk Test User"
+    favorites: ["cappuccino", "blueberry muffin"]
+    restrictions: ["no peanuts"]
+    video_path: /app/sample-data/sample1.mp4
+    # audio_path: /app/sample-data/kioskuser.wav   # optional; omitted (no sample WAV yet)
   # Example shape (fill in once sample data is provided):
   # - user_id: USR-0001
   #   name: "Asha Verma"
