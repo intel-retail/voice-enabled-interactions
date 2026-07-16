@@ -308,7 +308,7 @@ class BaseAudioSession:
             token_source = self.agent_client.get_reply(
                 transcription=transcript,
                 session_id=self.agent_session_id,  # persistent across voice turns
-                user_id=getattr(self.request, "user_id", None) or "kiosk-user",
+                user_id=getattr(self.request, "user_id", None) or config.DEFAULT_ORDERING_USER_ID,
                 history=history,
             )
             label = "Agent"

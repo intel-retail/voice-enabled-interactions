@@ -46,6 +46,10 @@ DEFAULT_SEMANTIC_FALLBACK_THRESHOLD = float(os.getenv("KIOSK_CORE_SEMANTIC_FALLB
 # and keep the legacy RAG-only Q&A flow.
 ORDERING_ENABLED = os.getenv("KIOSK_CORE_ORDERING_ENABLED", "true").lower() not in ("false", "0", "no")
 
+# Single shared kiosk identity used for ordering when no per-user login is
+# wired into the request (this kiosk currently serves one customer at a time).
+DEFAULT_ORDERING_USER_ID = os.getenv("KIOSK_CORE_DEFAULT_USER_ID", "kiosk-user")
+
 # RAG-service agent chat endpoint (for ordering turns).
 DEFAULT_AGENT_URL = os.getenv(
     "KIOSK_CORE_AGENT_URL",

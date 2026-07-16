@@ -14,6 +14,8 @@ import httpx
 from kiosk_core import config
 from kiosk_core.identity.models import (
     ChallengeResponse,
+    RegisterRequest,
+    RegisterResponse,
     VerifyRequest,
     VerifyResponse,
 )
@@ -43,6 +45,14 @@ class IdentityClient:
             response = await client.post(url, json=request.model_dump())
             response.raise_for_status()
             return VerifyResponse.model_validate(response.json())
+
+    async def register(self, request: RegisterRequest) -> RegisterResponse:
+        """Self-service enrolment: forwards face+voice capture to identity-service."""
+        url = f"{self.base_url}/api/v1/identity/register"
+        async with httpx.AsyncClient(timeout=self.timeout_seconds, trust_env=False) as client:
+            response = await client.post(url, json=request.model_dump())
+            response.raise_for_status()
+            return RegisterResponse.model_validate(response.json())
 
     async def health(self) -> bool:
         """Liveness probe — returns True when identity-service responds 200."""

@@ -19,6 +19,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from kiosk_core.identity.client import IdentityClient
 from kiosk_core.identity.models import (
     ChallengeResponse,
+    RegisterRequest,
+    RegisterResponse,
     VerifyRequest,
     VerifyResponse,
 )
@@ -69,4 +71,27 @@ async def verify(request: VerifyRequest, client: ClientDep) -> VerifyResponse:
         return await client.verify(request)
     except httpx.HTTPError as exc:
         logger.error("[IDENTITY-API] verify upstream error: %s", exc)
+        raise HTTPException(status_code=502, detail=f"identity-service unavailable: {exc}") from exc
+
+
+@router.post(
+    "/register",
+    response_model=RegisterResponse,
+    summary="Self-service enrolment (face + voice captured from kiosk-ui)",
+)
+async def register(request: RegisterRequest, client: ClientDep) -> RegisterResponse:
+    """Forward a UI-driven registration (name + face + voice) to identity-service.
+
+    Both modalities are required here (unlike the admin/bootstrap contract) since
+    the kiosk-ui registration flow always captures face and voice together.
+    """
+    if not request.image_base64 or not request.audio_base64:
+        raise HTTPException(
+            status_code=422,
+            detail="Both image_base64 and audio_base64 are required for registration.",
+        )
+    try:
+        return await client.register(request)
+    except httpx.HTTPError as exc:
+        logger.error("[IDENTITY-API] register upstream error: %s", exc)
         raise HTTPException(status_code=502, detail=f"identity-service unavailable: {exc}") from exc

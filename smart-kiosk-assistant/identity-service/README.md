@@ -80,12 +80,43 @@ Base URL inside the cluster: `http://identity-service:8013`
 | GET  | `/health` | Liveness probe | ✅ |
 | GET  | `/api/v1/identity/challenge` | Random voice challenge prompt | ✅ |
 | GET  | `/api/v1/identity/stats` | Profile + index counts, `inference_ready` | ✅ |
-| POST | `/api/v1/identity/verify` | Multimodal (face+voice) verification | ⏳ Phase 6 (pipeline) |
-| POST | `/api/v1/identity/register` | Admin / manual enrolment | ⏳ Phase 5 (pipeline) |
+| POST | `/api/v1/identity/verify` | Multimodal (face+voice) verification | ✅ |
+| POST | `/api/v1/identity/register` | Admin / manual enrolment | ✅ |
 
-`verify` and `register` are reachable today but return a structured
-*"pipeline pending"* response until Phases 5–6 wire the decode → embed → search →
-fuse path.
+kiosk-core (`:8012`) proxies this contract 1:1 when `KIOSK_CORE_IDENTITY_ENABLED=true`
+(see [kiosk-core proxy](#kiosk-core-proxy--kiosk-ui-gate) below), plus one always-on
+capability endpoint kiosk-ui uses to decide whether to show the auth gate at all:
+
+| Method | Path (kiosk-core) | Purpose |
+|---|---|---|
+| GET  | `/api/v1/identity/enabled` | Runtime flag mirroring `KIOSK_CORE_IDENTITY_ENABLED`; **always reachable**, even when the identity feature is off. |
+| GET  | `/api/v1/identity/challenge` | Proxies identity-service `/challenge` (gated by the flag). |
+| POST | `/api/v1/identity/verify` | Proxies identity-service `/verify`; both `image_base64` and `audio_base64` required. |
+| POST | `/api/v1/identity/register` | Proxies identity-service `/register` (self-service enrolment); both `image_base64` and `audio_base64` required. |
+
+---
+
+## kiosk-core proxy + kiosk-ui gate
+
+kiosk-ui wraps the existing chat home page in an `AuthGate` (mounted once in
+`main.tsx`, so `App.tsx`/the chat experience itself is untouched):
+
+1. On load, it calls `GET /api/v1/identity/enabled`. If the identity feature is
+   disabled or the backend is unreachable, the gate **bypasses** and renders the
+   chat home page exactly as before — zero behavioural change.
+2. If enabled, it shows a **Login** screen: live camera preview + an on-screen
+   challenge phrase (read aloud). On "Authenticate" it captures one JPEG frame
+   and a ~3s WAV clip and calls `verify()`. A verified user is redirected to the
+   existing chat home page; an unverified user sees an on-screen
+   *"User not authenticated"* error and can retry or register.
+3. A **Register** screen (linked from Login) collects a display name, generates
+   a `user_id` slug (`name` + random suffix), captures face + voice the same
+   way, and calls `register()` — reusing the same identity-service enrolment
+   pipeline the video-file bootstrap path uses, so newly registered users are
+   written to the same FAISS indices + `loyalty_profiles` SQLite table.
+
+Relevant kiosk-ui source: `src/components/Auth/{AuthGate,LoginScreen,RegisterScreen}.tsx`,
+`src/hooks/{useCamera,useVoiceCapture}.ts`, `src/api/identityApi.ts`.
 
 ---
 
@@ -195,7 +226,11 @@ identity-service/
     `inference_ready` flips to `true`.
 - **Phase 6 — verification:** fusion scoring + profile retrieval in `verify()`;
   inject favourites/restrictions into the kiosk-core LLM session context.
-- **Phase 7 — UI:** challenge display + verify gate in the Gradio / kiosk-ui flow.
+- **Phase 7 — UI:** ✅ done — `AuthGate` in kiosk-ui gates the chat home page
+  behind face+voice login, with a self-service Register screen. Gate presence
+  is driven entirely by the backend `KIOSK_CORE_IDENTITY_ENABLED` flag (via
+  `GET /api/v1/identity/enabled`), so it is a pure add-on with no impact on the
+  chat experience when the feature is off.
 - **Phase 8 — tests & docs:** pytest suite under `tests/`; LLD, sequence/class
   diagrams, schema and API documentation under `docs/`.
 

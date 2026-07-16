@@ -34,6 +34,11 @@ export const endpoints = {
   metrics: '/metrics-svc/metrics',
   // pipeline latency (kiosk-core)
   pipelineLatest: '/api/v1/pipeline/latest',
+  // identity (biometric auth, proxied to kiosk-core; feature-flag gated)
+  identityEnabled: '/api/v1/identity/enabled',
+  identityChallenge: '/api/v1/identity/challenge',
+  identityVerify: '/api/v1/identity/verify',
+  identityRegister: '/api/v1/identity/register',
 };
 
 // Tuning constants (mirror kiosk_core config defaults).

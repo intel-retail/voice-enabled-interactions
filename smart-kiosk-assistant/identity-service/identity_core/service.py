@@ -200,6 +200,15 @@ class IdentityService:
                 )
                 if fused >= settings.combined_threshold:
                     return _ok(face_record, face_sim, voice_sim, fused)
+                logger.info(
+                    "[IDENTITY] Verify REJECTED user_id=%s face=%s voice=%s "
+                    "fused=%s < combined_threshold=%s",
+                    face_record.user_id,
+                    face_sim,
+                    voice_sim,
+                    fused,
+                    settings.combined_threshold,
+                )
                 return VerifyResponse(
                     verified=False,
                     face_similarity=face_sim,
@@ -207,6 +216,14 @@ class IdentityService:
                     fused_score=fused,
                     reason="No matching profile above the combined threshold.",
                 )
+            logger.info(
+                "[IDENTITY] Verify REJECTED face_user=%s voice_user=%s "
+                "face_sim=%s voice_sim=%s (modality mismatch or no hit)",
+                face_record.user_id if face_record else None,
+                voice_record.user_id if voice_record else None,
+                face_sim,
+                voice_sim,
+            )
             return VerifyResponse(
                 verified=False,
                 face_similarity=face_sim,
@@ -218,6 +235,13 @@ class IdentityService:
         if request.image_base64:
             if face_record is not None and face_sim >= settings.face_threshold:
                 return _ok(face_record, face_sim, None, None)
+            logger.info(
+                "[IDENTITY] Verify REJECTED (face-only) user=%s face_sim=%s "
+                "< face_threshold=%s",
+                face_record.user_id if face_record else None,
+                face_sim,
+                settings.face_threshold,
+            )
             return VerifyResponse(
                 verified=False,
                 face_similarity=face_sim,
@@ -226,6 +250,13 @@ class IdentityService:
 
         if voice_record is not None and voice_sim >= settings.voice_threshold:
             return _ok(voice_record, None, voice_sim, None)
+        logger.info(
+            "[IDENTITY] Verify REJECTED (voice-only) user=%s voice_sim=%s "
+            "< voice_threshold=%s",
+            voice_record.user_id if voice_record else None,
+            voice_sim,
+            settings.voice_threshold,
+        )
         return VerifyResponse(
             verified=False,
             voice_similarity=voice_sim,

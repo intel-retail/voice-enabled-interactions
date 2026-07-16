@@ -89,9 +89,33 @@ if cfg.IDENTITY_ENABLED:
     app.include_router(identity_router)
 
 
+async def _clear_stale_cart_for_new_session() -> None:
+    """Clear any abandoned draft cart before a fresh conversation starts.
+
+    Best-effort: if ordering is disabled or the DB call fails for any reason,
+    log and continue — this must never block a new session from starting.
+    """
+    if not cfg.ORDERING_ENABLED:
+        return
+    try:
+        from kiosk_core.ordering.api import get_ordering_service
+
+        ordering_service = get_ordering_service()
+        await ordering_service.clear_draft_carts(cfg.DEFAULT_ORDERING_USER_ID)
+    except Exception:
+        logger.exception("[STARTUP] Failed to clear stale draft cart — continuing anyway")
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/v1/identity/enabled")
+def identity_enabled() -> dict[str, bool]:
+    """Runtime capability flag — always reachable (unlike the gated identity
+    router) so kiosk-ui can decide gate-vs-bypass without a rebuild."""
+    return {"enabled": cfg.IDENTITY_ENABLED}
 
 
 @app.get("/api/v1/pipeline/latest")
@@ -129,10 +153,11 @@ def get_session(session_id: str) -> dict[str, object]:
 
 
 @app.post("/api/v1/sessions/start-stream")
-def start_stream_session(request: SessionStartRequest) -> dict[str, object]:
+async def start_stream_session(request: SessionStartRequest) -> dict[str, object]:
     """Open a browser streaming session.  The caller then pushes audio chunks
     via POST /api/v1/sessions/{session_id}/audio and signals end-of-stream
     via POST /api/v1/sessions/{session_id}/audio/end."""
+    await _clear_stale_cart_for_new_session()
     try:
         return service.start_stream_session(request)
     except ValueError as exc:
@@ -167,7 +192,8 @@ def end_audio_stream(session_id: str) -> dict[str, str]:
 
 
 @app.post("/api/v1/sessions/start", response_model=None)
-def start_session(request: SessionStartRequest) -> dict[str, object]:
+async def start_session(request: SessionStartRequest) -> dict[str, object]:
+    await _clear_stale_cart_for_new_session()
     try:
         return service.start_session(request)
     except ValueError as exc:
@@ -175,7 +201,7 @@ def start_session(request: SessionStartRequest) -> dict[str, object]:
 
 
 @app.post("/api/v1/sessions/start-file")
-def start_file_session(
+async def start_file_session(
     file: UploadFile = File(...),
     device: int | str | None = Form(None),
     sample_rate: int = Form(16000),
@@ -212,6 +238,7 @@ def start_file_session(
         tts_instructions=tts_instructions,
         realtime_factor=realtime_factor,
     )
+    await _clear_stale_cart_for_new_session()
     try:
         return service.start_file_session(request, file)
     except ValueError as exc:
