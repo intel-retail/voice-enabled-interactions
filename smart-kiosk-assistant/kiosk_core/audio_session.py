@@ -3,6 +3,7 @@ import tempfile
 import threading
 import time
 import wave
+import io
 from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
@@ -760,7 +761,35 @@ class BrowserStreamSession(BaseAudioSession):
 
     def push_audio(self, wav_bytes: bytes) -> None:
         """Called from the HTTP handler for each incoming audio chunk."""
-        audio = np.frombuffer(wav_bytes, dtype=np.int16)
+        # Browser chunks arrive as WAV containers. Decode them first so we only
+        # enqueue actual PCM frames (not RIFF/WAV headers), which keeps RMS/VAD
+        # and ASR input stable across chunk boundaries.
+        try:
+            with wave.open(io.BytesIO(wav_bytes), "rb") as wav_file:
+                channels = wav_file.getnchannels()
+                sample_width = wav_file.getsampwidth()
+                sample_rate = wav_file.getframerate()
+                raw = wav_file.readframes(wav_file.getnframes())
+
+            if sample_width != 2:
+                raise ValueError(f"Unsupported WAV sample width: {sample_width * 8}-bit")
+
+            audio = np.frombuffer(raw, dtype=np.int16)
+            if channels > 1:
+                audio = audio.reshape(-1, channels)[:, 0]
+
+            if sample_rate != self.request.sample_rate:
+                logger.warning(
+                    "[CHUNK] session=%s | WAV sample rate %s differs from session sample_rate %s",
+                    self.session_id,
+                    sample_rate,
+                    self.request.sample_rate,
+                )
+        except Exception:
+            # Backward-compat fallback for legacy clients that might post raw
+            # PCM bytes directly instead of a WAV container.
+            audio = np.frombuffer(wav_bytes, dtype=np.int16)
+
         # Split into frame-sized pieces so _process_frame_stream sees uniform frames
         for start in range(0, len(audio), self._frame_samples):
             frame = audio[start : start + self._frame_samples]
