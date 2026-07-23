@@ -22,3 +22,6 @@ Sample_data/sample2.mp4
 
 # Metrics tool output dumps (large, machine-generated)
 metrics/
+
+# TypeScript incremental build cache (machine/environment-specific)
+kiosk-ui/**/*.tsbuildinfo

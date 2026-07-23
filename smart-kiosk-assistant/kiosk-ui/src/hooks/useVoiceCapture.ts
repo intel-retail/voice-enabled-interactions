@@ -17,7 +17,7 @@ interface UseVoiceCaptureResult {
   /**
    * Record a mono WAV clip and resolve to base64 (no `data:` prefix).
    * Recording stops automatically once a sentence has been spoken
-   * (speech followed by ~700ms of silence), or after `maxSeconds` elapses,
+   * (speech followed by ~1.5s of silence), or after `maxSeconds` elapses,
    * whichever comes first.
    */
   recordClip: (maxSeconds?: number) => Promise<string | null>;

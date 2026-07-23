@@ -306,7 +306,7 @@ build: check-env ## Build (REGISTRY=false) or pull (REGISTRY=true) all images
 		fi; \
 	fi; \
 	echo "$(YELLOW)  Pulling audio-analyzer, text-to-speech from Docker Hub (edge-ai-libraries — separate repo, no local build)...$(NC)"; \
-	REGISTRY=$(_ENV_REGISTRY) docker compose -f $(COMPOSE_FILE) pull $(REGISTRY_ONLY_SERVICES)
+	REGISTRY=$(_DOCKER_REGISTRY) docker compose -f $(COMPOSE_FILE) pull $(REGISTRY_ONLY_SERVICES)
 	@echo "$(GREEN)✓ Images ready$(NC)"
 
 # =============================================================================
