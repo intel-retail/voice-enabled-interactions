@@ -55,3 +55,41 @@ class VerifyResponse(BaseModel):
         default=None,
         description="Human-readable explanation when verified is false.",
     )
+
+
+class RegisterRequest(BaseModel):
+    """Self-service enrolment request (face + voice captured from the kiosk UI).
+
+    At least one biometric is required by the upstream identity-service, but the
+    kiosk-ui registration flow always collects both face and voice.
+    """
+
+    user_id: str = Field(description="Auto-generated slug (name + random suffix).")
+    name: str
+    favorites: list[str] = Field(default_factory=list)
+    restrictions: list[str] = Field(default_factory=list)
+    image_base64: str | None = Field(
+        default=None, description="Base64-encoded camera frame."
+    )
+    audio_base64: str | None = Field(
+        default=None, description="Base64-encoded WAV audio buffer."
+    )
+
+
+class RegisterResponse(BaseModel):
+    """Result of a self-service enrolment attempt."""
+
+    user_id: str
+    registered: bool
+    face_faiss_id: int | None = None
+    voice_faiss_id: int | None = None
+    reason: str | None = Field(
+        default=None,
+        description="Human-readable explanation when registered is false.",
+    )
+
+
+class IdentityStatusResponse(BaseModel):
+    """Runtime capability flag consumed by kiosk-ui to decide gate vs. bypass."""
+
+    enabled: bool

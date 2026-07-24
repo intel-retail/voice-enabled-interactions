@@ -47,24 +47,30 @@ SAMPLE_DATA_DIR    ?= ./Sample_data
 SAMPLE_VIDEO_1_URL ?=
 SAMPLE_VIDEO_2_URL ?=
 
-# edge-ai-libraries path (audio-analyzer + text-to-speech build contexts live here)
-EAL_PATH         := ../edge-ai-libraries/microservices
-
-# Services with fully local build contexts (no edge-ai-libraries needed)
+# Services with fully local build contexts
 LOCAL_ONLY_SERVICES := metrics-collector rag-service kiosk-core kiosk-ui queue-service rtsp-streamer
 
-# Identity feature (profile-gated). Pass IDENTITY=true to build/start the
-# identity-service container AND tell kiosk-core to call it. Default off so the
-# standard stack is unchanged.
-IDENTITY          ?= false
+# Identity feature (profile-gated). Driven by KIOSK_CORE_IDENTITY_ENABLED in
+# .env by default — set it to true there to build/start the identity-service
+# container AND tell kiosk-core to call it. `IDENTITY=true|false` on the make
+# command line still takes precedence over .env for one-off overrides.
+# Default off so the standard stack is unchanged.
+# NOTE: capture the .env value with ":=" (immediate expansion) BEFORE the
+# "export KIOSK_CORE_IDENTITY_ENABLED = ..." line below rebinds that same
+# name — otherwise IDENTITY and KIOSK_CORE_IDENTITY_ENABLED would reference
+# each other recursively and make would abort with "Recursive variable
+# 'IDENTITY' references itself".
+_ENV_IDENTITY_ENABLED := $(KIOSK_CORE_IDENTITY_ENABLED)
+IDENTITY          ?= $(_ENV_IDENTITY_ENABLED)
 _IDENTITY_ON       = $(filter true TRUE,$(IDENTITY))
 _IDENTITY_PROFILE  = $(if $(_IDENTITY_ON),--profile identity,)
 _IDENTITY_SVC      = $(if $(_IDENTITY_ON),identity-service,)
 export KIOSK_CORE_IDENTITY_ENABLED = $(if $(_IDENTITY_ON),true,false)
 
-# Services that require edge-ai-libraries checkout to build from source.
-# When EAL_PATH is absent, pre-built images (intel/*:RELEASE_TAG) are used instead.
-EAL_SERVICES     := audio-analyzer text-to-speech
+# audio-analyzer and text-to-speech live in a separate repository
+# (edge-ai-libraries) and have no local build context here — they are always
+# pulled pre-built from Docker Hub, using the tags pinned in docker-compose.yml.
+REGISTRY_ONLY_SERVICES := audio-analyzer text-to-speech
 
 # Colors
 RED    := \033[0;31m
@@ -268,7 +274,6 @@ show-config: ## Print resolved configuration
 	@echo "  REGISTRY          = $(REGISTRY)  (docker-compose prefix: $(_DOCKER_REGISTRY))"
 	@echo "  RELEASE_TAG       = $(RELEASE_TAG)"
 	@echo "  COMPOSE_FILE      = $(COMPOSE_FILE)"
-	@echo "  EAL_PATH          = $(EAL_PATH)  ($$([ -d '$(EAL_PATH)' ] && echo 'found' || echo 'not present — EAL services use pre-built images'))"
 	@echo ""
 	@echo "$(YELLOW)Inference:$(NC)"
 	@echo "  TARGET_DEVICE     = $(TARGET_DEVICE)"
@@ -277,6 +282,10 @@ show-config: ## Print resolved configuration
 	@echo ""
 	@echo "$(YELLOW)Authentication:$(NC)"
 	@echo "  HF_TOKEN          = $$([ -n '$(HF_TOKEN)' ] && echo '***set***' || echo 'NOT SET')"
+	@echo ""
+	@echo "$(YELLOW)Identity feature:$(NC)"
+	@echo "  IDENTITY          = $(IDENTITY)  (from .env KIOSK_CORE_IDENTITY_ENABLED, override with IDENTITY=true|false)"
+	@echo "  identity-service  = $$([ -n '$(_IDENTITY_SVC)' ] && echo 'enabled — will start with --profile identity' || echo 'disabled')"
 	@echo ""
 
 # =============================================================================
@@ -288,33 +297,16 @@ build: check-env ## Build (REGISTRY=false) or pull (REGISTRY=true) all images
 	@if [ "$(REGISTRY)" = "false" ] || [ "$(REGISTRY)" = "FALSE" ]; then \
 		echo "$(YELLOW)  REGISTRY=false → Building local services from source$(NC)"; \
 		REGISTRY=$(_DOCKER_REGISTRY) docker compose -f $(COMPOSE_FILE) $(_IDENTITY_PROFILE) build $(LOCAL_ONLY_SERVICES) $(_IDENTITY_SVC); \
-		if [ -d "$(EAL_PATH)/audio-analyzer" ] && [ -d "$(EAL_PATH)/text-to-speech" ]; then \
-			echo "$(YELLOW)  Building EAL services (audio-analyzer, text-to-speech) from source...$(NC)"; \
-			REGISTRY=$(_DOCKER_REGISTRY) docker compose -f $(COMPOSE_FILE) build audio-analyzer text-to-speech; \
-		else \
-			echo "$(YELLOW)  ⚠ edge-ai-libraries not found at $(EAL_PATH) — pulling pre-built images...$(NC)"; \
-			_aa_image="$(_ENV_REGISTRY)/audio-analyzer:$(RELEASE_TAG)"; \
-			_tts_image="$(_ENV_REGISTRY)/text-to-speech:2026.1.0"; \
-			if docker image inspect "$$_aa_image" >/dev/null 2>&1; then \
-				echo "$(GREEN)  ✓ $$_aa_image already present locally — skipping pull$(NC)"; \
-			else \
-				REGISTRY=$(_ENV_REGISTRY) docker compose -f $(COMPOSE_FILE) pull audio-analyzer; \
-			fi; \
-			if docker image inspect "$$_tts_image" >/dev/null 2>&1; then \
-				echo "$(GREEN)  ✓ $$_tts_image already present locally — skipping pull$(NC)"; \
-			else \
-				REGISTRY=$(_ENV_REGISTRY) docker compose -f $(COMPOSE_FILE) pull text-to-speech; \
-			fi; \
-		fi; \
 	else \
 		echo "$(YELLOW)  REGISTRY=$(REGISTRY) → Pulling images from registry$(NC)"; \
-		REGISTRY=$(REGISTRY) docker compose -f $(COMPOSE_FILE) pull \
-			$(LOCAL_ONLY_SERVICES) $(EAL_SERVICES); \
+		REGISTRY=$(REGISTRY) docker compose -f $(COMPOSE_FILE) pull $(LOCAL_ONLY_SERVICES); \
 		if [ -n "$(_IDENTITY_SVC)" ]; then \
 			echo "$(YELLOW)  Building identity-service locally (no registry image)...$(NC)"; \
 			REGISTRY=$(_DOCKER_REGISTRY) docker compose -f $(COMPOSE_FILE) $(_IDENTITY_PROFILE) build identity-service; \
 		fi; \
-	fi
+	fi; \
+	echo "$(YELLOW)  Pulling audio-analyzer, text-to-speech from Docker Hub (edge-ai-libraries — separate repo, no local build)...$(NC)"; \
+	REGISTRY=$(_DOCKER_REGISTRY) docker compose -f $(COMPOSE_FILE) pull $(REGISTRY_ONLY_SERVICES)
 	@echo "$(GREEN)✓ Images ready$(NC)"
 
 # =============================================================================
@@ -337,7 +329,7 @@ up: check-env setup-dirs ## Start all services
 
 down: ## Stop all services
 	@echo "$(BLUE)Stopping Smart Kiosk Assistant...$(NC)"
-	docker compose -f $(COMPOSE_FILE) down
+	docker compose -f $(COMPOSE_FILE) $(_IDENTITY_PROFILE) down
 	@echo "$(GREEN)✓ All services stopped$(NC)"
 
 restart: down up ## Stop then restart all services

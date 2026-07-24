@@ -4,10 +4,12 @@
 # Mic audio is captured by the browser via Web Audio API and uploaded as a
 # file -- no host mic passthrough into the container is required.
 #
+# audio-analyzer and text-to-speech live in the separate edge-ai-libraries
+# repository and have no local build context here — they are always pulled
+# pre-built from Docker Hub using the image tags declared below.
+#
 # Pull (default):   docker compose pull && docker compose up -d
 # Build from src:   docker compose build && docker compose up -d
-#                   (requires edge-ai-libraries cloned as a sibling repo;
-#                    see docs/build-from-source.md)
 # Stop:             docker compose down
 # Logs:             docker compose logs -f
 
@@ -148,9 +150,6 @@ services:
     restart: unless-stopped
 
   audio-analyzer:
-    build:
-      context: ../edge-ai-libraries/microservices/audio-analyzer
-      dockerfile: Dockerfile
     image: ${REGISTRY:-intel}/audio-analyzer:${RELEASE_TAG:-latest}
     container_name: audio-analyzer
     # Hardcoded to match the image's baked-in app user and the
@@ -208,9 +207,6 @@ services:
     restart: unless-stopped
 
   text-to-speech:
-    build:
-      context: ../edge-ai-libraries/microservices/text-to-speech
-      dockerfile: Dockerfile
     image: ${REGISTRY:-intel}/text-to-speech:2026.1.0
     container_name: text-to-speech
     user: "1000:1000"

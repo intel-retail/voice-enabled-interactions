@@ -184,3 +184,54 @@ export interface HardwareSnapshot {
   npuPct: number;
   memPct: number;
 }
+
+// ── Identity (biometric auth) ───────────────────────────────────────────────
+export interface LoyaltyProfile {
+  user_id: string;
+  name: string;
+  favorites: string[];
+  restrictions: string[];
+}
+
+export interface ChallengeResponse {
+  challenge_id: string;
+  prompt_text: string;
+}
+
+export interface VerifyRequest {
+  challenge_id?: string | null;
+  image_base64: string;
+  audio_base64: string;
+}
+
+export interface VerifyResponse {
+  verified: boolean;
+  user_id?: string | null;
+  profile?: LoyaltyProfile | null;
+  face_similarity?: number | null;
+  voice_similarity?: number | null;
+  fused_score?: number | null;
+  reason?: string | null;
+}
+
+export interface RegisterRequest {
+  user_id: string;
+  name: string;
+  favorites?: string[];
+  restrictions?: string[];
+  image_base64?: string | null;
+  audio_base64?: string | null;
+}
+
+export interface RegisterResponse {
+  user_id: string;
+  registered: boolean;
+  face_faiss_id?: number | null;
+  voice_faiss_id?: number | null;
+  reason?: string | null;
+}
+
+export interface IdentityEnabledResponse {
+  enabled: boolean;
+}
+

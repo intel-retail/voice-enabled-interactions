@@ -64,6 +64,10 @@ class AbstractOrderRepository(ABC):
     async def confirm(self, order_id: int) -> None:
         ...
 
+    @abstractmethod
+    async def delete_draft_orders(self, user_id: str) -> int:
+        ...
+
 
 # ---------------------------------------------------------------------------
 # SQLite implementations
@@ -223,3 +227,31 @@ class SqliteOrderRepository(AbstractOrderRepository):
             (order_id,),
         )
         logger.info("[ORDER-REPO] Confirmed order_id=%d", order_id)
+
+    async def delete_draft_orders(self, user_id: str) -> int:
+        """Delete every still-open ('draft') order (and its items) for a user.
+
+        Confirmed orders are left untouched — this only clears abandoned/stale
+        carts, e.g. when a fresh conversation starts.
+        """
+        cursor = await self._db.execute(
+            "SELECT order_id FROM orders WHERE user_id = ? AND status = 'draft'",
+            (user_id,),
+        )
+        rows = await cursor.fetchall()
+        order_ids = [r[0] for r in rows]
+        if not order_ids:
+            return 0
+
+        placeholders = ",".join("?" * len(order_ids))
+        await self._db.execute(
+            f"DELETE FROM order_items WHERE order_id IN ({placeholders})", order_ids
+        )
+        await self._db.execute(
+            f"DELETE FROM orders WHERE order_id IN ({placeholders})", order_ids
+        )
+        logger.info(
+            "[ORDER-REPO] Cleared %d stale draft order(s) for user=%s: %s",
+            len(order_ids), user_id, order_ids,
+        )
+        return len(order_ids)

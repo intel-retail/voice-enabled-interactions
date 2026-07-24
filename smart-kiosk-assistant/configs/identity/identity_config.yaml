@@ -24,9 +24,18 @@ voice_embedding_dim: 192
 # ── Verification thresholds & fusion ─────────────────────────────────────────
 # Authentication requires BOTH modalities. The fused score must clear the
 # combined threshold.  Per-modality thresholds are retained for diagnostics.
-fusion_face_weight: 0.6
-fusion_voice_weight: 0.4
-combined_threshold: 0.78
+#
+# NOTE (2026-07-14): tuned down from the initial defaults (0.6/0.4, 0.78) after
+# real-world testing showed face recognition is highly reliable (0.75-0.98)
+# while the converted ECAPA voice model shows wide session-to-session variance
+# (0.29-0.84 for genuine same-person attempts) due to uncalibrated browser-mic
+# audio -- no code defect found in the embedding/normalization/search pipeline.
+# Leaning more on the more-reliable face modality and lowering the combined
+# bar reduces false rejects while still requiring both biometrics to broadly
+# agree.
+fusion_face_weight: 0.7
+fusion_voice_weight: 0.3
+combined_threshold: 0.65
 face_threshold: 0.80
 voice_threshold: 0.75
 

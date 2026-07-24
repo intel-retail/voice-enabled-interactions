@@ -206,6 +206,22 @@ class OrderingService:
         updated = await self.get_order(order_id)
         return updated  # type: ignore[return-value]
 
+    async def clear_draft_carts(self, user_id: str) -> int:
+        """Delete any stale (never-confirmed) draft orders for a user.
+
+        Intended to be called when a brand-new conversation/session starts so
+        each session begins with an empty cart instead of resurfacing an
+        abandoned draft from a previous visit.
+        """
+        async with get_db() as db:
+            repo = SqliteOrderRepository(db)
+            deleted = await repo.delete_draft_orders(user_id)
+            await db.commit()
+
+        if deleted:
+            logger.info("[SERVICE] Cleared %d stale draft cart(s) for user=%s", deleted, user_id)
+        return deleted
+
     async def confirm_order(self, order_id: int) -> Order:
         """Confirm a draft order → status becomes 'confirmed'."""
         async with get_db() as db:
