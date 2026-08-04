@@ -1,0 +1,121 @@
+{
+  "label": "step5-trim-prompt",
+  "prompt": "I would like to order one classic chicken burger",
+  "started_at": "2026-07-28T08:38:39.727669+00:00",
+  "finished_at": "2026-07-28T08:39:00.484638+00:00",
+  "config": {
+    "ovms_models": [
+      "OpenVINO/Qwen3-4B-int4-ov"
+    ],
+    "ovms_cmd": [
+      "--rest_port",
+      "8000",
+      "--port",
+      "9000",
+      "--source_model",
+      "OpenVINO/Qwen3-4B-int4-ov",
+      "--model_repository_path",
+      "/models",
+      "--task",
+      "text_generation",
+      "--tool_parser",
+      "hermes3",
+      "--target_device",
+      "GPU",
+      "--cache_dir",
+      "/tmp/ov_cache",
+      "--enable_prefix_caching",
+      "true",
+      "--cache_size",
+      "4",
+      "--max_num_seqs",
+      "4",
+      "--max_num_batched_tokens",
+      "4096",
+      "--plugin_config",
+      "{\"PERFORMANCE_HINT\":\"LATENCY\"}"
+    ],
+    "ovms_image": "openvino/model_server:latest-gpu",
+    "runs": 3,
+    "warmup": 1,
+    "reuse_session": false,
+    "tier": "A"
+  },
+  "agent_runs": [
+    {
+      "run": 1,
+      "latency_ms": 4775.5,
+      "tool_calls": [],
+      "reply": "Great! I've added a Classic Chicken Burger (\u20b9169.00) to your order. Would you like to add Classic French Fries (Regular) (\u20b989) or Peri Peri Fries (Regular) (\u20b999)? Say \"confirm\" to place your order.",
+      "error": null,
+      "session_id": "bench-69a82d88",
+      "llm1_ms": 1822.0,
+      "tool_ms": 77.0,
+      "llm2_ms": 2875.0,
+      "tool_name": "place_order"
+    },
+    {
+      "run": 2,
+      "latency_ms": 4583.1,
+      "tool_calls": [],
+      "reply": "Great! I've added a Classic Chicken Burger (\u20b9169) to your order. Would you like to add Classic French Fries (Regular) (\u20b989) or Peri Peri Fries (Regular) (\u20b999)? Say 'confirm' to place your order.",
+      "error": null,
+      "session_id": "bench-5e5b73ed",
+      "llm1_ms": 1801.0,
+      "tool_ms": 68.0,
+      "llm2_ms": 2712.0,
+      "tool_name": "place_order"
+    },
+    {
+      "run": 3,
+      "latency_ms": 4700.4,
+      "tool_calls": [],
+      "reply": "Great! I've added a Classic Chicken Burger (\u20b9169.00) to your order. Would you like to add Classic French Fries (Regular) (\u20b989) or Peri Peri Fries (Regular) (\u20b999)? Say 'confirm' to place your order.",
+      "error": null,
+      "session_id": "bench-871f6db6",
+      "llm1_ms": 1794.0,
+      "tool_ms": 61.0,
+      "llm2_ms": 2843.0,
+      "tool_name": "place_order"
+    }
+  ],
+  "voice_runs": [],
+  "summary": {
+    "agent_turn": {
+      "count": 3,
+      "min_ms": 4583.1,
+      "mean_ms": 4686.3,
+      "median_ms": 4700.4,
+      "max_ms": 4775.5
+    },
+    "agent_tool_calls": [
+      []
+    ],
+    "agent_split": {
+      "llm1": {
+        "count": 3,
+        "min_ms": 1794.0,
+        "mean_ms": 1805.7,
+        "median_ms": 1801.0,
+        "max_ms": 1822.0
+      },
+      "tool": {
+        "count": 3,
+        "min_ms": 61.0,
+        "mean_ms": 68.7,
+        "median_ms": 68.0,
+        "max_ms": 77.0
+      },
+      "llm2": {
+        "count": 3,
+        "min_ms": 2712.0,
+        "mean_ms": 2810.0,
+        "median_ms": 2843.0,
+        "max_ms": 2875.0
+      }
+    },
+    "agent_tool_invoked": [
+      "place_order"
+    ]
+  }
+}

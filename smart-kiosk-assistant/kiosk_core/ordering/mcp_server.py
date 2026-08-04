@@ -24,6 +24,8 @@ from typing import Any
 
 from fastmcp import FastMCP
 
+from kiosk_core.config import DEFAULT_LIST_PRODUCTS_SUMMARY, UPSELL_MAX_SUGGESTIONS
+
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP("kiosk-ordering")
@@ -42,6 +44,47 @@ def _svc():
     if _ordering_service is None:
         raise RuntimeError("OrderingService not yet initialised in MCP server")
     return _ordering_service
+
+
+# Values the model supplies when it means "no filter". The tool docstring says
+# to omit the argument for the full menu, but the 4B model tends to fill every
+# declared parameter instead, and an unmatched category returns zero rows.
+_ALL_CATEGORY_ALIASES = frozenset({
+    "all", "any", "all categories", "everything", "full", "full menu", "menu",
+    "menu items", "items", "food", "all items", "all products", "none",
+    "null", "n/a", "-",
+})
+
+# Singular forms the model uses for categories stored as plurals.
+_CATEGORY_SYNONYMS = {
+    "burger": "burgers",
+    "pizzas": "pizza",
+    "wrap": "wraps",
+    "side": "sides",
+    "beverage": "beverages",
+    "drink": "beverages",
+    "drinks": "beverages",
+    "dessert": "desserts",
+    "sweet": "desserts",
+    "sweets": "desserts",
+}
+
+
+def _normalise_category(category: str | None) -> str | None:
+    """Map a model-supplied category onto a catalogue category.
+
+    Args:
+        category: Raw category argument as sent by the agent.
+
+    Returns:
+        A catalogue category name, or ``None`` to apply no filter.
+    """
+    if category is None:
+        return None
+    cleaned = category.strip().lower()
+    if not cleaned or cleaned in _ALL_CATEGORY_ALIASES:
+        return None
+    return _CATEGORY_SYNONYMS.get(cleaned, cleaned)
 
 
 async def _attach_upsell(order_result: dict[str, Any]) -> dict[str, Any]:
@@ -69,10 +112,12 @@ async def _attach_upsell(order_result: dict[str, Any]) -> dict[str, Any]:
         # Pre-format a ready-to-speak display string per suggestion so the LLM
         # echoes the exact name and price verbatim instead of hallucinating
         # prices (e.g. inventing "Pepsi (₹40)" when the real price is ₹59).
-        # Cap at 2 — a kiosk upsell should offer one or two complements, not the
-        # whole catalogue; this also keeps the round-2 prompt and spoken reply short.
+        # Cap at UPSELL_MAX_SUGGESTIONS — a kiosk upsell should offer a small
+        # number of complements, not the whole catalogue.  Each suggestion the
+        # agent speaks costs ~8 output tokens of LLM decode, so this cap is the
+        # main lever on spoken-reply latency.
         formatted: list[dict[str, Any]] = []
-        for s in suggestions[:2]:
+        for s in suggestions[:UPSELL_MAX_SUGGESTIONS]:
             item = s.model_dump()
             prod = item.get("product", {})
             name = prod.get("name", "")
@@ -117,8 +162,24 @@ async def _resolve_items(
         if product is None:
             suggestions = await _svc().suggest_products(ref)
             logger.warning("[MCP-SERVER] could not resolve product reference '%s'", ref)
+            # The suggestions are also spelled out inside the error sentence.
+            # A sibling array is too easy for the model to skip: it would say
+            # "there was an issue, please try again" and strand the customer in
+            # a loop, since retrying the same missing item always fails.
+            offer = ", ".join(f"{p.name} ({p.price:.0f})" for p in suggestions[:3])
+            error_msg = (
+                f"'{ref}' is not on the menu. Do not invent it and do not ask the "
+                f"customer to try again. Tell them it is unavailable and offer these "
+                f"real alternatives instead: {offer}."
+                if offer
+                else (
+                    f"'{ref}' is not on the menu and there are no similar items to "
+                    f"suggest. Do not invent a product — tell the customer it is "
+                    f"unavailable and ask what else they'd like."
+                )
+            )
             return None, {
-                "error": f"No product matches '{ref}'. Do not invent one — offer the customer an item from available_products.",
+                "error": error_msg,
                 "available_products": [
                     {"product_id": p.product_id, "name": p.name, "price": p.price}
                     for p in suggestions
@@ -134,34 +195,100 @@ async def _resolve_items(
 
 
 @mcp.tool()
-async def list_products(category: str | None = None) -> list[dict[str, Any]]:
-    """List available menu products, optionally filtered by category.
+async def list_categories() -> list[dict[str, Any]]:
+    """List the menu categories available, with how many items each holds.
 
-    Args:
-        category: Filter by category: burgers, pizza, wraps, sides, beverages, desserts.
-                  Omit to list all products.
+    Use this when the customer asks what the restaurant serves in general
+    ("what do you have?", "show me the menu") without naming a category.
+    Offer the category names back and let them choose, then call
+    ``list_products`` with the category they pick.
 
     Returns:
-        List of products with product_id, name, category, and price.
+        One ``{category, item_count}`` entry per category, alphabetically.
     """
+    products = await _svc().list_products(category=None)
+    counts: dict[str, int] = {}
+    for product in products:
+        counts[product.category] = counts.get(product.category, 0) + 1
+    summary = [{"category": name, "item_count": counts[name]} for name in sorted(counts)]
+    logger.info("[MCP-SERVER] list_categories → %d categories", len(summary))
+    return summary
+
+
+@mcp.tool()
+async def list_products(category: str | None = None) -> list[dict[str, Any]]:
+    """List menu products in a category, or the category list when none is given.
+
+    Args:
+        category: One of: burgers, pizza, wraps, sides, beverages, desserts.
+                  Call with a category to get that category's products with
+                  prices. Call with NO category only to discover which
+                  categories exist — that returns category names and item
+                  counts, NOT products.
+
+    Returns:
+        With a category: products with product_id, name, category, and price.
+        Without one: ``{category, item_count}`` entries to offer the customer.
+    """
+    requested = category
+    category = _normalise_category(category)
+
     products = await _svc().list_products(category=category)
-    logger.info("[MCP-SERVER] list_products category=%s → %d item(s)", category, len(products))
+
+    # A category the model invented (observed: "all", "menu", "food") filters
+    # everything out, and the agent then tells the customer "we currently do
+    # not have any items available" while holding a full catalogue. An empty
+    # result is never the right answer to a browse request, so fall back to
+    # the whole menu rather than reporting the restaurant as empty.
+    if not products and category is not None:
+        logger.warning(
+            "[MCP-SERVER] list_products category=%r matched nothing — "
+            "falling back to full catalogue", requested,
+        )
+        products = await _svc().list_products(category=None)
+        category = None
+
+    # An unfiltered call means "what do you serve?", never "read me the whole
+    # catalogue". Returning 26 products made the model recite all of them:
+    # ~19 s of generation and ~40 s of synthesised speech. Returning the
+    # categories makes the short answer the only answer available.
+    if category is None and DEFAULT_LIST_PRODUCTS_SUMMARY:
+        counts: dict[str, int] = {}
+        for product in products:
+            counts[product.category] = counts.get(product.category, 0) + 1
+        summary = [
+            {"category": name, "item_count": counts[name]} for name in sorted(counts)
+        ]
+        logger.info(
+            "[MCP-SERVER] list_products category=None (requested=%r) → "
+            "%d categories (summary of %d item(s))",
+            requested, len(summary), len(products),
+        )
+        return summary
+
+    logger.info(
+        "[MCP-SERVER] list_products category=%s (requested=%r) → %d item(s)",
+        category, requested, len(products),
+    )
     return [p.model_dump() for p in products]
 
 
 @mcp.tool()
 async def place_order(user_id: str, items: list[dict[str, Any]]) -> dict[str, Any]:
-    """Create a new draft order.
+    """Add items to the customer's cart (creates it if none is open).
+
+    Safe to call for follow-up items: if the customer already has an open
+    order, the items are added to it rather than starting a second one.
 
     Args:
         user_id: Customer identifier (use "anonymous" if unknown).
-        items: List of {product_id, quantity} dicts. product_id may be either a
-            catalogue id from list_products OR a plain product name (e.g.
-            "Classic Chicken Burger") — the server resolves it to the real item.
+        items: List of {product_id, quantity}. product_id may be a catalogue id
+            OR a plain product name (e.g. "Classic Chicken Burger") — the server
+            resolves it.
 
     Returns:
-        The created order with order_id, items, total, and status="draft", or an
-        error dict with ``available_products`` if a reference cannot be matched.
+        The order (order_id, items, total, status="draft"), or an error
+        dict with ``available_products`` if a reference cannot be matched.
     """
     from kiosk_core.ordering.models import CreateOrderRequest, OrderItemIn
 
@@ -185,12 +312,12 @@ async def update_order(order_id: int, items: list[dict[str, Any]]) -> dict[str, 
 
     Args:
         order_id: The order to update.
-        items: List of {product_id, quantity} dicts to add. product_id may be a
+        items: List of {product_id, quantity} to add. product_id may be a
             catalogue id OR a plain product name — the server resolves it.
 
     Returns:
-        Updated order with new items and recalculated total, or an error dict
-        with ``available_products`` if a reference cannot be matched.
+        Updated order with recalculated total, or an error dict with
+        ``available_products`` if a reference cannot be matched.
     """
     from kiosk_core.ordering.models import OrderItemIn
 
@@ -226,6 +353,36 @@ async def get_order(order_id: int) -> dict[str, Any] | None:
 
 
 @mcp.tool()
+async def confirm_active_order(user_id: str = "anonymous") -> dict[str, Any]:
+    """Confirm the customer's current draft order without needing its id.
+
+    Use this when the customer says "yes", "confirm", or "that's all" and you
+    do not have an order_id to hand. It resolves the customer's open draft
+    order and finalises it in one step.
+
+    Args:
+        user_id: The customer placing the order. Defaults to "anonymous".
+
+    Returns:
+        Confirmed order with status="confirmed" and the order_id, or an error dict.
+    """
+    order = await _svc().get_current_order(user_id)
+    if order is None:
+        logger.warning("[MCP-SERVER] confirm_active_order user=%s has no draft order", user_id)
+        return {"error": "No open order to confirm."}
+    try:
+        confirmed = await _svc().confirm_order(order.order_id)
+        logger.info(
+            "[MCP-SERVER] confirm_active_order user=%s order_id=%d total=%.2f ✓",
+            user_id, confirmed.order_id, confirmed.total,
+        )
+        return confirmed.model_dump(mode="json")
+    except ValueError as exc:
+        logger.warning("[MCP-SERVER] confirm_active_order user=%s rejected: %s", user_id, exc)
+        return {"error": str(exc)}
+
+
+@mcp.tool()
 async def confirm_order(order_id: int) -> dict[str, Any]:
     """Confirm a draft order and finalise it.
 
@@ -233,8 +390,7 @@ async def confirm_order(order_id: int) -> dict[str, Any]:
         order_id: The draft order to confirm.
 
     Returns:
-        Confirmed order with status="confirmed" and the order_id (use as Order ID),
-        or an error dict if the order cannot be confirmed.
+        Confirmed order with status="confirmed" and the order_id, or an error dict.
     """
     try:
         order = await _svc().confirm_order(order_id)

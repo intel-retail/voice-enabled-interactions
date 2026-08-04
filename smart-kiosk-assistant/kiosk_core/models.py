@@ -16,7 +16,7 @@ class SessionStartRequest(BaseModel):
     )
     max_session_seconds: float = Field(default=config.DEFAULT_MAX_SESSION_SECONDS, gt=1, le=300)
     silence_threshold: int = Field(default=config.DEFAULT_SILENCE_THRESHOLD, ge=1, le=32767)
-    language: str | None = None
+    language: str | None = config.DEFAULT_ASR_LANGUAGE
     temperature: float = Field(default=0.0, ge=0.0, le=1.0)
     analyzer_url: str = config.DEFAULT_ANALYZER_URL
     rag_url: str = config.DEFAULT_RAG_URL

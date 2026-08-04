@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from docx import Document as DocxDocument
@@ -21,6 +23,8 @@ from dto.query_dto import (
 from pipeline import get_shared_pipeline
 from utils.config_loader import config
 from utils.latency_store import llm_latency, retrieval_latency
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -69,6 +73,35 @@ def _extract_text_from_file(filename: str, raw: bytes) -> str:
         status_code=415,
         detail="Only .txt, .md, .docx and .pdf files are supported",
     )
+
+
+async def _reset_agent_sessions() -> None:
+    """Clear agent state that outlives a knowledge-base change.
+
+    Two pieces of in-memory state survive ingestion and must both be dropped:
+
+    * ADK conversation sessions — otherwise a stale "we don't have that
+      information" turn stays in history and the model replays it verbatim,
+      with no tool call, even though the new document answers the question.
+    * The knowledge tool's pinned root section — it is cached for the process
+      lifetime, so a stale pin keeps serving the previous document's global
+      facts (restaurant name, opening hours) as authoritative.
+
+    Best-effort: ingestion must not fail because the agent is unavailable.
+    """
+    try:
+        from agentic.ordering_agent import get_ordering_agent
+
+        await get_ordering_agent().reset_sessions()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[INGEST] Could not reset agent sessions: %s", exc)
+
+    try:
+        from agentic.tools.knowledge_lookup_tool import reset_pinned_context
+
+        reset_pinned_context()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[INGEST] Could not clear pinned root section: %s", exc)
 
 
 def _validate_token_budget(pipeline, text: str) -> None:
@@ -126,10 +159,13 @@ def rag_performance():
 
 
 @router.post("/api/v1/context", response_model=IngestResponse)
-def ingest_context(request: ContextRequest) -> IngestResponse:
+async def ingest_context(request: ContextRequest) -> IngestResponse:
     pipeline = get_shared_pipeline()
     _validate_token_budget(pipeline, request.text)
-    added = pipeline.ingest_text(request.text, source=request.source, metadata=request.metadata)
+    added = await run_in_threadpool(
+        pipeline.ingest_text, request.text, source=request.source, metadata=request.metadata
+    )
+    await _reset_agent_sessions()
     return IngestResponse(chunks_added=added, source=request.source)
 
 
@@ -155,7 +191,7 @@ async def _ingest_single_file(pipeline, file: UploadFile) -> FileIngestResult:
             raise HTTPException(status_code=422, detail="No extractable text found in file")
 
         _validate_token_budget(pipeline, text)
-        added = pipeline.ingest_text(text, source=filename)
+        added = await run_in_threadpool(pipeline.ingest_text, text, source=filename)
         return FileIngestResult(source=filename, chunks_added=added, status="ok")
     except HTTPException as exc:
         return FileIngestResult(source=filename, status="failed", detail=str(exc.detail))
@@ -183,6 +219,8 @@ async def ingest_context_file(request: Request) -> BatchIngestResponse:
     pipeline = get_shared_pipeline()
     results = [await _ingest_single_file(pipeline, file) for file in uploads]
     succeeded = [r for r in results if r.status == "ok"]
+    if succeeded:
+        await _reset_agent_sessions()
     return BatchIngestResponse(
         total_chunks_added=sum(r.chunks_added for r in results),
         files_processed=len(results),
@@ -198,9 +236,10 @@ def context_stats():
 
 
 @router.delete("/api/v1/context")
-def clear_context():
+async def clear_context():
     try:
-        get_shared_pipeline().clear_context()
+        await run_in_threadpool(get_shared_pipeline().clear_context)
+        await _reset_agent_sessions()
         return JSONResponse(content={"status": "cleared"}, status_code=200)
     except Exception as exc:
         return JSONResponse(

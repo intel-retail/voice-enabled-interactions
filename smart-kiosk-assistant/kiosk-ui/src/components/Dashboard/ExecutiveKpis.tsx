@@ -2,10 +2,20 @@
  * ExecutiveKpis — four large KPI cards visible at all times on the dashboard.
  *
  * Cards:
- *   1. E2E Latency      (total pipeline round-trip)
+ *   1. E2E Latency      (measured wall-clock round-trip for the last turn)
  *   2. ASR Speed        (speech recognition)
- *   3. LLM Speed        (tokens per second inferred from latency)
+ *   3. LLM Latency      (cumulative model time for the turn)
  *   4. TTS Speed        (speech synthesis)
+ *
+ * Source of truth is the per-turn trace at kiosk-core /api/v1/pipeline/latest —
+ * the SAME source as PipelineFlow, so the two panels always agree. Previously
+ * this panel summed each service's global `last_ms` register, which is
+ * last-call-wins, spans different turns, omitted agent/tool overhead, and
+ * therefore produced a third, lower "E2E" number than the pipeline panel.
+ *
+ * The global registers are still used, but only as a fallback before the first
+ * turn has been recorded; that state is labelled so it is never mistaken for
+ * a measured turn.
  *
  * Designed for executive demos and trade-show large displays.
  * Cards glow subtly on update (animation: kpi-glow).
@@ -79,11 +89,26 @@ export function ExecutiveKpis({ kpis }: ExecutiveKpisProps) {
   const llm = (rp.llm ?? {}) as Record<string, unknown>;
   const tp = (kpis.tts?.perf ?? {}) as Record<string, unknown>;
 
-  // E2E = sum of all latencies
-  const lats = [ap.last_ms, retr.last_ms, llm.last_ms, tp.last_ms].filter(
-    (v): v is number => typeof v === 'number',
-  );
-  const e2eMs = lats.length > 0 ? lats.reduce((a, b) => a + b, 0) : null;
+  const num = (v: unknown): number | null => (typeof v === 'number' ? v : null);
+
+  // Per-turn trace is authoritative; global registers are only a pre-first-turn
+  // fallback so the cards are not blank on a freshly started stack.
+  const trace = kpis.pipeline ?? null;
+  const live = trace !== null;
+
+  const e2eMs = live ? trace.wall.turn_total_ms : null;
+  const asrMs = live ? trace.asr.ms : num(ap.last_ms);
+  const llmMs = live ? trace.agent.llm.ms : num(llm.last_ms);
+  const ttsMs = live ? trace.tts.ms : num(tp.last_ms);
+  const retrievalMs = live
+    ? trace.agent.retrieval.invoked
+      ? trace.agent.retrieval.ms
+      : null
+    : num(retr.last_ms);
+
+  const llmCalls = live ? trace.agent.llm.calls : 0;
+  const ttsSegments = live ? trace.tts.segments : 0;
+  const sourceNote = live ? 'measured wall-clock, last turn' : 'awaiting first turn';
 
   // Build device sub-labels
   const asrDevice = s(kpis.asr?.device).toUpperCase() || '—';
@@ -94,7 +119,7 @@ export function ExecutiveKpis({ kpis }: ExecutiveKpisProps) {
   const llmModel = tail((kpis.rag as Record<string, unknown>)?.llm_model);
   const ttsModel = tail(kpis.tts?.model);
 
-  const hasData = lats.length > 0;
+  const hasData = e2eMs !== null || asrMs !== null || llmMs !== null || ttsMs !== null;
 
   return (
     <div className="space-y-2">
@@ -111,7 +136,7 @@ export function ExecutiveKpis({ kpis }: ExecutiveKpisProps) {
           title="E2E Latency"
           value={ms(e2eMs)}
           unit={msUnit(e2eMs)}
-          sub="Full pipeline round-trip"
+          sub={`Capture → last audio · ${sourceNote}`}
           accentCls="border-intel-blue/40"
           valueCls="text-intel-blue"
           updated={hasData}
@@ -121,36 +146,36 @@ export function ExecutiveKpis({ kpis }: ExecutiveKpisProps) {
         <KpiCard
           icon="🎙"
           title="ASR Speed"
-          value={ms(ap.last_ms)}
-          unit={msUnit(ap.last_ms)}
+          value={ms(asrMs)}
+          unit={msUnit(asrMs)}
           sub={`${asrModel} · ${asrDevice}`}
           accentCls="border-asr/40"
           valueCls="text-asr"
-          updated={typeof ap.last_ms === 'number'}
+          updated={asrMs !== null}
         />
 
         {/* LLM Generation */}
         <KpiCard
           icon="🧠"
           title="LLM Latency"
-          value={ms(llm.last_ms)}
-          unit={msUnit(llm.last_ms)}
-          sub={`${llmModel} · ${llmDevice}`}
+          value={ms(llmMs)}
+          unit={msUnit(llmMs)}
+          sub={`${llmModel} · ${llmDevice}${llmCalls > 0 ? ` · ${llmCalls} call${llmCalls > 1 ? 's' : ''}` : ''}`}
           accentCls="border-llm/40"
           valueCls="text-llm"
-          updated={typeof llm.last_ms === 'number'}
+          updated={llmMs !== null}
         />
 
         {/* TTS Speed */}
         <KpiCard
           icon="🔊"
           title="TTS Speed"
-          value={ms(tp.last_ms)}
-          unit={msUnit(tp.last_ms)}
-          sub={`${ttsModel} · ${ttsDevice}`}
+          value={ms(ttsMs)}
+          unit={msUnit(ttsMs)}
+          sub={`${ttsModel} · ${ttsDevice}${ttsSegments > 0 ? ` · ${ttsSegments} seg` : ''}`}
           accentCls="border-tts/40"
           valueCls="text-tts"
-          updated={typeof tp.last_ms === 'number'}
+          updated={ttsMs !== null}
         />
       </div>
 
@@ -163,8 +188,8 @@ export function ExecutiveKpis({ kpis }: ExecutiveKpisProps) {
               Retrieval
             </p>
             <p className="font-mono text-lg font-bold text-ret">
-              {ms(retr.last_ms)}
-              <span className="ml-1 text-xs font-normal opacity-70">{msUnit(retr.last_ms)}</span>
+              {ms(retrievalMs)}
+              <span className="ml-1 text-xs font-normal opacity-70">{msUnit(retrievalMs)}</span>
             </p>
           </div>
         </div>

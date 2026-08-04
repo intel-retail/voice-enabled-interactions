@@ -48,8 +48,8 @@ class OVMSLLMService:
         self._timeout = generation_timeout
 
         logger.info(
-            "[OVMS-LLM] Connecting to OVMS base_url=%s model=%s",
-            self._base_url, self._model_id,
+            "[OVMS-LLM] Connecting to OVMS base_url=%s model=%s enable_thinking=%s",
+            self._base_url, self._model_id, agent_cfg.ENABLE_THINKING,
         )
         self._client = OpenAI(base_url=self._base_url, api_key="unused")
 
@@ -60,6 +60,21 @@ class OVMSLLMService:
             self.tokenizer = AutoTokenizer.from_pretrained(hf_id)
 
     # ── public API (mirrors LLMService) ─────────────────────────────
+
+    @property
+    def _extra_body(self) -> dict:
+        """Request extras applied to every OVMS completion.
+
+        ``chat_template_kwargs.enable_thinking`` is how Qwen3 hybrid-reasoning
+        models are switched out of ``<think>`` mode — the in-prompt
+        ``/no_think`` marker is a Qwen2.5 convention that Qwen3's chat template
+        ignores. Without this the RAG pipeline spends its whole ``max_tokens``
+        budget on chain-of-thought and returns truncated reasoning instead of
+        an answer. The agent path already sets this in
+        :mod:`agentic.adk_runtime`; keeping both in sync means every OVMS
+        caller behaves identically.
+        """
+        return {"chat_template_kwargs": {"enable_thinking": agent_cfg.ENABLE_THINKING}}
 
     def generate(
         self,
@@ -78,6 +93,7 @@ class OVMSLLMService:
             max_tokens=max_tok,
             temperature=temp,
             timeout=self._timeout,
+            extra_body=self._extra_body,
         )
         text: str = response.choices[0].message.content or ""
 
@@ -109,6 +125,7 @@ class OVMSLLMService:
                 temperature=temp,
                 stream=True,
                 timeout=self._timeout,
+                extra_body=self._extra_body,
             ) as stream:
                 for chunk in stream:
                     delta = chunk.choices[0].delta.content if chunk.choices else None

@@ -27,6 +27,24 @@ NPU_CSV     = METRICS_DIR / "npu_usage.csv"
 MEM_LOG     = METRICS_DIR / "memory_usage.log"
 PCM_CSV     = METRICS_DIR / "pcm.csv"
 
+# Intel GPU engine classes reported by qmassa (i915 / Xe drivers):
+#   rcs  – render / 3D            ccs  – compute
+#   bcs  – blitter (copy)         vcs  – video decode/encode
+#   vecs – video enhancement
+# "compute" is kept for drivers that expose a single aggregate engine.
+# Empty (the default) means "consider every engine the device reports", which
+# is what makes GPU utilisation reflect both render and compute work.
+GPU_ENGINES = tuple(
+    e.strip().lower()
+    for e in os.getenv("METRICS_GPU_ENGINES", "").split(",")
+    if e.strip()
+)
+
+# The qmassa JSON grows without bound (~100 MB after an hour) and is rewritten
+# continuously, so it must not be re-parsed on every poll.  Cache the derived
+# series and only re-read when the file actually changes.
+_GPU_CACHE: Dict[str, Any] = {"key": None, "series": []}
+
 
 # ---------------------------------------------------------------------------
 # Snapshot helpers
@@ -185,6 +203,31 @@ def build_memory_series() -> List[List]:
     ]
 
 
+def _engine_usage_max(eng_usage: Any) -> Optional[float]:
+    """Return the busiest engine's latest utilisation from an ``eng_usage`` map.
+
+    ``eng_usage`` maps an engine class (``rcs``, ``ccs``, ``bcs``, ``vcs``,
+    ``vecs`` …) to a list of samples.  Engines are independent hardware units,
+    so the busiest one — not their sum — represents how loaded the GPU is;
+    summing would report >100 % whenever render and compute run concurrently.
+
+    Returns None when no engine reports a usable sample.
+    """
+    if not isinstance(eng_usage, dict):
+        return None
+    values: List[float] = []
+    for engine, samples in eng_usage.items():
+        if GPU_ENGINES and str(engine).lower() not in GPU_ENGINES:
+            continue
+        if not isinstance(samples, list) or not samples:
+            continue
+        try:
+            values.append(float(samples[-1]))
+        except (TypeError, ValueError):
+            continue
+    return max(values) if values else None
+
+
 def build_gpu_series() -> List[List]:
     """
     Parse qmassa JSON files written by the qmassa tool (from intel/retail-benchmark).
@@ -198,11 +241,12 @@ def build_gpu_series() -> List[List]:
             {
                 "devs_state": [
                     {
+                        "eng_names":  ["bcs", "ccs", "rcs", "vcs", "vecs"],
                         "clis_stats": [
-                            {"eng_usage": {"compute": [...], ...}},
+                            {"eng_usage": {"rcs": [...], "ccs": [...], ...}},
                             ...
                         ],
-                        "dev_stats": {"eng_usage": {"compute": [...], ...}}
+                        "dev_stats": {"eng_usage": {"rcs": [...], "ccs": [...], ...}}
                     }
                 ]
             },
@@ -210,9 +254,19 @@ def build_gpu_series() -> List[List]:
         ]
     }
 
-    For each state, sum compute engine usage across all per-process entries
-    (clis_stats). Falls back to device-level eng_usage when clis_stats is empty.
-    Timestamps are approximated backwards from now using ms_interval.
+    Engine names are driver-specific (Intel i915/Xe report ``rcs``/``ccs``/
+    ``bcs``/``vcs``/``vecs``; there is no engine literally named "compute").
+    Every engine the device reports is therefore considered, unless
+    ``METRICS_GPU_ENGINES`` restricts the set.
+
+    Device-level ``dev_stats.eng_usage`` is preferred because it is already
+    aggregated across clients; per-client ``clis_stats`` is summed per engine
+    only as a fallback.
+
+    The result is cached against the file's (mtime, size) because the JSON is
+    large (~100 MB) and rewritten continuously.  A partially-flushed file
+    raises JSONDecodeError; in that case the last good series is returned so
+    the chart holds its data instead of blanking.
 
     Returns [[timestamp_iso, usage_percent], ...]
     """
@@ -223,14 +277,25 @@ def build_gpu_series() -> List[List]:
 
     latest_path = max(candidates, key=os.path.getmtime)
     try:
+        stat = os.stat(latest_path)
+        cache_key = (latest_path, stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return _GPU_CACHE["series"]
+
+    if _GPU_CACHE["key"] == cache_key:
+        return _GPU_CACHE["series"]
+
+    try:
         with open(latest_path) as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError):
-        return []
+        # qmassa was mid-write. Serve the previous good series rather than
+        # dropping the chart to "Waiting for data…".
+        return _GPU_CACHE["series"]
 
     states = data.get("states") or []
     if not isinstance(states, list) or not states:
-        return []
+        return _GPU_CACHE["series"]
 
     ms_interval = 1500
     try:
@@ -247,48 +312,47 @@ def build_gpu_series() -> List[List]:
                 continue
             dev = devs_state[0]
 
-            clis_stats = dev.get("clis_stats") or []
-            values: List[float] = []
+            usage = _engine_usage_max((dev.get("dev_stats") or {}).get("eng_usage"))
 
-            if clis_stats:
-                for cli in clis_stats:
-                    eng_usage = (cli.get("eng_usage") or {}).get("compute") or []
-                    if not eng_usage:
+            if usage is None:
+                # Fallback: aggregate per-client usage per engine, then take
+                # the busiest engine.
+                per_engine: Dict[str, float] = {}
+                for cli in dev.get("clis_stats") or []:
+                    cli_usage = cli.get("eng_usage")
+                    if not isinstance(cli_usage, dict):
                         continue
-                    try:
-                        values.append(float(eng_usage[-1]))
-                    except (TypeError, ValueError):
-                        continue
-            else:
-                # Fallback to device-level eng_usage
-                dev_stats = dev.get("dev_stats") or {}
-                eng_usage = dev_stats.get("eng_usage") or {}
-                if isinstance(eng_usage, dict):
-                    for _, arr in eng_usage.items():
-                        if not arr:
+                    for engine, arr in cli_usage.items():
+                        if GPU_ENGINES and str(engine).lower() not in GPU_ENGINES:
+                            continue
+                        if not isinstance(arr, list) or not arr:
                             continue
                         try:
-                            values.append(float(arr[-1]))
+                            per_engine[engine] = per_engine.get(engine, 0.0) + float(arr[-1])
                         except (TypeError, ValueError):
                             continue
+                usage = max(per_engine.values()) if per_engine else None
 
-            if not values:
+            if usage is None:
                 continue
 
-            gpu_busy = sum(values)
-            samples.append(max(0.0, min(100.0, gpu_busy)))
+            samples.append(max(0.0, min(100.0, usage)))
         except Exception:
             continue
 
     if not samples:
-        return []
+        return _GPU_CACHE["series"]
 
     now   = datetime.now()
     start = now - timedelta(seconds=dt_seconds * (len(samples) - 1))
-    return [
+    series = [
         [(start + timedelta(seconds=dt_seconds * i)).isoformat(), usage]
         for i, usage in enumerate(samples)
     ]
+
+    _GPU_CACHE["key"] = cache_key
+    _GPU_CACHE["series"] = series
+    return series
 
 
 def build_power_series() -> List[List]:

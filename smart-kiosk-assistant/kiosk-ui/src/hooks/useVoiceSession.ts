@@ -59,6 +59,13 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
   }, []);
 
   const flushChunk = useCallback(async (force = false) => {
+    // Nothing can be sent until the session exists. Crucially we must NOT
+    // drain framesRef before knowing that: audio recorded between the mic
+    // going live and startStreamSession resolving is still real speech, and
+    // clearing it here used to destroy the opening words of the sentence.
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+
     const frames = framesRef.current;
     if (frames.length === 0) return;
     const total = frames.reduce((acc, f) => acc + f.length, 0);
@@ -70,12 +77,14 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
     const resampled = resampleLinear(merged, ctxRateRef.current, TARGET_RATE);
     const wav = encodeWav(resampled, TARGET_RATE);
 
-    const sid = sessionIdRef.current;
-    if (!sid) return;
     try {
       await pushAudioChunk(sid, wav);
     } catch {
-      /* transient push error — drop this chunk */
+      // A transient push failure must not silently swallow several seconds of
+      // speech. Put the audio back at the head of the buffer so the next flush
+      // retries it; ordering is preserved because frames captured meanwhile
+      // were appended after this batch was taken.
+      framesRef.current = [merged, ...framesRef.current];
     }
   }, []);
 
@@ -179,7 +188,10 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
     setPartialUser('🎤 Listening…');
     setPartialAssistant('');
     setPhase('listening');
-    setStatusText('🎙 Listening — speak now');
+    // Do NOT invite speech yet — the mic permission, AudioContext, worklet
+    // module fetch and the session POST all still have to complete. Prompting
+    // here made customers start talking before capture existed.
+    setStatusText('🎙 Preparing microphone…');
 
     try {
       if (!navigator.mediaDevices?.getUserMedia) {
@@ -210,15 +222,20 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
       source.connect(worklet);
       // Connect to destination so the worklet's process() runs; output is silent.
       worklet.connect(ctx.destination);
+      // Arm capture before opening the session so nothing spoken during the
+      // session round-trip is lost. flushChunk retains frames until the
+      // session id exists, so this buffering is safe.
       recordingRef.current = true;
 
-      // Open the streaming session up-front to avoid first-chunk races.
       const { session_id } = await startStreamSession(
         TARGET_RATE,
         buildHistory(),
         conversationIdRef.current,
       );
       sessionIdRef.current = session_id;
+
+      // Everything is live — only now is it honest to ask for speech.
+      setStatusText('🎙 Listening — speak now');
 
       // Begin the poll loop (partial transcript while listening).
       stopPolling();

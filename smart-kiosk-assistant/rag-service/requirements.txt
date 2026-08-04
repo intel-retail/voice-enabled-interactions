@@ -37,3 +37,7 @@ litellm>=1.83.14
 openai>=1.30.0
 aiohttp>=3.9.0
 fastmcp==2.10.0
+# Pin mcp explicitly: fastmcp==2.10.0 does not upper-bound it, and mcp 2.0.0
+# renamed mcp.client.streamable_http.streamablehttp_client to
+# streamable_http_client, breaking agentic/mcp_client.py's import.
+mcp==1.29.0

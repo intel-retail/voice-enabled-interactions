@@ -110,6 +110,7 @@ class RagPipeline:
             fetch_k=int(getattr(config.retrieval, "fetch_k", 6)),
             score_threshold=getattr(config.retrieval, "score_threshold", None),
             reranker=reranker,
+            rerank_score_threshold=getattr(config.retrieval, "rerank_score_threshold", None),
         )
         self._prompt_builder = PromptBuilder(
             system_prompt=config.answering.system_prompt,
@@ -179,6 +180,24 @@ class RagPipeline:
 
     def retrieve(self, question: str, top_k: int | None = None) -> list[RetrievalRecord]:
         return self._retrieval.retrieve(question, top_k=top_k)
+
+    def iter_documents(self) -> list[str]:
+        """Return every chunk currently in the vector store, as raw text.
+
+        Used by callers that need corpus-level context rather than a
+        similarity match — e.g. pinning a document's root section so that
+        global facts do not depend on the reranker surfacing them.
+
+        Returns:
+            The stored chunk texts, or an empty list if the backing store
+            does not support enumeration.
+        """
+        store = getattr(self._retrieval, "vectorstore", None)
+        getter = getattr(store, "get", None)
+        if getter is None:
+            return []
+        payload = getter(include=["documents"]) or {}
+        return [doc for doc in (payload.get("documents") or []) if doc]
 
     # ── answering ────────────────────────────────────────────────────
 

@@ -28,9 +28,14 @@ models:
     #   Qwen:     custom_voice | voice_design
     model_variant: custom_voice
     # Default speaker/voice. Permitted values:
-    #   SpeechT5: default
+    #   SpeechT5: Ryan | Miles | Aaron | Nora | Elena | Kabir | Angus
+    #             (CMU Arctic ids bdl/jmk/rms/clb/slt/ksp/awb are accepted as aliases)
     #   Qwen custom_voice example: Ryan
     #   Qwen voice_design: speaker can be omitted
+    #
+    # Ryan (CMU Arctic "bdl", US male) is the kiosk default: measured ~3.8 dB
+    # louder and ~13% faster to synthesize than the previous implicit voice
+    # ("Elena"/slt), which sounded feeble over kiosk speakers.
     default_speaker: Ryan
     # Default language. Permitted values: English (the service currently supports English only)
     default_language: English

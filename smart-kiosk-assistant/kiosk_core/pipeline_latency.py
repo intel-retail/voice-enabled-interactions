@@ -48,6 +48,7 @@ class AgentSpan:
 class AsrSpan:
     ms: float | None = None
     device: str = "CPU"
+    chunks: int = 0                # number of transcribe calls summed into ms
 
 
 @dataclass

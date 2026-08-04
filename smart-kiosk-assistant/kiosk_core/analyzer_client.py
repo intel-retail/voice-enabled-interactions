@@ -17,6 +17,7 @@ class AnalyzerClient:
         temperature: float = 0.0,
         diarization: bool = False,
         session_id: str | None = None,
+        speaker_scope_id: str | None = None,
     ) -> dict:
         """POST an audio file to the transcription endpoint.
 
@@ -30,6 +31,12 @@ class AnalyzerClient:
         session id — which may differ on the very first call — is also
         surfaced via the ``X-Session-ID`` response header and included in
         the returned dict under the key ``_analyzer_session_id``.
+
+        ``speaker_scope_id`` scopes the analyzer's enrolled primary-speaker
+        voice. It must stay constant for the whole conversation — unlike
+        ``session_id``, which is regenerated per utterance — otherwise the
+        analyzer re-enrols the reference voice from the very audio it is
+        judging and can never reject a secondary speaker.
         """
         path = Path(file_path)
         data: dict = {"temperature": str(temperature)}
@@ -40,6 +47,8 @@ class AnalyzerClient:
             data["response_format"] = "verbose_json"
         if session_id:
             data["session_id"] = session_id
+        if speaker_scope_id:
+            data["speaker_scope_id"] = speaker_scope_id
 
         with path.open("rb") as audio_file:
             with httpx.Client(timeout=self.timeout_seconds, trust_env=False) as client:

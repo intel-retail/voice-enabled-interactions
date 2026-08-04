@@ -35,6 +35,18 @@ _WHISPER_JUNK = re.compile(
     re.IGNORECASE,
 )
 
+# Whisper emits a short stock phrase when handed near-silence. The PyTorch
+# "openai" provider suppresses these via no_speech_prob/avg_logprob, but the
+# OpenVINO GenAI provider exposes no confidence signal at all (its `scores`
+# field is a degenerate 1.0), so a silent chunk transcribes as "you" or
+# "Thank you." and would otherwise start a spurious agent turn. Matching the
+# whole utterance keeps genuine speech containing these words intact.
+_WHISPER_FILLER = re.compile(
+    r"^\W*(?:you|thank you|thanks(?: for watching)?|bye|okay|ok|uh|um|"
+    r"thank you\.? bye|please subscribe)\W*$",
+    re.IGNORECASE,
+)
+
 # Domain vocabulary for the semantic fallback in _filter_target_speaker.
 # When the primary customer is silent for an entire chunk this set is used
 # to decide whether a background speaker said something kiosk-relevant enough
@@ -86,9 +98,11 @@ class BaseAudioSession:
         self.stop_requested_at: datetime | None = None
 
         # ── Primary-speaker lock-on ────────────────────────────────────────────
-        # The audio-analyzer does not set is_primary on segments. kiosk-core
-        # locks onto the first speaker label seen in the session and treats all
-        # subsequent segments from that label as the customer (primary).
+        # The audio-analyzer sets is_primary when it has an enrolled reference
+        # voice for the conversation (see speaker_scope_id). kiosk-core honours
+        # that flag when present and otherwise falls back to locking onto the
+        # first speaker label seen in the session and treating all subsequent
+        # segments from that label as the customer (primary).
         # Segments from any different label are unconditionally dropped — the
         # semantic fallback is only used before the primary is established.
         self._primary_speaker_id: str | None = None
@@ -118,6 +132,9 @@ class BaseAudioSession:
         # ── Pipeline timing (monotonic clock) ──────────────────────────────────
         # All _t_* fields are set during _finalize_run / _stream_rag_response.
         # Using time.monotonic() for accurate durations; datetime only for display.
+        self._t_capture_start: float | None = None  # first speech frame detected
+        self._asr_ms_total: float = 0.0             # summed transcribe_file time
+        self._asr_chunks: int = 0                   # number of transcribe calls
         self._t_turn_start: float | None = None     # start of _finalize_run
         self._t_agent_start: float | None = None    # just before agent HTTP call
         self._t_agent_end: float | None = None      # agent reply received
@@ -195,6 +212,8 @@ class BaseAudioSession:
                 if not self._speech_started:
                     if is_speech:
                         self._speech_started = True
+                        if self._t_capture_start is None:
+                            self._t_capture_start = time.monotonic()
                         while self._preroll_frames:
                             buffered = self._preroll_frames.popleft()
                             chunk_frames.append(buffered)
@@ -321,6 +340,9 @@ class BaseAudioSession:
         sentence_index = 0
         _first_token_seen = False
         _tool_calls: list[str] = []
+        _llm_ms: float | None = None
+        _llm_calls: int = 0
+        _retrieval_ms: float | None = None
         # t_agent_start set here — generator body (HTTP call) runs on first iteration
         if self.agent_client is not None:
             self._t_agent_start = time.monotonic()
@@ -330,6 +352,9 @@ class BaseAudioSession:
                 # to avoid dict items in response_parts (which causes TypeError in snapshot())
                 if isinstance(token, dict) and "_tool_calls" in token:
                     _tool_calls = token["_tool_calls"]
+                    _llm_ms = token.get("_llm_ms")
+                    _llm_calls = token.get("_llm_calls", 0)
+                    _retrieval_ms = token.get("_retrieval_ms")
                     continue
 
                 with self._lock:
@@ -367,9 +392,15 @@ class BaseAudioSession:
             print(flush=True)
 
         # ── Record pipeline turn trace ──────────────────────────────────────
-        self._record_turn_trace(_tool_calls)
+        self._record_turn_trace(_tool_calls, _llm_ms, _llm_calls, _retrieval_ms)
 
-    def _record_turn_trace(self, tool_calls: list[str]) -> None:
+    def _record_turn_trace(
+        self,
+        tool_calls: list[str],
+        llm_ms: float | None = None,
+        llm_calls: int = 0,
+        retrieval_ms: float | None = None,
+    ) -> None:
         """Build and persist a TurnTrace for the completed voice turn."""
         t0 = self._t_turn_start
         t_agent_s = self._t_agent_start
@@ -383,8 +414,10 @@ class BaseAudioSession:
                 return None
             return round((b - a) * 1000, 1)
 
-        # ASR = from turn_start to when agent was called (includes VAD→transcribe)
-        asr_ms = _ms(t0, t_agent_s)
+        # ASR = summed analyzer round-trips measured in _flush_chunk. It cannot
+        # be derived from turn_start, because every chunk is already transcribed
+        # by the time _finalize_run stamps t0.
+        asr_ms = round(self._asr_ms_total, 1) if self._asr_chunks else None
         # Agent TTFT = from agent_start to when first token (reply) arrived
         ttft_ms = _ms(t_agent_s, t_agent_e)
         # Agent total = from agent_start to last TTS segment done (whole orchestration)
@@ -393,8 +426,11 @@ class BaseAudioSession:
         tts_ms = _ms(t_first, t_last)
         # Time to first audio = from agent call start to first TTS sentence queued
         ttfa_ms = _ms(t_agent_s, t_first)
-        # Wall E2E: measured end-to-end (turn_start → turn_end), never summed
-        wall_total_ms = _ms(t0, t_end)
+        # Wall E2E: genuinely end-to-end — from the first speech frame captured
+        # (so audio capture and ASR are included) to the last TTS segment
+        # written. Falls back to turn_start when no speech was ever detected.
+        t_e2e_start = self._t_capture_start or t0
+        wall_total_ms = _ms(t_e2e_start, t_end)
 
         retrieval_invoked = any(
             "retrieval" in tc.lower() or "knowledge" in tc.lower() or "lookup" in tc.lower()
@@ -410,12 +446,15 @@ class BaseAudioSession:
                 turn_total_ms=wall_total_ms,
                 time_to_first_audio_ms=ttfa_ms,
             ),
-            asr=AsrSpan(ms=asr_ms),
+            asr=AsrSpan(ms=asr_ms, chunks=self._asr_chunks),
             agent=AgentSpan(
                 ttft_ms=ttft_ms,
                 total_ms=agent_total_ms,
-                retrieval=RetrievalSpan(invoked=retrieval_invoked),
-                llm=LlmSpan(device="GPU"),
+                retrieval=RetrievalSpan(
+                    invoked=retrieval_invoked,
+                    ms=retrieval_ms,
+                ),
+                llm=LlmSpan(ms=llm_ms, calls=llm_calls, device="GPU"),
             ),
             tts=TtsSpan(
                 ms=tts_ms,
@@ -425,13 +464,18 @@ class BaseAudioSession:
         )
         pipeline_store.record(trace)
         logger.info(
-            "[PIPELINE] turn=%s wall=%.0fms asr=%.0fms ttft=%.0fms tts=%.0fms retrieval=%s tools=%s",
+            "[PIPELINE] turn=%s wall=%.0fms asr=%.0fms(%d) ttft=%.0fms tts=%.0fms "
+            "llm=%.0fms(%d) retrieval=%s/%.0fms tools=%s",
             self.session_id,
             wall_total_ms or 0,
             asr_ms or 0,
+            self._asr_chunks,
             ttft_ms or 0,
             tts_ms or 0,
+            llm_ms or 0,
+            llm_calls,
             retrieval_invoked,
+            retrieval_ms or 0,
             tool_calls,
         )
 
@@ -465,6 +509,8 @@ class BaseAudioSession:
                     language=self.request.tts_language,
                     instructions=self.request.tts_instructions,
                 )
+                if config.DEFAULT_TTS_TRIM_ENABLED:
+                    self._trim_tts_segment(output_path, sentence)
                 with self._lock:
                     self._t_last_tts = time.monotonic()
                     self.tts_audio_segments.append(
@@ -478,6 +524,79 @@ class BaseAudioSession:
                 logger.exception("TTS synthesis failed for session %s sentence %s", self.session_id, sentence_index)
                 with self._lock:
                     self.tts_errors.append(f"sentence {sentence_index}: {exc}")
+
+    def _trim_tts_segment(self, path: Path, sentence: str) -> None:
+        """Trim baked-in silence from a synthesised segment to a fixed pad.
+
+        Segments are synthesised per clause so playback can start early, which
+        leaves each one padded with its own lead-in and lead-out silence. Played
+        back to back those pads stack into an audible stall at every comma. This
+        rewrites the file in place keeping a short, deliberate pad instead —
+        longer at a sentence end than mid-sentence, so prosody still breathes.
+
+        Failures are swallowed: a segment that cannot be parsed is simply left
+        as synthesised, since degraded pacing is preferable to a lost reply.
+
+        Args:
+            path: WAV file to rewrite in place.
+            sentence: Text the segment was synthesised from; its final
+                punctuation selects the trailing pad.
+        """
+        try:
+            with wave.open(str(path), "rb") as wav_in:
+                n_channels = wav_in.getnchannels()
+                sample_width = wav_in.getsampwidth()
+                frame_rate = wav_in.getframerate()
+                frames = wav_in.readframes(wav_in.getnframes())
+
+            # Only 16-bit mono is handled; anything else is left untouched
+            # rather than risking a corrupted rewrite.
+            if sample_width != 2 or n_channels != 1 or not frames:
+                return
+
+            samples = np.frombuffer(frames, dtype=np.int16)
+            if samples.size == 0:
+                return
+
+            envelope = np.abs(samples.astype(np.int32))
+            peak = int(envelope.max())
+            if peak <= 0:
+                return
+
+            floor = max(peak * config.DEFAULT_TTS_SILENCE_FLOOR, 1.0)
+            voiced = np.flatnonzero(envelope > floor)
+            if voiced.size == 0:
+                return
+
+            trailing_ms = (
+                config.DEFAULT_TTS_SENTENCE_PAD_MS
+                if sentence.rstrip()[-1:] in ".!?"
+                else config.DEFAULT_TTS_CLAUSE_PAD_MS
+            )
+            lead_pad = int(frame_rate * config.DEFAULT_TTS_LEAD_PAD_MS / 1000.0)
+            trail_pad = int(frame_rate * trailing_ms / 1000.0)
+
+            start = max(0, int(voiced[0]) - lead_pad)
+            end = min(samples.size, int(voiced[-1]) + 1 + trail_pad)
+            if end - start >= samples.size:
+                return
+
+            with wave.open(str(path), "wb") as wav_out:
+                wav_out.setnchannels(n_channels)
+                wav_out.setsampwidth(sample_width)
+                wav_out.setframerate(frame_rate)
+                wav_out.writeframes(samples[start:end].tobytes())
+
+            logger.debug(
+                "[TTS] session=%s trimmed %s: %.2fs -> %.2fs",
+                self.session_id, path.name,
+                samples.size / frame_rate, (end - start) / frame_rate,
+            )
+        except Exception:
+            logger.warning(
+                "[TTS] session=%s could not trim %s; using untrimmed audio",
+                self.session_id, path.name, exc_info=True,
+            )
 
     def _on_audio(self, indata, frames, time, status) -> None:
         del frames, time
@@ -503,13 +622,20 @@ class BaseAudioSession:
                 "[CHUNK] session=%s | flushing %.2fs of audio, diarization=%s",
                 self.session_id, duration, config.DEFAULT_DIARIZATION_ENABLED,
             )
+            _t_asr = time.monotonic()
             payload = self.client.transcribe_file(
                 temp_path,
                 language=self.request.language,
                 temperature=self.request.temperature,
                 diarization=config.DEFAULT_DIARIZATION_ENABLED,
                 session_id=self._analyzer_session_id,
+                speaker_scope_id=self.agent_session_id,
             )
+            # Accumulate genuine ASR time. Chunks are transcribed as they are
+            # flushed during capture, long before _finalize_run runs, so this
+            # is the only place the cost can be observed.
+            self._asr_ms_total += (time.monotonic() - _t_asr) * 1000
+            self._asr_chunks += 1
             # Latch the analyzer's assigned session id from the first
             # response so subsequent chunks reuse the same server-side
             # session (and its enrolled primary voice embedding).
@@ -580,6 +706,12 @@ class BaseAudioSession:
             if text:
                 # Strip Whisper hallucination tokens (e.g. [BLANK_AUDIO], [Music])
                 text = _WHISPER_JUNK.sub("", text).strip()
+            if text and _WHISPER_FILLER.fullmatch(text):
+                logger.info(
+                    "[CHUNK] session=%s | dropping filler-only transcription: %r",
+                    self.session_id, text[:60],
+                )
+                text = ""
             if text:
                 logger.info(
                     "[CHUNK] session=%s | appending to transcript: %r",
@@ -601,6 +733,8 @@ class BaseAudioSession:
         Primary speaker is determined in order of precedence:
         1. Analyzer-provided ``is_primary`` flag on the segment — honoured
            directly when present, so the analyzer's own enrollment logic wins.
+           Its verdict is authoritative in *both* directions: if it marks every
+           segment non-primary, the chunk is dropped outright.
         2. First-speaker lock-on — the first speaker label seen in this session
            is treated as the customer.  Every subsequent segment from that label
            is kept; any other label is unconditionally dropped.
@@ -617,9 +751,32 @@ class BaseAudioSession:
         primary_speaker_id: str | None = getattr(self, "_primary_speaker_id", None)
 
         # ── Honor analyzer-provided is_primary when present ──────────────────
+        # The flag only appears once the analyzer holds an enrolled reference
+        # voice for this conversation (scoped by speaker_scope_id), so when it
+        # is present its verdict is authoritative and must be honoured in BOTH
+        # directions. In particular "no segment is primary" means the analyzer
+        # has positively matched this speech against the enrolled customer and
+        # rejected it — the chunk must be dropped, never fall through to the
+        # first-speaker rule below (which would lock on to the interloper,
+        # because _primary_speaker_id resets on every new audio session).
         if any("is_primary" in s for s in segments):
             primary_segments = [s for s in segments if s.get("is_primary")]
-            if primary_segments:
+            if not primary_segments:
+                if not config.DEFAULT_SPEAKER_STRICT_DROP:
+                    logger.warning(
+                        "[SPEAKER-FILTER] session=%s | analyzer rejected all %d segment(s) but "
+                        "strict drop is DISABLED — falling back to heuristics",
+                        self.session_id, len(segments),
+                    )
+                else:
+                    logger.info(
+                        "[SPEAKER-FILTER] session=%s | analyzer rejected all %d segment(s) as "
+                        "non-primary — chunk DROPPED | text=%r",
+                        self.session_id, len(segments),
+                        " ".join(s.get("text", "") for s in segments).strip()[:120],
+                    )
+                    return ""
+            else:
                 # Also update / initialise the lock-on label from the first
                 # primary segment so label-based filtering stays in sync.
                 label = primary_segments[0].get("speaker", "")

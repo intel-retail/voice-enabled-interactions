@@ -1,0 +1,208 @@
+{
+  "label": "step4-latency-hint",
+  "prompt": "I would like to order one classic chicken burger",
+  "started_at": "2026-07-28T08:35:02.359859+00:00",
+  "finished_at": "2026-07-28T08:35:47.917771+00:00",
+  "config": {
+    "ovms_models": [
+      "OpenVINO/Qwen3-4B-int4-ov"
+    ],
+    "ovms_cmd": [
+      "--rest_port",
+      "8000",
+      "--port",
+      "9000",
+      "--source_model",
+      "OpenVINO/Qwen3-4B-int4-ov",
+      "--model_repository_path",
+      "/models",
+      "--task",
+      "text_generation",
+      "--tool_parser",
+      "hermes3",
+      "--target_device",
+      "GPU",
+      "--cache_dir",
+      "/tmp/ov_cache",
+      "--enable_prefix_caching",
+      "true",
+      "--cache_size",
+      "4",
+      "--max_num_seqs",
+      "4",
+      "--max_num_batched_tokens",
+      "4096",
+      "--plugin_config",
+      "{\"PERFORMANCE_HINT\":\"LATENCY\"}"
+    ],
+    "ovms_image": "openvino/model_server:latest-gpu",
+    "runs": 3,
+    "warmup": 1,
+    "reuse_session": false,
+    "tier": "AB"
+  },
+  "agent_runs": [
+    {
+      "run": 1,
+      "latency_ms": 4817.8,
+      "tool_calls": [],
+      "reply": "Great! I've added a Classic Chicken Burger (\u20b9169.00) to your order. Would you like to add Classic French Fries (Regular) (\u20b989) or Peri Peri Fries (Regular) (\u20b999)? Say \"confirm\" to place your order.",
+      "error": null,
+      "session_id": "bench-b9c013c3",
+      "llm1_ms": 1845.0,
+      "tool_ms": 76.0,
+      "llm2_ms": 2895.0,
+      "tool_name": "place_order"
+    },
+    {
+      "run": 2,
+      "latency_ms": 4750.2,
+      "tool_calls": [],
+      "reply": "Great! I've added a Classic Chicken Burger (\u20b9169.00) to your order. Would you like to add Classic French Fries (Regular) (\u20b989) or Peri Peri Fries (Regular) (\u20b999)? Say \"confirm\" to place your order.",
+      "error": null,
+      "session_id": "bench-f74a1751",
+      "llm1_ms": 1815.0,
+      "tool_ms": 68.0,
+      "llm2_ms": 2866.0,
+      "tool_name": "place_order"
+    },
+    {
+      "run": 3,
+      "latency_ms": 4746.2,
+      "tool_calls": [],
+      "reply": "Great! I've added a Classic Chicken Burger (\u20b9169.00) to your order. Would you like to add Classic French Fries (Regular) (\u20b989) or Peri Peri Fries (Regular) (\u20b999)? Say \"confirm\" to place your order.",
+      "error": null,
+      "session_id": "bench-d51f1a77",
+      "llm1_ms": 1804.0,
+      "tool_ms": 74.0,
+      "llm2_ms": 2866.0,
+      "tool_name": "place_order"
+    }
+  ],
+  "voice_runs": [
+    {
+      "run": 1,
+      "tts_synth_ms": 547.9,
+      "session_wall_ms": 8354.6,
+      "transcript": "I would like to order one classic chicken burger.",
+      "reply": "Great! I've added a Classic Chicken Burger (\u20b9169.00) to your order. Would you like to add Classic French Fries (Regular) (\u20b989) or Peri Peri Fries (Regular) (\u20b999)? Say \"confirm\" to place your order.",
+      "trace_wall_total_ms": 7260.6,
+      "trace_time_to_first_audio_ms": 4826.5,
+      "trace_asr_ms": 0.2,
+      "trace_agent_ttft_ms": 4826.4,
+      "trace_agent_total_ms": 7260.4,
+      "trace_tts_ms": 2433.8,
+      "error": null
+    },
+    {
+      "run": 2,
+      "tts_synth_ms": 547.9,
+      "session_wall_ms": 8099.9,
+      "transcript": "I would like to order one classic chicken burger.",
+      "reply": "Great! I've added a Classic Chicken Burger (\u20b9169.00) to your order. Would you like to add Classic French Fries (Regular) (\u20b989) or Peri Peri Fries (Regular) (\u20b999)? Say 'confirm' to place your order.",
+      "trace_wall_total_ms": 7117.3,
+      "trace_time_to_first_audio_ms": 4770.9,
+      "trace_asr_ms": 0.3,
+      "trace_agent_ttft_ms": 4770.9,
+      "trace_agent_total_ms": 7117.0,
+      "trace_tts_ms": 2346.0,
+      "error": null
+    },
+    {
+      "run": 3,
+      "tts_synth_ms": 547.9,
+      "session_wall_ms": 8101.2,
+      "transcript": "I would like to order one classic chicken burger.",
+      "reply": "Great! I've added a Classic Chicken Burger (\u20b9169.00) to your order. Would you like to add Classic French Fries (Regular) (\u20b989) or Peri Peri Fries (Regular) (\u20b999)? Say 'confirm' to place your order.",
+      "trace_wall_total_ms": 7158.9,
+      "trace_time_to_first_audio_ms": 4770.3,
+      "trace_asr_ms": 0.2,
+      "trace_agent_ttft_ms": 4770.3,
+      "trace_agent_total_ms": 7158.7,
+      "trace_tts_ms": 2388.3,
+      "error": null
+    }
+  ],
+  "summary": {
+    "agent_turn": {
+      "count": 3,
+      "min_ms": 4746.2,
+      "mean_ms": 4771.4,
+      "median_ms": 4750.2,
+      "max_ms": 4817.8
+    },
+    "agent_tool_calls": [
+      []
+    ],
+    "agent_split": {
+      "llm1": {
+        "count": 3,
+        "min_ms": 1804.0,
+        "mean_ms": 1821.3,
+        "median_ms": 1815.0,
+        "max_ms": 1845.0
+      },
+      "tool": {
+        "count": 3,
+        "min_ms": 68.0,
+        "mean_ms": 72.7,
+        "median_ms": 74.0,
+        "max_ms": 76.0
+      },
+      "llm2": {
+        "count": 3,
+        "min_ms": 2866.0,
+        "mean_ms": 2875.7,
+        "median_ms": 2866.0,
+        "max_ms": 2895.0
+      }
+    },
+    "agent_tool_invoked": [
+      "place_order"
+    ],
+    "voice_e2e": {
+      "session_wall": {
+        "count": 3,
+        "min_ms": 8099.9,
+        "mean_ms": 8185.2,
+        "median_ms": 8101.2,
+        "max_ms": 8354.6
+      },
+      "trace_turn_total": {
+        "count": 3,
+        "min_ms": 7117.3,
+        "mean_ms": 7178.9,
+        "median_ms": 7158.9,
+        "max_ms": 7260.6
+      },
+      "trace_time_to_first_audio": {
+        "count": 3,
+        "min_ms": 4770.3,
+        "mean_ms": 4789.2,
+        "median_ms": 4770.9,
+        "max_ms": 4826.5
+      },
+      "trace_asr": {
+        "count": 3,
+        "min_ms": 0.2,
+        "mean_ms": 0.2,
+        "median_ms": 0.2,
+        "max_ms": 0.3
+      },
+      "trace_agent_total": {
+        "count": 3,
+        "min_ms": 7117.0,
+        "mean_ms": 7178.7,
+        "median_ms": 7158.7,
+        "max_ms": 7260.4
+      },
+      "trace_tts": {
+        "count": 3,
+        "min_ms": 2346.0,
+        "mean_ms": 2389.4,
+        "median_ms": 2388.3,
+        "max_ms": 2433.8
+      }
+    }
+  }
+}

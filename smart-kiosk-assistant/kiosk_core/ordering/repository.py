@@ -68,6 +68,10 @@ class AbstractOrderRepository(ABC):
     async def delete_draft_orders(self, user_id: str) -> int:
         ...
 
+    @abstractmethod
+    async def consolidate_drafts(self, user_id: str) -> int | None:
+        ...
+
 
 # ---------------------------------------------------------------------------
 # SQLite implementations
@@ -255,3 +259,55 @@ class SqliteOrderRepository(AbstractOrderRepository):
             len(order_ids), user_id, order_ids,
         )
         return len(order_ids)
+
+    async def consolidate_drafts(self, user_id: str) -> int | None:
+        """Collapse every open draft order for a user into a single cart.
+
+        A customer must only ever have one live cart. If the agent creates a
+        second draft (e.g. it calls ``place_order`` again instead of
+        ``update_order`` after losing the ``order_id`` from its context), the
+        earlier draft is silently shadowed by ``get_current_draft`` and its
+        items would never be charged. This folds all extra drafts into the
+        oldest one, merging duplicate line items by quantity.
+
+        Args:
+            user_id: Owner of the carts to consolidate.
+
+        Returns:
+            The surviving draft ``order_id``, or ``None`` if the user has no
+            open draft. Does not commit — the caller owns the transaction.
+        """
+        cursor = await self._db.execute(
+            "SELECT order_id FROM orders WHERE user_id = ? AND status = 'draft' ORDER BY order_id ASC",
+            (user_id,),
+        )
+        order_ids = [r[0] for r in await cursor.fetchall()]
+        if not order_ids:
+            return None
+
+        target_id, extra_ids = order_ids[0], order_ids[1:]
+        if not extra_ids:
+            return target_id
+
+        placeholders = ",".join("?" * len(extra_ids))
+        cursor = await self._db.execute(
+            f"SELECT product_id, quantity, price FROM order_items WHERE order_id IN ({placeholders})",
+            extra_ids,
+        )
+        for product_id, quantity, price in await cursor.fetchall():
+            await self.add_item(
+                target_id, OrderItemIn(product_id=product_id, quantity=quantity), price
+            )
+
+        await self._db.execute(
+            f"DELETE FROM order_items WHERE order_id IN ({placeholders})", extra_ids
+        )
+        await self._db.execute(
+            f"DELETE FROM orders WHERE order_id IN ({placeholders})", extra_ids
+        )
+        await self.update_total(target_id)
+        logger.warning(
+            "[ORDER-REPO] Consolidated split cart for user=%s: merged %s into order_id=%d",
+            user_id, extra_ids, target_id,
+        )
+        return target_id

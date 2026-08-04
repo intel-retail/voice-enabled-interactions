@@ -33,11 +33,45 @@ storage:
 
 retrieval:
   top_k: 3
-  fetch_k: 5
+  # Candidates pulled by ANN and handed to the cross-encoder. This must be
+  # comfortably larger than top_k: the reranker can only pick from what ANN
+  # surfaces, so a small fetch_k silently caps recall no matter how the
+  # threshold is tuned. Measured on the QuickBite KB over 8 queries:
+  #   fetch_k= 5 -> rerank  57ms, 6/8 questions answerable (best score -7.88)
+  #   fetch_k=10 -> rerank  98ms, 8/8 questions answerable (best score -6.49)
+  #   fetch_k=20 -> rerank 186ms, 8/8 (no further recall gain)
+  # 10 is the knee: +41ms on a ~9.5s turn (0.4%) to recover 2 of 8 questions.
+  fetch_k: 10
   # Hard cap on chars for (retrieved context + runtime context + recent
   # conversation history) combined. Question is never truncated.
   max_context_chars: 7000
   score_threshold: null
+  # Minimum cross-encoder relevance logit a passage must reach to be used as
+  # context. The reranker emits an UNCALIBRATED logit, not a probability, and
+  # its absolute range depends on the corpus. Without this floor top_k passages
+  # are returned regardless of score, so an unrelated section is handed to the
+  # LLM as authoritative fact. Set to null to disable filtering.
+  #
+  # Calibrated against the QuickBite KB (29 chunks) with 20 in-domain and
+  # 10 out-of-domain queries. bge-reranker-base scores this corpus far more
+  # negatively than the usual "~+1 = relevant" intuition, because the chunks
+  # are menu//list fragments rather than prose answers:
+  #
+  #   threshold   in-domain kept   out-of-domain leaked
+  #      0.0          4/20                 0/10     <- previous value
+  #     -5.0         16/20                 0/10
+  #     -6.0         17/20                 1/10
+  #     -7.0         20/20                 2/10     <- chosen
+  #
+  # At 0.0 the service dropped 80% of answerable questions and replied
+  # "we don't have that information" about facts present in the KB
+  # (restaurant name, opening hours, breakfast times, parking, payment).
+  # The in/out distributions overlap, so no threshold is perfect; -7.0 is
+  # chosen because the harms are asymmetric. A false negative is a visible
+  # product defect (the kiosk denies knowing its own name), whereas a false
+  # positive only hands unrelated menu text to a prompt that is already
+  # instructed to answer strictly from context, and which then declines.
+  rerank_score_threshold: -7.0
   # Cross-encoder reranker. When enabled, fetch_k docs are pulled by ANN,
   # rescored jointly with the query, and the top_k by rerank score are kept.
   reranker:

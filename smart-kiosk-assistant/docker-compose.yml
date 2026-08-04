@@ -39,22 +39,20 @@ services:
       # Sample mode uses the existing MEDIA_FILES / MEDIA_FILE branches.
       # The bundled clips are mounted from ./Sample_data into /media.
       MEDIA_FILES:    ${MEDIA_FILES:-sample_1.mp4,sample_2.mp4}
-      # Live mode uses the same configurable device path for both the mount
-      # and the ffmpeg input. Sample mode ignores this value.
-      CAMERA_DEVICE:  ${CAMERA_DEVICE:-/dev/video0}
+      # Live mode reads from this V4L2 node. Sample mode ignores this value.
+      CAMERA_DEVICE:  ${CAMERA_DEVICE:-}
       STREAM_NAME:    ${STREAM_NAME:-queue}
       RTSP_PORT:      "8554"
       LOOP_COUNT:     "-1"      # -1 = infinite loop for a continuous feed
       BLANK_DURATION: "0"       # seconds of black frames between loops
       NO_PROXY: "localhost,127.0.0.1,rtsp-streamer,queue-management,kiosk-core"
       no_proxy: "localhost,127.0.0.1,rtsp-streamer,queue-management,kiosk-core"
-    # Device mapping is required for RTSP_SOURCE_MODE=live. Docker Compose does
-    # not support conditional device mappings, so this is always present. In
-    # sample mode, the device is not accessed by ffmpeg (sample files are used),
-    # so no permission errors occur. In live mode, this grants the container
-    # read access to the V4L2 camera device.
+    # Compose cannot conditionally include devices. RTSP_CAMERA_DEVICE is
+    # therefore resolved outside compose:
+    #   sample mode -> /dev/null (safe on systems without a camera)
+    #   live mode   -> CAMERA_DEVICE (validated by check-env/start.sh)
     devices:
-      - ${CAMERA_DEVICE:-/dev/video0}:${CAMERA_DEVICE:-/dev/video0}
+      - ${RTSP_CAMERA_DEVICE:-/dev/null}:${RTSP_CAMERA_DEVICE:-/dev/null}
     group_add:
       - video
     volumes:
@@ -168,10 +166,31 @@ services:
       - "8010:8010"
     devices:
       - /dev/dri:/dev/dri
+      # Intel NPU passthrough. Defaults to /dev/null so hosts without an NPU
+      # (and CI runners) start unchanged; set ACCEL_MOUNT_PATH=/dev/accel/accel0
+      # in .env to expose it. Mirrors the upstream edge-ai-libraries pattern.
+      - ${ACCEL_MOUNT_PATH:-/dev/null}:/dev/accel/accel0
     group_add:
       - video
       - "${RENDER_GID:-992}"
     environment:
+      # Required for Level Zero to enumerate the Intel NPU. Harmless when no
+      # NPU node is mapped — OpenVINO then reports CPU/GPU only.
+      ZE_ENABLE_ALT_DRIVERS: libze_intel_npu.so
+      # ASR placement. Measured on Core Ultra 7 356H across 25 real 16 kHz
+      # kiosk chunks (ov_genai whisper-base, language forced to en):
+      #   CPU 284 ms | GPU 57 ms | NPU 58 ms  (median)
+      # NPU gives GPU-class ASR latency while leaving the whole iGPU to the
+      # LLM, but only applies when ASR_PROVIDER=openvino.
+      AUDIO_ANALYZER__MODELS__ASR__DEVICE: ${ASR_DEVICE:-CPU}
+      # Default stays on the PyTorch "openai" provider: it is the only path
+      # exposing no_speech_prob/avg_logprob, which the hallucination filter
+      # needs. ov_genai is ~5x faster but transcribes pure silence as "you".
+      AUDIO_ANALYZER__MODELS__ASR__PROVIDER: ${ASR_PROVIDER:-openai}
+      # Whisper mis-detects language on short kiosk chunks and replies in
+      # Spanish; forcing en cut WER 11.0% -> 7.0% on every device. The language
+      # is a per-request parameter, so it is set by kiosk-core
+      # (KIOSK_CORE_ASR_LANGUAGE), not by audio-analyzer config.
       # Point HF cache under the same parent as ~/.cache/whisper so a single
       # ./.cache mount persists every model cache the service uses
       # (huggingface, openai-whisper, torch hub, etc.).
@@ -216,7 +235,7 @@ services:
     restart: unless-stopped
 
   text-to-speech:
-    image: ${REGISTRY:-intel}/text-to-speech:2026.1.0
+    image: ${REGISTRY:-intel}/text-to-speech:2026.2.0-rc2
     container_name: text-to-speech
     user: "1000:1000"
     ports:
@@ -275,6 +294,13 @@ services:
       AGENT_LLM_URL:   http://ovms-llm:8000/v3
       AGENT_LLM_MODEL: ${OVMS_MODEL_NAME:-OpenVINO/Qwen3-4B-int4-ov}
       AGENT_MCP_CONFIG: /app/rag-service/agentic/resources/mcp_servers.json
+      # Release complete sentences to kiosk-core as they are generated rather
+      # than after the whole turn, but only for turns the agent's whole-reply
+      # guards provably cannot rewrite (see _SentenceGate in ordering_agent.py).
+      # Must agree with KIOSK_CORE_AGENT_STREAM_ENABLED on kiosk-core; either
+      # flag alone falls back to the buffered /api/v1/agent/chat path.
+      # Set AGENT_STREAM_SENTENCES=false to revert with a restart, no rebuild.
+      AGENT_STREAM_SENTENCES: ${AGENT_STREAM_SENTENCES:-true}
       # Embedding + reranker models are loaded in-process via OpenVINO at
       # startup (config.yaml pins device: GPU for both). Override with
       # TARGET_DEVICE=CPU (same variable used for the ovms-llm container) so
@@ -282,6 +308,16 @@ services:
       # with "[GPU] no supported devices found".
       SMART_KIOSK_RAG__MODELS__EMBEDDING__DEVICE: ${TARGET_DEVICE:-GPU}
       SMART_KIOSK_RAG__RETRIEVAL__RERANKER__DEVICE: ${TARGET_DEVICE:-GPU}
+      # Retrieval recall knobs. Defaults live in rag-service/config.yaml and
+      # are calibrated against the QuickBite KB; override per-deployment when
+      # the knowledge base changes materially, since the reranker's logit
+      # range is corpus-dependent and must be re-measured.
+      SMART_KIOSK_RAG__RETRIEVAL__RERANK_SCORE_THRESHOLD: ${RAG_RERANK_THRESHOLD:--7.0}
+      SMART_KIOSK_RAG__RETRIEVAL__FETCH_K: ${RAG_FETCH_K:-10}
+      # Context budget handed to the agent's reply call. This is the effective
+      # brake on spoken answer length: the model paraphrases whatever it is
+      # given, so 2000 chars of context produced a 20-second spoken reply.
+      RAG_MAX_CONTEXT_CHARS: ${RAG_MAX_CONTEXT_CHARS:-1800}
       # Bypass corporate proxy for all intra-cluster traffic so that
       # requests to ovms-llm, kiosk-core, etc. go directly on the
       # Docker bridge network instead of through the Intel proxy.
@@ -343,6 +379,11 @@ services:
       --tool_parser hermes3
       --target_device ${TARGET_DEVICE:-GPU}
       --cache_dir /tmp/ov_cache
+      --enable_prefix_caching ${OVMS_PREFIX_CACHING:-true}
+      --cache_size ${OVMS_KV_CACHE_GB:-4}
+      --max_num_seqs ${OVMS_MAX_NUM_SEQS:-4}
+      --max_num_batched_tokens ${OVMS_MAX_BATCHED_TOKENS:-4096}
+      --plugin_config '{"PERFORMANCE_HINT":"LATENCY"}'
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/v3/models"]
       interval: 20s
@@ -372,6 +413,14 @@ services:
       # Ordering & agent routing
       KIOSK_CORE_ORDERING_ENABLED: "true"
       KIOSK_CORE_AGENT_URL:        http://rag-service:8020/api/v1/agent/chat
+      # Consume the agent's streaming endpoint so TTS synthesis overlaps with
+      # generation instead of waiting for the whole turn. Measured on a
+      # multi-sentence menu reply: time-to-first-audio 6.8s -> 5.2s, turn total
+      # 12.9s -> 11.1s. Single-sentence replies see little change, since most
+      # of the latency is tool calls and retrieval rather than token emission.
+      # Driven by the same var as AGENT_STREAM_SENTENCES on rag-service; the
+      # two must agree, and either alone falls back to the buffered path.
+      KIOSK_CORE_AGENT_STREAM_ENABLED: ${AGENT_STREAM_SENTENCES:-true}
       KIOSK_CORE_DB_PATH:          /app/data/kiosk.db
       KIOSK_CORE_PRODUCTS_YAML:    /app/configs/ordering/products.yaml
       KIOSK_CORE_UPSELL_RULES_YAML: /app/configs/ordering/upsell_rules.yaml

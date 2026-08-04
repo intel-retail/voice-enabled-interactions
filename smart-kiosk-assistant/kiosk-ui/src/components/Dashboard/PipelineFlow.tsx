@@ -67,7 +67,9 @@ const STAGES: StageConfig[] = [
 interface LatencyMap {
   asr: number | null;
   retrieval: number | null;         // null when not invoked this turn
-  llm: number | null;               // agent TTFT — perceived latency
+  llm: number | null;               // genuine cumulative LLM time this turn
+  llmCalls: number;                 // number of LLM round-trips this turn
+  agentOverhead: number | null;     // agent round-trip minus LLM time (tools + framework)
   tts: number | null;
   retrievalInvoked: boolean;
 }
@@ -79,7 +81,13 @@ function extractLatencies(kpis: KpiBundle): LatencyMap {
     return {
       asr:              trace.asr?.ms ?? null,
       retrieval:        trace.agent?.retrieval?.invoked ? (trace.agent.retrieval.ms ?? null) : null,
-      llm:              trace.agent?.ttft_ms ?? null,
+      // Prefer genuine LLM time. Fall back to the agent round-trip only when
+      // the service did not report it (older rag-service builds).
+      llm:              trace.agent?.llm?.ms ?? trace.agent?.ttft_ms ?? null,
+      llmCalls:         trace.agent?.llm?.calls ?? 0,
+      agentOverhead:    (trace.agent?.llm?.ms != null && trace.agent?.ttft_ms != null)
+                          ? Math.max(0, trace.agent.ttft_ms - trace.agent.llm.ms)
+                          : null,
       tts:              trace.tts?.ms ?? null,
       retrievalInvoked: trace.agent?.retrieval?.invoked ?? false,
     };
@@ -96,6 +104,8 @@ function extractLatencies(kpis: KpiBundle): LatencyMap {
     asr:              n(ap.last_ms),
     retrieval:        n(retr.last_ms),
     llm:              n(llm.last_ms),
+    llmCalls:         0,
+    agentOverhead:    null,
     tts:              n(tp.last_ms),
     retrievalInvoked: true,   // legacy: always show when present
   };
@@ -233,7 +243,14 @@ export function PipelineFlow({ kpis, phase }: PipelineFlowProps) {
                 `}
                 style={isActive ? { boxShadow: `0 0 16px 2px ${stage.glowColor}` } : undefined}
                 title={stage.id === 'retrieval' && !invoked ? 'Not invoked this turn (ordering path)' :
-                       stage.id === 'llm' ? 'Time to first token (TTFT)' : undefined}
+                       stage.id === 'llm'
+                         ? (lats.llmCalls > 0
+                             ? `Cumulative LLM time across ${lats.llmCalls} round-trip(s)`
+                               + (lats.agentOverhead != null
+                                   ? ` · +${Math.round(lats.agentOverhead)} ms agent/tool overhead`
+                                   : '')
+                             : 'Agent round-trip (LLM time not reported)')
+                         : undefined}
               >
                 {/* Device badge top-right */}
                 {badge && invoked && (
@@ -298,7 +315,13 @@ export function PipelineFlow({ kpis, phase }: PipelineFlowProps) {
       {/* LLM label clarification when turn trace is available */}
       {trace && (
         <p className="text-[9px] text-gray-400 text-right">
-          LLM = time-to-first-token · E2E = measured wall-clock (TTS overlaps LLM)
+          {lats.llmCalls > 0
+            ? `LLM = cumulative model time (${lats.llmCalls} call${lats.llmCalls > 1 ? 's' : ''})`
+            : 'LLM = agent round-trip'}
+          {lats.agentOverhead != null
+            ? ` · agent/tool overhead ${Math.round(lats.agentOverhead)} ms`
+            : ''}
+          {' · E2E = measured wall-clock, capture → last audio (TTS overlaps LLM)'}
         </p>
       )}
     </div>

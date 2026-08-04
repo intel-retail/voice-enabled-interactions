@@ -3,12 +3,20 @@ smart-kiosk-assistant/rag-service/.venv
 # Node.js dependencies (installed via npm/yarn, never committed)
 node_modules/
 .github/copilot-instructions.md
+# Local-only assistant scaffolding and scratch notes, same rationale as the
+# copilot instructions above: working artefacts, not project deliverables.
+.github/skills/
+issues/
 
 # Local-only MCP config (contains credentials — do not commit)
 .mcp.json
 
 # Secrets — never commit
 smart-kiosk-assistant/.env
+# Copies and backups of the env file carry the same live credentials
+# (a real HF_TOKEN was found in .env.backup, which this pattern now covers).
+smart-kiosk-assistant/.env.*
+!smart-kiosk-assistant/.env.example
 
 # Runtime-generated metrics logs
 smart-kiosk-assistant/metrics/

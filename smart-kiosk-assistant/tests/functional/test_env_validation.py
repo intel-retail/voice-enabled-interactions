@@ -241,10 +241,11 @@ class TestDockerComposeEnvCompleteness:
 
     # Variables that are intentionally injected at runtime (not in .env.example)
     RUNTIME_ONLY = {
-        "STREAM_NAME",      # set per rtsp-streamer container
-        "RENDER_GID",       # documented but may be omitted on CPU-only setups
-        "IDENTITY",         # optional feature flag, default false
-        "TAG",              # derived from RELEASE_TAG in Makefile
+        "STREAM_NAME",           # set per rtsp-streamer container
+        "RENDER_GID",            # documented but may be omitted on CPU-only setups
+        "IDENTITY",              # optional feature flag, default false
+        "TAG",                   # derived from RELEASE_TAG in Makefile
+        "RTSP_CAMERA_DEVICE",    # computed by Makefile based on RTSP_SOURCE_MODE and CAMERA_DEVICE
     }
 
     @pytest.mark.tier1

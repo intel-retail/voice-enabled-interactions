@@ -147,12 +147,32 @@ class OrderingService:
     # ------------------------------------------------------------------
 
     async def place_order(self, request: CreateOrderRequest) -> Order:
-        """Create a new draft order with the given items."""
+        """Add items to the customer's cart, creating it only if none is open.
+
+        A customer has at most one live cart per visit. The agent cannot be
+        relied on to remember an ``order_id`` across turns — unrelated Q&A
+        turns push it out of the replayed history window — so it may call this
+        instead of :meth:`update_order_items` for a follow-up item. Reusing the
+        open draft here makes the two paths converge and prevents a second cart
+        from shadowing (and silently dropping) the first.
+
+        Args:
+            request: Target user and the items to add.
+
+        Returns:
+            The resulting draft order.
+
+        Raises:
+            ValueError: If any requested ``product_id`` does not exist.
+        """
         async with get_db() as db:
             prod_repo = SqliteProductRepository(db)
             order_repo = SqliteOrderRepository(db)
 
-            order_id = await order_repo.create(request.user_id)
+            order_id = await order_repo.consolidate_drafts(request.user_id)
+            reused = order_id is not None
+            if order_id is None:
+                order_id = await order_repo.create(request.user_id)
 
             for item_in in request.items:
                 product = await prod_repo.get(item_in.product_id)
@@ -163,7 +183,11 @@ class OrderingService:
             total = await order_repo.update_total(order_id)
             await db.commit()
 
-        logger.info("[SERVICE] Placed order_id=%d user=%s total=%.2f", order_id, request.user_id, total)
+        logger.info(
+            "[SERVICE] %s order_id=%d user=%s total=%.2f",
+            "Added to existing" if reused else "Placed",
+            order_id, request.user_id, total,
+        )
         order = await self.get_order(order_id)
         return order  # type: ignore[return-value]
 

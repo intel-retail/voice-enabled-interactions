@@ -1,0 +1,129 @@
+{
+  "label": "step9-int-prices",
+  "prompt": "I would like to order one classic chicken burger",
+  "started_at": "2026-07-28T09:19:17.069785+00:00",
+  "finished_at": "2026-07-28T09:19:34.060636+00:00",
+  "config": {
+    "ovms_models": [
+      "OpenVINO/Qwen3-4B-int4-ov"
+    ],
+    "ovms_cmd": [
+      "--rest_port",
+      "8000",
+      "--port",
+      "9000",
+      "--source_model",
+      "OpenVINO/Qwen3-4B-int4-ov",
+      "--model_repository_path",
+      "/models",
+      "--task",
+      "text_generation",
+      "--tool_parser",
+      "hermes3",
+      "--target_device",
+      "GPU",
+      "--cache_dir",
+      "/tmp/ov_cache",
+      "--enable_prefix_caching",
+      "true",
+      "--cache_size",
+      "4",
+      "--max_num_seqs",
+      "4",
+      "--max_num_batched_tokens",
+      "4096",
+      "--plugin_config",
+      "{\"PERFORMANCE_HINT\":\"LATENCY\"}"
+    ],
+    "ovms_image": "openvino/model_server:latest-gpu",
+    "runs": 3,
+    "warmup": 1,
+    "reuse_session": false,
+    "tier": "A"
+  },
+  "agent_runs": [
+    {
+      "run": 1,
+      "latency_ms": 3897.5,
+      "tool_calls": [
+        "place_order"
+      ],
+      "reply": "Great! I've added a Classic Chicken Burger (\u20b9169) to your order. Would you like to add Classic French Fries (Regular) (\u20b989)? Say 'confirm' to place your order.",
+      "error": null,
+      "session_id": "bench-ae5260df",
+      "llm1_ms": 1770.0,
+      "tool_ms": 81.0,
+      "llm2_ms": 2045.0,
+      "tool_name": "place_order"
+    },
+    {
+      "run": 2,
+      "latency_ms": 3882.7,
+      "tool_calls": [
+        "place_order"
+      ],
+      "reply": "Great! I've added a Classic Chicken Burger (\u20b9169) to your order. Would you like to add Classic French Fries (Regular) (\u20b989)? Say 'confirm' to place your order.",
+      "error": null,
+      "session_id": "bench-40cc57fc",
+      "llm1_ms": 1786.0,
+      "tool_ms": 63.0,
+      "llm2_ms": 2032.0,
+      "tool_name": "place_order"
+    },
+    {
+      "run": 3,
+      "latency_ms": 3861.4,
+      "tool_calls": [
+        "place_order"
+      ],
+      "reply": "Great! I've added a Classic Chicken Burger (\u20b9169) to your order. Would you like to add Classic French Fries (Regular) (\u20b989)? Say 'confirm' to place your order.",
+      "error": null,
+      "session_id": "bench-b0a4658f",
+      "llm1_ms": 1775.0,
+      "tool_ms": 64.0,
+      "llm2_ms": 2021.0,
+      "tool_name": "place_order"
+    }
+  ],
+  "voice_runs": [],
+  "summary": {
+    "agent_turn": {
+      "count": 3,
+      "min_ms": 3861.4,
+      "mean_ms": 3880.5,
+      "median_ms": 3882.7,
+      "max_ms": 3897.5
+    },
+    "agent_tool_calls": [
+      [
+        "place_order"
+      ]
+    ],
+    "agent_split": {
+      "llm1": {
+        "count": 3,
+        "min_ms": 1770.0,
+        "mean_ms": 1777.0,
+        "median_ms": 1775.0,
+        "max_ms": 1786.0
+      },
+      "tool": {
+        "count": 3,
+        "min_ms": 63.0,
+        "mean_ms": 69.3,
+        "median_ms": 64.0,
+        "max_ms": 81.0
+      },
+      "llm2": {
+        "count": 3,
+        "min_ms": 2021.0,
+        "mean_ms": 2032.7,
+        "median_ms": 2032.0,
+        "max_ms": 2045.0
+      }
+    },
+    "agent_tool_invoked": [
+      "place_order"
+    ]
+  }
+}

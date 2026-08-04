@@ -1,4 +1,5 @@
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+import asyncio
 import logging
 
 from fastapi import FastAPI
@@ -16,6 +17,17 @@ from utils.preload_models import preload_models
 
 setup_logger()
 logger = logging.getLogger(__name__)
+
+
+async def _warmup_agent_tools() -> None:
+    """Background task: poll kiosk-core until MCP tools are discovered."""
+    try:
+        from agentic.ordering_agent import get_ordering_agent
+        await get_ordering_agent().warmup()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("[STARTUP] Agent MCP warmup failed (non-fatal): %s", exc)
 
 
 @asynccontextmanager
@@ -39,9 +51,16 @@ async def lifespan(app: FastAPI):
             raise
         logger.warning("[STARTUP] OrderingAgent bootstrap failed (non-fatal): %s", exc)
 
+    # Keep polling kiosk-core for MCP tools in the background so the first
+    # customer turn never pays for tool discovery + agent rebuild (~1.3 s).
+    warmup_task = asyncio.create_task(_warmup_agent_tools())
+
     try:
         yield
     finally:
+        warmup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await warmup_task
         close_shared_pipeline()
 
 

@@ -1,0 +1,411 @@
+{
+  "label": "tts-voice-ryan-bdl",
+  "timestamp": "2026-07-29T06:22:37.990876+00:00",
+  "model_info": {
+    "implementation": "speecht5",
+    "model": "microsoft/speecht5_tts",
+    "runtime": "openvino",
+    "variant": "custom_voice",
+    "device": "CPU",
+    "dtype": "int8",
+    "default_speaker": "Ryan",
+    "default_language": "English",
+    "supported_speakers": [
+      "Ryan",
+      "Miles",
+      "Aaron",
+      "Nora",
+      "Elena",
+      "Kabir",
+      "Angus"
+    ],
+    "supported_languages": [
+      "English"
+    ],
+    "model_source": "models/openvino/microsoft_speecht5_tts__int8",
+    "local_checkpoint": "models/openvino/microsoft_speecht5_tts__int8",
+    "voices": [
+      {
+        "name": "Ryan",
+        "speaker_id": "bdl",
+        "description": "US English male, bright and projecting"
+      },
+      {
+        "name": "Miles",
+        "speaker_id": "jmk",
+        "description": "Canadian English male, full and even"
+      },
+      {
+        "name": "Aaron",
+        "speaker_id": "rms",
+        "description": "US English male, deep and measured"
+      },
+      {
+        "name": "Nora",
+        "speaker_id": "clb",
+        "description": "US English female, warm and rounded"
+      },
+      {
+        "name": "Elena",
+        "speaker_id": "slt",
+        "description": "US English female, light and soft"
+      },
+      {
+        "name": "Kabir",
+        "speaker_id": "ksp",
+        "description": "Indian English male, crisp"
+      },
+      {
+        "name": "Angus",
+        "speaker_id": "awb",
+        "description": "Scottish English male, slow paced"
+      }
+    ]
+  },
+  "request": {
+    "model": "qwen-tts",
+    "language": "English",
+    "voice": null,
+    "instructions": null
+  },
+  "summary": {
+    "tier_a": {
+      "cold_ms": 118.9,
+      "latency_ms": {
+        "count": 15,
+        "min": 67.9,
+        "p50": 422.4,
+        "p95": 2404.2,
+        "max": 2404.2,
+        "mean": 704.5
+      },
+      "rtf": {
+        "count": 15,
+        "min": 0.1,
+        "p50": 0.2,
+        "p95": 0.2,
+        "max": 0.2,
+        "mean": 0.2
+      },
+      "by_bucket": {
+        "short": {
+          "latency_ms": {
+            "count": 6,
+            "min": 67.9,
+            "p50": 123.3,
+            "p95": 222.1,
+            "max": 222.1,
+            "mean": 127.3
+          },
+          "audio_seconds": 0.752,
+          "rtf": 0.172,
+          "chars": 12.5
+        },
+        "medium": {
+          "latency_ms": {
+            "count": 6,
+            "min": 415.3,
+            "p50": 591.9,
+            "p95": 804.5,
+            "max": 804.5,
+            "mean": 592.4
+          },
+          "audio_seconds": 3.68,
+          "rtf": 0.16,
+          "chars": 69.0
+        },
+        "long": {
+          "latency_ms": {
+            "count": 3,
+            "min": 1911.2,
+            "p50": 1934.0,
+            "p95": 2404.2,
+            "max": 2404.2,
+            "mean": 2083.1
+          },
+          "audio_seconds": 9.888,
+          "rtf": 0.211,
+          "chars": 185.0
+        }
+      },
+      "errors": []
+    },
+    "tier_b": {
+      "ttfa_ms": {
+        "count": 3,
+        "min": 401.4,
+        "p50": 401.6,
+        "p95": 416.3,
+        "max": 416.3,
+        "mean": 406.4
+      },
+      "total_ms": {
+        "count": 3,
+        "min": 1327.2,
+        "p50": 1329.9,
+        "p95": 1406.3,
+        "max": 1406.3,
+        "mean": 1354.5
+      },
+      "sentences": 3,
+      "errors": []
+    },
+    "tier_c": {
+      "concurrency": 4,
+      "latency_ms": {
+        "count": 4,
+        "min": 406.5,
+        "p50": 999.0,
+        "p95": 1605.9,
+        "max": 1605.9,
+        "mean": 1002.6
+      },
+      "errors": []
+    }
+  },
+  "tier_a": [
+    {
+      "run": 1,
+      "bucket": "short",
+      "text": "Sure.",
+      "chars": 5,
+      "latency_ms": 87.8,
+      "audio_seconds": 0.416,
+      "rtf": 0.211,
+      "wav_bytes": 13356,
+      "error": null
+    },
+    {
+      "run": 1,
+      "bucket": "short",
+      "text": "Added to your order.",
+      "chars": 20,
+      "latency_ms": 222.1,
+      "audio_seconds": 1.088,
+      "rtf": 0.204,
+      "wav_bytes": 34860,
+      "error": null
+    },
+    {
+      "run": 1,
+      "bucket": "medium",
+      "text": "I have added one Classic Chicken Burger to your order.",
+      "chars": 54,
+      "latency_ms": 459.4,
+      "audio_seconds": 2.752,
+      "rtf": 0.167,
+      "wav_bytes": 88108,
+      "error": null
+    },
+    {
+      "run": 1,
+      "bucket": "medium",
+      "text": "Your order total is one hundred and sixty nine rupees. Would you like anything else?",
+      "chars": 84,
+      "latency_ms": 804.5,
+      "audio_seconds": 4.608,
+      "rtf": 0.175,
+      "wav_bytes": 147500,
+      "error": null
+    },
+    {
+      "run": 1,
+      "bucket": "long",
+      "text": "I have added one Classic Chicken Burger to your order. Would you like to add a medium Cold Coffee for fifty nine rupees? Your order total is currently one hundred and sixty nine rupees.",
+      "chars": 185,
+      "latency_ms": 2404.2,
+      "audio_seconds": 9.888,
+      "rtf": 0.243,
+      "wav_bytes": 316460,
+      "error": null
+    },
+    {
+      "run": 2,
+      "bucket": "short",
+      "text": "Sure.",
+      "chars": 5,
+      "latency_ms": 67.9,
+      "audio_seconds": 0.416,
+      "rtf": 0.163,
+      "wav_bytes": 13356,
+      "error": null
+    },
+    {
+      "run": 2,
+      "bucket": "short",
+      "text": "Added to your order.",
+      "chars": 20,
+      "latency_ms": 159.4,
+      "audio_seconds": 1.088,
+      "rtf": 0.146,
+      "wav_bytes": 34860,
+      "error": null
+    },
+    {
+      "run": 2,
+      "bucket": "medium",
+      "text": "I have added one Classic Chicken Burger to your order.",
+      "chars": 54,
+      "latency_ms": 422.4,
+      "audio_seconds": 2.752,
+      "rtf": 0.154,
+      "wav_bytes": 88108,
+      "error": null
+    },
+    {
+      "run": 2,
+      "bucket": "medium",
+      "text": "Your order total is one hundred and sixty nine rupees. Would you like anything else?",
+      "chars": 84,
+      "latency_ms": 724.4,
+      "audio_seconds": 4.608,
+      "rtf": 0.157,
+      "wav_bytes": 147500,
+      "error": null
+    },
+    {
+      "run": 2,
+      "bucket": "long",
+      "text": "I have added one Classic Chicken Burger to your order. Would you like to add a medium Cold Coffee for fifty nine rupees? Your order total is currently one hundred and sixty nine rupees.",
+      "chars": 185,
+      "latency_ms": 1911.2,
+      "audio_seconds": 9.888,
+      "rtf": 0.193,
+      "wav_bytes": 316460,
+      "error": null
+    },
+    {
+      "run": 3,
+      "bucket": "short",
+      "text": "Sure.",
+      "chars": 5,
+      "latency_ms": 68.0,
+      "audio_seconds": 0.416,
+      "rtf": 0.163,
+      "wav_bytes": 13356,
+      "error": null
+    },
+    {
+      "run": 3,
+      "bucket": "short",
+      "text": "Added to your order.",
+      "chars": 20,
+      "latency_ms": 158.8,
+      "audio_seconds": 1.088,
+      "rtf": 0.146,
+      "wav_bytes": 34860,
+      "error": null
+    },
+    {
+      "run": 3,
+      "bucket": "medium",
+      "text": "I have added one Classic Chicken Burger to your order.",
+      "chars": 54,
+      "latency_ms": 415.3,
+      "audio_seconds": 2.752,
+      "rtf": 0.151,
+      "wav_bytes": 88108,
+      "error": null
+    },
+    {
+      "run": 3,
+      "bucket": "medium",
+      "text": "Your order total is one hundred and sixty nine rupees. Would you like anything else?",
+      "chars": 84,
+      "latency_ms": 728.2,
+      "audio_seconds": 4.608,
+      "rtf": 0.158,
+      "wav_bytes": 147500,
+      "error": null
+    },
+    {
+      "run": 3,
+      "bucket": "long",
+      "text": "I have added one Classic Chicken Burger to your order. Would you like to add a medium Cold Coffee for fifty nine rupees? Your order total is currently one hundred and sixty nine rupees.",
+      "chars": 185,
+      "latency_ms": 1934.0,
+      "audio_seconds": 9.888,
+      "rtf": 0.196,
+      "wav_bytes": 316460,
+      "error": null
+    }
+  ],
+  "tier_a_cold": {
+    "run": 0,
+    "bucket": "cold",
+    "text": "Sure.",
+    "chars": 5,
+    "latency_ms": 118.9,
+    "audio_seconds": 0.416,
+    "rtf": 0.286,
+    "wav_bytes": 13356,
+    "error": null
+  },
+  "tier_b": [
+    {
+      "run": 1,
+      "sentences": 3,
+      "ttfa_ms": 416.3,
+      "total_ms": 1406.3,
+      "audio_seconds": 8.96,
+      "per_sentence_ms": [
+        416.2,
+        491.7,
+        498.2
+      ],
+      "error": null
+    },
+    {
+      "run": 2,
+      "sentences": 3,
+      "ttfa_ms": 401.4,
+      "total_ms": 1327.2,
+      "audio_seconds": 8.96,
+      "per_sentence_ms": [
+        401.4,
+        441.4,
+        484.3
+      ],
+      "error": null
+    },
+    {
+      "run": 3,
+      "sentences": 3,
+      "ttfa_ms": 401.6,
+      "total_ms": 1329.9,
+      "audio_seconds": 8.96,
+      "per_sentence_ms": [
+        401.6,
+        443.0,
+        485.2
+      ],
+      "error": null
+    }
+  ],
+  "tier_c": [
+    {
+      "run": 1,
+      "concurrency": 4,
+      "latency_ms": 804.6,
+      "error": null
+    },
+    {
+      "run": 2,
+      "concurrency": 4,
+      "latency_ms": 406.5,
+      "error": null
+    },
+    {
+      "run": 3,
+      "concurrency": 4,
+      "latency_ms": 1193.3,
+      "error": null
+    },
+    {
+      "run": 4,
+      "concurrency": 4,
+      "latency_ms": 1605.9,
+      "error": null
+    }
+  ]
+}

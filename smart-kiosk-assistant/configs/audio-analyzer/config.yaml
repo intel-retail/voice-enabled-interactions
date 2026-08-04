@@ -48,10 +48,14 @@ models:
     repetition_penalty: 1.8
 
     # Decoder controls — beam_size/best_of apply to openai and whispercpp.
-    # word_timestamps and threads are whisper.cpp specific.
+    # threads is whisper.cpp specific.
     beam_size: 1
     best_of: 1
-    word_timestamps: false
+    # Word-level timings. Required by diarization: when Whisper merges two
+    # speakers into one segment, per-word times are the only way to split that
+    # segment at the acoustic speaker-change boundary without guessing.
+    # Supported by the openai and whispercpp providers.
+    word_timestamps: true
     threads: 0
 
   diarization: # Only applicable when models.asr.diarization is set to True
@@ -77,8 +81,29 @@ models:
     # speech turn is treated as the "primary" speaker, and every subsequent
     # turn is relabelled by cosine similarity to that reference embedding.
     voice_enrollment_enabled: true
-    voice_match_threshold: 0.5     # cosine sim ≥ this → SPEAKER_00 (primary)
-    min_enrollment_duration: 1.0   # seconds; ignore very short turns for enrollment
+    # Measured same-speaker cosine spread with a 1.5s reference was 0.21-0.68
+    # (median ~0.46) — i.e. the old 0.5 threshold rejected more than half of the
+    # customer's own speech. Widening the enrollment/comparison windows below
+    # tightens that spread; keep this slightly under the old value while the
+    # longer windows bed in. Re-measure from the [DIARIZATION][MATCH] log lines
+    # before tightening it again.
+    voice_match_threshold: 0.45    # cosine sim ≥ this → SPEAKER_00 (primary)
+    min_enrollment_duration: 2.0   # seconds; ignore very short turns for enrollment
+    # Enrollment is keyed on the conversation id sent by kiosk-core
+    # (speaker_scope_id), so it survives across utterances. Evict idle
+    # conversations so the cache cannot grow without bound.
+    enrollment_ttl_seconds: 1800
+    # Minimum audio span used to classify a speaker. Embeddings computed on
+    # much less than this are unstable, so words are grouped into windows of
+    # at least this length before being compared to the enrolled voice.
+    # At 0.8s the per-window scores for a single speaker swung by ±0.2 cosine,
+    # which is wider than the gap between the customer and a bystander.
+    min_window_seconds: 1.5
+    # Span taken from the start of the first qualifying segment when enrolling
+    # the primary voice. This span always belongs to the customer (it is the
+    # opening of the first utterance), so a longer window buys a much more
+    # stable reference embedding without any real contamination risk.
+    enrollment_window_seconds: 4.0
 
 audio_preprocessing:
   chunk_duration_sec: 15

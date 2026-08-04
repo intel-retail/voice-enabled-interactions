@@ -47,6 +47,21 @@ SAMPLE_DATA_DIR    ?= ./Sample_data
 SAMPLE_VIDEO_1_URL ?=
 SAMPLE_VIDEO_2_URL ?=
 
+# RTSP source mode and camera mount resolution.
+# Compose cannot conditionally include devices, so we resolve one effective
+# host device path here and pass it as RTSP_CAMERA_DEVICE:
+#   sample -> /dev/null (safe no-op mapping)
+#   live   -> CAMERA_DEVICE (must be set and valid)
+# Strip whitespace from both to tolerate trailing spaces in .env.
+_ENV_RTSP_SOURCE_MODE := $(RTSP_SOURCE_MODE)
+RTSP_SOURCE_MODE      ?= $(_ENV_RTSP_SOURCE_MODE)
+_RTSP_SOURCE_MODE_RAW  = $(strip $(RTSP_SOURCE_MODE))
+_RTSP_SOURCE_MODE      = $(if $(_RTSP_SOURCE_MODE_RAW),$(_RTSP_SOURCE_MODE_RAW),sample)
+_RTSP_LIVE_ON          = $(filter live,$(_RTSP_SOURCE_MODE))
+_CAMERA_DEVICE_RAW     = $(strip $(CAMERA_DEVICE))
+_RTSP_CAMERA_DEVICE    = $(if $(_RTSP_LIVE_ON),$(_CAMERA_DEVICE_RAW),/dev/null)
+COMPOSE_BASE           = RTSP_SOURCE_MODE=$(_RTSP_SOURCE_MODE) RTSP_CAMERA_DEVICE=$(_RTSP_CAMERA_DEVICE) docker compose -f $(COMPOSE_FILE)
+
 # Services with fully local build contexts
 LOCAL_ONLY_SERVICES := metrics-collector rag-service kiosk-core kiosk-ui queue-service rtsp-streamer
 
@@ -235,6 +250,33 @@ check-env: ## Validate .env and all required variables before running the stack
 		echo "  $(GREEN)✓ TARGET_DEVICE=$(TARGET_DEVICE)$(NC)"; \
 	fi; \
 	\
+	if [ "$(_RTSP_SOURCE_MODE_RAW)" != "" ] && [ "$(_RTSP_SOURCE_MODE_RAW)" != "sample" ] && [ "$(_RTSP_SOURCE_MODE_RAW)" != "live" ]; then \
+		echo "  $(RED)✗ RTSP_SOURCE_MODE='$(_RTSP_SOURCE_MODE_RAW)' is invalid$(NC)  (must be sample | live)"; \
+		ERRORS=$$((ERRORS+1)); \
+	else \
+		echo "  $(GREEN)✓ RTSP_SOURCE_MODE=$(_RTSP_SOURCE_MODE)$(NC)"; \
+	fi; \
+	\
+	if [ "$(_RTSP_SOURCE_MODE)" = "live" ]; then \
+		if [ -z "$(_CAMERA_DEVICE_RAW)" ]; then \
+			echo "  $(RED)✗ CAMERA_DEVICE is not set$(NC)  (required when RTSP_SOURCE_MODE=live)"; \
+			ERRORS=$$((ERRORS+1)); \
+		elif [ ! -e "$(_CAMERA_DEVICE_RAW)" ]; then \
+			echo "  $(RED)✗ CAMERA_DEVICE='$(_CAMERA_DEVICE_RAW)' does not exist$(NC)"; \
+			ERRORS=$$((ERRORS+1)); \
+		elif [ ! -r "$(_CAMERA_DEVICE_RAW)" ]; then \
+			echo "  $(RED)✗ CAMERA_DEVICE='$(_CAMERA_DEVICE_RAW)' is not readable$(NC)"; \
+			ERRORS=$$((ERRORS+1)); \
+		elif [ ! -c "$(_CAMERA_DEVICE_RAW)" ]; then \
+			echo "  $(RED)✗ CAMERA_DEVICE='$(_CAMERA_DEVICE_RAW)' is not a character device$(NC)"; \
+			ERRORS=$$((ERRORS+1)); \
+		else \
+			echo "  $(GREEN)✓ CAMERA_DEVICE=$(_CAMERA_DEVICE_RAW)$(NC)"; \
+		fi; \
+	else \
+		echo "  $(GREEN)✓ CAMERA_DEVICE is optional in sample mode$(NC)"; \
+	fi; \
+	\
 	if [ "$(TARGET_DEVICE)" = "GPU" ]; then \
 		if [ -z "$(RENDER_GID)" ]; then \
 			echo "  $(RED)✗ RENDER_GID is not set$(NC)  (required for GPU access inside containers)"; \
@@ -283,6 +325,11 @@ show-config: ## Print resolved configuration
 	@echo "$(YELLOW)Authentication:$(NC)"
 	@echo "  HF_TOKEN          = $$([ -n '$(HF_TOKEN)' ] && echo '***set***' || echo 'NOT SET')"
 	@echo ""
+	@echo "$(YELLOW)RTSP source:$(NC)"
+	@echo "  RTSP_SOURCE_MODE  = $(_RTSP_SOURCE_MODE)"
+	@echo "  CAMERA_DEVICE     = $$([ -n '$(_CAMERA_DEVICE_RAW)' ] && echo '$(_CAMERA_DEVICE_RAW)' || echo '(unset)')"
+	@echo "  RTSP_CAMERA_DEVICE= $(_RTSP_CAMERA_DEVICE)"
+	@echo ""
 	@echo "$(YELLOW)Identity feature:$(NC)"
 	@echo "  IDENTITY          = $(IDENTITY)  (from .env KIOSK_CORE_IDENTITY_ENABLED, override with IDENTITY=true|false)"
 	@echo "  identity-service  = $$([ -n '$(_IDENTITY_SVC)' ] && echo 'enabled — will start with --profile identity' || echo 'disabled')"
@@ -296,17 +343,17 @@ build: check-env ## Build (REGISTRY=false) or pull (REGISTRY=true) all images
 	@echo "$(BLUE)Preparing Docker images...$(NC)"
 	@if [ "$(REGISTRY)" = "false" ] || [ "$(REGISTRY)" = "FALSE" ]; then \
 		echo "$(YELLOW)  REGISTRY=false → Building local services from source$(NC)"; \
-		REGISTRY=$(_DOCKER_REGISTRY) docker compose -f $(COMPOSE_FILE) $(_IDENTITY_PROFILE) build $(LOCAL_ONLY_SERVICES) $(_IDENTITY_SVC); \
+		REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) build $(LOCAL_ONLY_SERVICES) $(_IDENTITY_SVC); \
 	else \
 		echo "$(YELLOW)  REGISTRY=$(REGISTRY) → Pulling images from registry$(NC)"; \
-		REGISTRY=$(REGISTRY) docker compose -f $(COMPOSE_FILE) pull $(LOCAL_ONLY_SERVICES); \
+		REGISTRY=$(REGISTRY) $(COMPOSE_BASE) pull $(LOCAL_ONLY_SERVICES); \
 		if [ -n "$(_IDENTITY_SVC)" ]; then \
 			echo "$(YELLOW)  Building identity-service locally (no registry image)...$(NC)"; \
-			REGISTRY=$(_DOCKER_REGISTRY) docker compose -f $(COMPOSE_FILE) $(_IDENTITY_PROFILE) build identity-service; \
+			REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) build identity-service; \
 		fi; \
 	fi; \
 	echo "$(YELLOW)  Pulling audio-analyzer, text-to-speech from Docker Hub (edge-ai-libraries — separate repo, no local build)...$(NC)"; \
-	REGISTRY=$(_DOCKER_REGISTRY) docker compose -f $(COMPOSE_FILE) pull $(REGISTRY_ONLY_SERVICES)
+	REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull $(REGISTRY_ONLY_SERVICES)
 	@echo "$(GREEN)✓ Images ready$(NC)"
 
 # =============================================================================
@@ -315,7 +362,7 @@ build: check-env ## Build (REGISTRY=false) or pull (REGISTRY=true) all images
 
 up: check-env setup-dirs ## Start all services
 	@echo "$(BLUE)Starting Smart Kiosk Assistant...$(NC)"
-	REGISTRY=$(_DOCKER_REGISTRY) docker compose -f $(COMPOSE_FILE) $(_IDENTITY_PROFILE) up -d
+	REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) up -d
 	@echo ""
 	@echo "$(GREEN)✓ Stack started$(NC)"
 	@echo "  Kiosk UI        → http://localhost:7860"
@@ -329,7 +376,7 @@ up: check-env setup-dirs ## Start all services
 
 down: ## Stop all services
 	@echo "$(BLUE)Stopping Smart Kiosk Assistant...$(NC)"
-	docker compose -f $(COMPOSE_FILE) $(_IDENTITY_PROFILE) down
+	$(COMPOSE_BASE) $(_IDENTITY_PROFILE) down
 	@echo "$(GREEN)✓ All services stopped$(NC)"
 
 restart: down up ## Stop then restart all services
@@ -340,7 +387,7 @@ restart: down up ## Stop then restart all services
 
 status: ## Show container status
 	@echo "$(BLUE)Container Status:$(NC)"
-	@docker compose -f $(COMPOSE_FILE) ps --format "table {{.Name}}\t{{.Status}}\t{{.Ports}}"
+	@$(COMPOSE_BASE) ps --format "table {{.Name}}\t{{.Status}}\t{{.Ports}}"
 
 # =============================================================================
 # Health Tests
@@ -387,7 +434,7 @@ test: ## Run health checks on all service endpoints
 # =============================================================================
 
 logs: ## Tail logs for all services
-	docker compose -f $(COMPOSE_FILE) logs -f
+	$(COMPOSE_BASE) logs -f
 
 logs-ovms: ## Tail ovms-llm logs
 	docker logs -f ovms-llm
@@ -423,8 +470,8 @@ dev-build: ## Rebuild and restart a single service: make dev-build SVC=rag-servi
 		exit 1; \
 	fi
 	@echo "$(BLUE)Rebuilding $(SVC)...$(NC)"
-	docker compose -f $(COMPOSE_FILE) build $(SVC)
-	docker compose -f $(COMPOSE_FILE) up -d $(SVC)
+	$(COMPOSE_BASE) build $(SVC)
+	$(COMPOSE_BASE) up -d $(SVC)
 	@echo "$(GREEN)✓ $(SVC) rebuilt and restarted$(NC)"
 
 # =============================================================================
@@ -433,6 +480,6 @@ dev-build: ## Rebuild and restart a single service: make dev-build SVC=rag-servi
 
 clean: ## Stop containers and remove named volumes
 	@echo "$(BLUE)Stopping services and removing volumes...$(NC)"
-	docker compose -f $(COMPOSE_FILE) down -v
+	$(COMPOSE_BASE) down -v
 	@echo "$(GREEN)✓ Containers stopped and volumes removed$(NC)"
 	@echo "  Note: models/ directory is preserved. Delete it manually to free ~4 GB."

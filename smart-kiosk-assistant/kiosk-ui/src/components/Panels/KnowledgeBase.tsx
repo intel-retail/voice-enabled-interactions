@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import type { ChangeEvent } from 'react';
 
-import { fetchSampleFile, ingestDocument } from '../../api/ragApi';
+import { fetchSampleFile, ingestDocument, summariseIngest } from '../../api/ragApi';
 import { sampleKnowledgeBases } from '../../constants';
 
 interface KnowledgeBaseProps {
@@ -37,10 +37,8 @@ export function KnowledgeBase({ onIngestStateChange }: KnowledgeBaseProps) {
 
     try {
       const result = await ingestDocument(filename, content);
-      setStatus({
-        kind: 'success',
-        message: `✅ Knowledge base updated — ${result.chunks_added ?? 0} chunks from ${result.source ?? filename}`,
-      });
+      const summary = summariseIngest(result, filename);
+      setStatus({ kind: summary.ok ? 'success' : 'error', message: summary.message });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       setStatus({
@@ -66,10 +64,8 @@ export function KnowledgeBase({ onIngestStateChange }: KnowledgeBaseProps) {
     try {
       const blob = await fetchSampleFile(selectedSample);
       const result = await ingestDocument(selectedSample, blob);
-      setStatus({
-        kind: 'success',
-        message: `✅ Knowledge base updated — ${result.chunks_added ?? 0} chunks from ${result.source ?? selectedSample}`,
-      });
+      const summary = summariseIngest(result, selectedSample);
+      setStatus({ kind: summary.ok ? 'success' : 'error', message: summary.message });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       setStatus({

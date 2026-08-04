@@ -80,6 +80,7 @@ export interface PipelineWall {
 export interface PipelineAsrSpan {
   ms: number | null;
   device: string;
+  chunks?: number;
 }
 
 export interface PipelineRetrievalSpan {

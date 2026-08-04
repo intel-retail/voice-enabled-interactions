@@ -1,5 +1,26 @@
 # Release Notes: Smart Kiosk Assistant
 
+## 2026.2.0-rc2
+
+This release rebuilds and re-tags every kiosk-related image on top of the
+latest audio-analyzer and text-to-speech microservices, alongside a
+consistent version bump across the stack. This update includes the
+following changes:
+
+- The audio-analyzer service picks up upstream streaming improvements:
+  OpenAI-compatible streaming transcription over Server-Sent Events and a
+  realtime WebSocket transcription endpoint, plus Video Summarization
+  Service (VSS) response compatibility and more accurate multi-speaker
+  segment splitting with persisted enrolment.
+- The text-to-speech service now supports named voices and produces
+  faster, more natural-sounding prosody.
+- `audio-analyzer` and `text-to-speech` are now built and published at
+  `2026.2.0-rc2`, replacing the previously pinned `2026.1.0` tag for
+  text-to-speech.
+- `kiosk-core`, `kiosk-ui`, `queue-service`, `identity-service`,
+  `rag-service`, and `rtsp-streamer` have all been rebuilt and re-tagged to
+  `2026.2.0-rc2` for consistency across the deployment.
+
 ## 2026.2.0-rc1
 
 This release expands Smart Kiosk Assistant with queue-aware ordering, a
