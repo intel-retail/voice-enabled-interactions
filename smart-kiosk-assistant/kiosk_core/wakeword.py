@@ -33,7 +33,6 @@ class WakeWordListener:
         inference_framework: str,
     ) -> None:
         try:
-            import openwakeword
             from openwakeword.model import Model
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(
@@ -47,26 +46,14 @@ class WakeWordListener:
 
         try:
             self._model = self._build_model(Model, wakeword_model, inference_framework)
-        except Exception as first_exc:  # noqa: BLE001
-            logger.warning("[WAKEWORD] Initial model load failed, attempting model download: %s", first_exc)
-            try:
-                openwakeword.utils.download_models()
-            except Exception as download_exc:  # noqa: BLE001
-                raise RuntimeError(
-                    "Wake-word model assets are missing and automatic download failed. "
-                    "Likely cause: TLS/certificate restrictions when downloading from GitHub releases. "
-                    "Install CA certs/proxy trust, or provide a local wakeword model path. "
-                    f"model='{wakeword_model}', framework='{inference_framework}', "
-                    f"download_error={download_exc}"
-                ) from download_exc
-
-            try:
-                self._model = self._build_model(Model, wakeword_model, inference_framework)
-            except Exception as second_exc:  # noqa: BLE001
-                raise RuntimeError(
-                    "Wake-word model initialization failed after downloading assets. "
-                    f"model='{wakeword_model}', framework='{inference_framework}', error={second_exc}"
-                ) from second_exc
+        except Exception as load_exc:  # noqa: BLE001
+            raise RuntimeError(
+                "Wake-word model assets are missing or failed to load. Automatic download is "
+                "disabled because the openWakeWord pre-trained models are licensed for "
+                "non-commercial use only (CC BY-NC-SA 4.0). Install the required models "
+                "manually, or provide a local wakeword model path. "
+                f"model='{wakeword_model}', framework='{inference_framework}', error={load_exc}"
+            ) from load_exc
 
         self._target_slug = self._slug(wakeword_model)
 
