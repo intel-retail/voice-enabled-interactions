@@ -7,6 +7,7 @@ pydantic==2.11.7
 python-multipart==0.0.27
 sounddevice==0.5.1
 openwakeword==0.6.0
+python-certifi-win32==1.6.1
 uvicorn==0.35.0
 
 # Ordering feature
