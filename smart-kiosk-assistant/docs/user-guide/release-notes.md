@@ -1,57 +1,49 @@
 # Release Notes: Smart Kiosk Assistant
 
-## 2026.2.0-rc2
+## 2026.2.0
 
-This release rebuilds and re-tags every kiosk-related image on top of the
-latest audio-analyzer and text-to-speech microservices, alongside a
-consistent version bump across the stack. This update includes the
-following changes:
+This release delivers a unified Smart Kiosk Assistant platform with dual React-based user interfaces, OpenVINO-powered AI inference, agentic MCP tool calling, queue-aware ordering, enhanced voice interaction, optional multimodal identity, configurable inference devices, and streamlined deployment.
 
-- The audio-analyzer service picks up upstream streaming improvements:
-  OpenAI-compatible streaming transcription over Server-Sent Events and a
-  realtime WebSocket transcription endpoint, plus Video Summarization
-  Service (VSS) response compatibility and more accurate multi-speaker
-  segment splitting with persisted enrolment.
-- The text-to-speech service now supports named voices and produces
-  faster, more natural-sounding prosody.
-- `audio-analyzer` and `text-to-speech` are now built and published at
-  `2026.2.0-rc2`, replacing the previously pinned `2026.1.0` tag for
-  text-to-speech.
-- `kiosk-core`, `kiosk-ui`, `queue-service`, `identity-service`,
-  `rag-service`, and `rtsp-streamer` have all been rebuilt and re-tagged to
-  `2026.2.0-rc2` for consistency across the deployment.
+### Key Updates
 
-## 2026.2.0-rc1
+- **Dual Kiosk Experiences:** Replaced the previous Gradio interface with a React, Vite, and TypeScript application. A single `kiosk-ui` image supports both operator and customer-facing modes through `KIOSK_UI_MODE`.
 
-This release expands Smart Kiosk Assistant with queue-aware ordering, a
-refreshed web experience, and a streamlined build workflow. This update
-includes the following changes:
+  - **Operator mode:** Voice/text chat, live queue monitoring, knowledge-base ingestion, audio configuration, and performance dashboards.
+  - **Customer mode:** Queue-aware menu, category navigation, live cart, upsell prompts, queue status, and voice interaction.
 
-- The kiosk front end has been rebuilt as a React (Vite + TypeScript)
-  single-page application, replacing the previous Gradio interface for a
-  faster and more customizable web experience.
-- The ordering agent now runs its Qwen3-4B language model through OpenVINO
-  Model Server (OVMS) instead of an in-process OpenVINO model, providing a
-  dedicated, OpenAI-compatible inference endpoint for tool-calling.
-- A new queue analytics capability adds a person-counting service and an
-  RTSP streamer, using YOLO detection with OpenVINO to track queue length
-  from a video feed and expose a live MJPEG overlay stream.
-- The ordering flow can now adapt to real-time queue conditions, surfacing a
-  dynamic peak-hour menu driven by the queue-service integration.
-- Speaker diarization has been enabled across the audio-analyzer and
-  kiosk-core pipeline, improving turn attribution during multi-speaker
-  interactions.
-- An optional multimodal identity service adds Face ID and voiceprint
-  authentication, combining OpenVINO face and ECAPA voice inference with a
-  FAISS index and SQLite loyalty profiles, enabled through a dedicated
-  deployment profile.
-- A Makefile-based workflow simplifies setup and operations with targets for
-  environment initialization, model download, sample-video retrieval, image
-  build, service startup, health checks, and cleanup.
-- Sample-video tooling downloads and provisions the RTSP feed clips used by
-  the queue analytics pipeline, configurable through the environment file.
+- **Agentic Ordering with MCP:** Integrated an MCP tool server into `kiosk-core` to manage catalog browsing, cart operations, order confirmation, and upsell recommendations. Guardrails handle ambiguous item references and invalid quantities.
 
+- **AI Inference with OVMS:** Migrated the Qwen3-4B ordering model from in-process OpenVINO inference to OpenVINO Model Server (OVMS), providing a dedicated OpenAI-compatible endpoint for agentic tool calling.
 
+- **Queue-Aware Ordering:** Added YOLO-based person counting and RTSP streaming with OpenVINO to monitor queue length, provide a live MJPEG overlay, and dynamically adapt menu recommendations during peak periods.
+
+- **Contextual Upselling:** Added a rule-based upsell engine that generates relevant add-on recommendations and surfaces them in both the customer cart and voice responses.
+
+- **Enhanced Speech-to-Text:** Upgraded `audio-analyzer` with OpenAI-compatible SSE streaming transcription, real-time WebSocket transcription, VSS response compatibility, improved multi-speaker segmentation, and persistent speaker enrollment.
+
+- **Speaker Diarization:** Enabled speaker attribution across the `audio-analyzer` and `kiosk-core` pipeline to improve turn identification during multi-speaker conversations.
+
+- **Improved Text-to-Speech:** Added named voice support with faster response generation and more natural speech prosody.
+
+- **Multimodal Identity:** Added an optional identity service supporting Face ID and voiceprint authentication using OpenVINO face inference, ECAPA voice embeddings, FAISS indexing, and SQLite-based loyalty profiles. The UI includes login, registration, and enrollment workflows.
+
+- **Flexible Hardware Acceleration:** Added per-service inference-device configuration for CPU, GPU, and NPU. NPU passthrough is supported for `identity-service`, `ovms-llm`, and audio-analyzer ASR, with independent device configuration for RAG embedding and reranker models.
+
+- **Unified Versioning:** All kiosk services and container images are aligned to `2026.2.0`:
+
+  - `kiosk-core`
+  - `kiosk-ui`
+  - `queue-service`
+  - `identity-service`
+  - `rag-service`
+  - `rtsp-streamer`
+  - `audio-analyzer`
+  - `text-to-speech`
+  - `metrics-collector`
+
+- **Simplified Deployment and Operations:** Added a Makefile-based workflow for environment initialization, configuration validation, model and sample-video downloads, image builds, service startup, health checks, log monitoring, individual service rebuilds, and cleanup.
+
+- **Sample RTSP Video Provisioning:** Added configurable tooling to download and provision sample video clips required by the queue analytics pipeline.
 
 ## 2026.1.0
 
