@@ -184,31 +184,66 @@ Replace `smart-kiosk-assistant_` with whatever Compose project prefix
 `docker volume ls` shows on your host. Resetting a volume forces the
 services to re-download model assets on next startup.
 
-## Browser UI Is Not Accessible Or Loads Blank (Remote Host)
+## Microphone Does Not Work Over a Remote IP (Insecure Origin)
 
-If the kiosk stack runs on a remote/headless machine and
-`http://<remote-ip>:7860` won't load or renders a blank page, the browser
-is refusing the page because it's not a secure origin. Try either fix:
+Browsers only expose `navigator.mediaDevices` on a **secure context** —
+HTTPS, or a `localhost`/`127.0.0.1` loopback address. When the kiosk stack
+runs on a remote or headless machine and you open
+`http://<remote-ip>:7860` (operator) or `http://<remote-ip>:7861`
+(customer) directly, the page itself loads and renders normally, but every
+microphone action fails with:
 
-- **SSH port forwarding (recommended)** — tunnel the UI port to
-  `localhost` so the browser treats it as a secure origin:
+```
+Microphone access requires HTTPS or localhost.
+```
 
-  ```bash
-  ssh -L 7860:localhost:7860 intel@10.223.23.34
-  ```
+The UI is not broken and the containers are healthy — the browser is
+withholding the microphone API because the origin is not trusted. Use
+either workaround below.
 
-  Replace `intel@10.223.23.34` with your actual username/host, then open
-  `http://127.0.0.1:7860` on your local machine.
-- **Chrome insecure-origin flag** — allow the remote URL as a secure
-  origin: open `chrome://flags/#unsafely-treat-insecure-origin-as-secure`,
-  add `http://<remote-ip>:7860`, enable the flag, and relaunch Chrome.
+### Workaround 1 — SSH port forwarding (recommended)
+
+Tunnel the UI port so the browser sees a `localhost` origin, which is
+always treated as secure. No browser configuration is needed and it works
+in every browser:
+
+```bash
+# operator UI
+ssh -L 7860:localhost:7860 <user>@<remote-ip>
+
+# customer UI (add -L per port, or combine in one command)
+ssh -L 7860:localhost:7860 -L 7861:localhost:7861 <user>@<remote-ip>
+```
+
+Leave the SSH session open, then browse to `http://127.0.0.1:7860` (or
+`http://127.0.0.1:7861`) on your **local** machine.
+
+> **Note:** Use `127.0.0.1`, not the machine's LAN IP. Only the loopback
+> address qualifies as a secure origin.
+
+### Workaround 2 — Chrome insecure-origin flag
+
+Tell Chrome to treat the remote origin as secure. This is per-browser and
+must be repeated on every client machine, so prefer the SSH tunnel for
+anything beyond a quick demo:
+
+1. Open `chrome://flags/#unsafely-treat-insecure-origin-as-secure`.
+2. Add the exact origin, including the scheme and port — for example
+   `http://10.223.23.34:7860`. Add a second comma-separated entry for
+   `http://10.223.23.34:7861` if you also need the customer screen.
+3. Set the flag to **Enabled** and relaunch Chrome when prompted.
+
+> **Warning:** This flag disables an origin-security protection for the
+> listed addresses. Use it only on trusted networks, and remove the entry
+> when you are finished.
 
 ## Browser UI Does Not Capture Audio
 
-- Confirm the browser granted microphone permission for
-  `http://127.0.0.1:7860`. Reset the permission and reload if needed.
-- Modern browsers restrict microphone access on insecure origins. Use
-  `http://127.0.0.1` (loopback) or serve the UI behind HTTPS.
+- If you are reaching the UI over a remote IP, see
+  [Microphone Does Not Work Over a Remote IP](#microphone-does-not-work-over-a-remote-ip-insecure-origin)
+  first — this is the most common cause.
+- Confirm the browser granted microphone permission for the origin you are
+  using. Reset the permission and reload if needed.
 - Check the `kiosk-ui` logs for upload errors:
 
   ```bash
