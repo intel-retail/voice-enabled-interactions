@@ -135,17 +135,82 @@ docker logs audio-analyzer
 curl http://localhost:8010/health
 ```
 
-### `TARGET_DEVICE=NPU` Causes OVMS/RAG to Restart-Loop
+### `TARGET_DEVICE=NPU` — LLM Turns Fail with "Sorry, I encountered an error"
 
-`ovms-llm` compiles on NPU but chat-completion requests fail at runtime
-(`Input length exceeds the maximum allowed length`). `rag-service`
-embedding/reranker (`RAG_EMBEDDING_DEVICE`/`RAG_RERANKER_DEVICE`, independent
-of `TARGET_DEVICE`) fails to compile on NPU entirely — don't set either to `NPU`.
+**Symptom.** The stack starts, `ovms-llm` reports `AVAILABLE`, ASR and TTS
+work, but *every* agent turn — both knowledge questions and ordering
+requests — replies `Sorry, I encountered an error. Please try again.`
+
+**Cause.** OVMS serves NPU through a **Stateful** servable (Continuous
+Batching is CPU/GPU only). The NPU plugin caps prompts at **1024 tokens** by
+default. This agent's prompt is far larger:
+
+| Prompt | Tokens | vs 1024 |
+|---|---:|---:|
+| System instruction only | ~1,530 | 1.5x |
+| \+ 12 MCP tool schemas (a normal turn) | ~3,900 | 3.8x |
+| \+ one tool result (2nd round-trip) | ~4,200 | 4.1x |
+
+Every prompt exceeds the cap, so OVMS rejects the request with
+`HTTP 400 — Input length exceeds the maximum allowed length`. The agent
+endpoint swallows the error and surfaces the canned reply.
+
+> [!WARNING]
+> `MAX_PROMPT_LEN` must be a **top-level** key of `plugin_config`. Written as
+> `{"DEVICE_PROPERTIES":{"NPU":{"MAX_PROMPT_LEN":8192}}}` it is accepted at load
+> time — the servable still reports `AVAILABLE` — but is **silently ignored**,
+> leaving the 1024 default in force. Verified on MTL with Qwen3-4B: the nested
+> form rejects a 1,824-token prompt, the top-level form serves 3,624. This is
+> recorded only so the next person does not lose a day to it — raising the cap
+> makes NPU *work*, not *usable*, for the reasons in the table above.
+
+**Recommended fix — use GPU (or CPU).** NPU is **not supported** for the served
+LLM. `setup_models.sh --device NPU` now refuses to run for this reason:
 
 ```bash
-# .env: TARGET_DEVICE=CPU or GPU
+# .env: TARGET_DEVICE=GPU
+./setup_models.sh --device GPU
 docker compose up -d --force-recreate ovms-llm
 ```
+
+The NPU is still used by `queue-service`, `identity-service` and
+`whisper-tiny`/`whisper-base` ASR — pass `--skip-ovms` to set those up on NPU
+while leaving the LLM on GPU.
+
+**Why NPU is not offered as an option.** Measured on an MTL NPU with Qwen3-4B
+and OVMS 2026.3, using a graph with the prompt cap correctly raised:
+
+| Weight format | Output quality | 2,559-token tool-calling turn |
+|---|---|---:|
+| INT8 (default) | ✅ correct tool call | **801 s** |
+| INT4 (`Qwen3-4B-int4-ov`) | ❌ garbage — `"the the the…"`, `"ômeôme…"` | 8 s |
+| INT4 channel-wise (`int4-cw`) | — | not published for Qwen3-4B (only 8B) |
+
+INT8 latency scales as 191 s (51-token prompt) → 217 s (1,824) → 245 s (3,624)
+→ 801 s once 48 output tokens are generated; decode, not prefill, dominates. A
+single agent turn issues several such calls, so the only weight format that is
+correct on NPU is roughly two orders of magnitude too slow for voice.
+
+Other Stateful-servable constraints that apply if this is ever revisited:
+
+- NPU uses **static shapes**, so the full `MAX_PROMPT_LEN` window is compiled
+  into the model — raising the limit costs compile time, memory and latency
+  rather than saving it.
+- Requests are handled **strictly one at a time**; two concurrent kiosk sessions
+  serialize.
+- Continuous-Batching flags (`cache_size`, `max_num_seqs`,
+  `max_num_batched_tokens`) are **ignored**. Prefix caching is available only
+  via `NPUW_LLM_ENABLE_PREFIX_CACHING`.
+- A call can outlast `rag-service`'s 90 s generation ceiling
+  (`answering.generation_timeout_secs`), which produces the same canned error
+  even when OVMS itself would eventually answer.
+- `finish_reason=length` is unsupported, as are beam search, `n > 1` and logprobs.
+
+> [!IMPORTANT]
+> `rag-service` embedding/reranker (`RAG_EMBEDDING_DEVICE` /
+> `RAG_RERANKER_DEVICE`, independent of `TARGET_DEVICE`) **cannot** compile on
+> NPU at all — they are exported with dynamic sequence-length shapes, which the
+> NPU compiler rejects. Leave both on `CPU` or `GPU`.
 
 ### `IDENTITY_DEVICE=NPU` — Face/Re-ID Works, Voice Does Not
 

@@ -34,7 +34,7 @@ The **Devices** column lists the supported inference devices for each:
 | `audio-analyzer` ASR | `models.asr.name` | `whisper-base` | `whisper-tiny`, `whisper-small`, `whisper-medium`, `whisper-large` | `CPU`, `GPU` (`provider: openvino` required for `GPU`); `NPU` works only for `whisper-tiny`/`whisper-base` — see [ASR Support Matrix](#asr-support-matrix) |
 | `audio-analyzer` sentiment | `sentiment.model` | `speechbrain/emotion-recognition-wav2vec2-IEMOCAP` | other SpeechBrain emotion-recognition models | `CPU`, `GPU` (disabled by default) |
 | `text-to-speech` | `models.tts.name` | `microsoft/speecht5_tts` (SpeechT5) | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` (Qwen-TTS) | `CPU`, `GPU` (`int4` on iGPU produces noise; use `fp16` or `int8` on GPU) |
-| `rag-service` LLM | `models.llm.hf_id` | `Qwen/Qwen3-4B-Instruct-2507` | other OpenVINO-exportable instruct LLMs | `CPU`, `GPU` (`GPU` recommended for acceptable latency) |
+| `rag-service` LLM | `models.llm.hf_id` | `Qwen/Qwen3-4B-Instruct-2507` | other OpenVINO-exportable instruct LLMs | `CPU`, `GPU` (`GPU` recommended for acceptable latency); `NPU` is **not supported** — see [`TARGET_DEVICE=NPU`](../troubleshooting.md#target_devicenpu--llm-turns-fail-with-sorry-i-encountered-an-error) |
 | `rag-service` embedding | `models.embedding.hf_id` | `BAAI/bge-large-en-v1.5` | `BAAI/bge-base-en-v1.5`, `BAAI/bge-small-en-v1.5` | `CPU`, `GPU` (`CPU` is usually fast enough) |
 | `rag-service` reranker | `retrieval.reranker.hf_id` | `BAAI/bge-reranker-base` | `BAAI/bge-reranker-large` | `CPU`, `GPU` (optional) |
 
@@ -272,34 +272,35 @@ independent device configuration — see
 [RAG Service Embedding/Reranker Device](#rag-service-embeddingreranker-device-rag_embedding_device-rag_reranker_device)
 below.
 
-- **Currently supported:** `TARGET_DEVICE=CPU`, `TARGET_DEVICE=GPU`, `TARGET_DEVICE=NPU`.
+- **Supported:** `TARGET_DEVICE=CPU`, `TARGET_DEVICE=GPU`.
+- **Not supported:** `TARGET_DEVICE=NPU` — see below.
 
-> [!NOTE]
-> **`TARGET_DEVICE=NPU` device passthrough works for `ovms-llm`.**
-> The `ovms-llm` container has NPU device passthrough via the same
-> `ACCEL_MOUNT_PATH`/`/dev/accel` mechanism used by `audio-analyzer` and
-> `queue-service`. Set `TARGET_DEVICE=NPU` in `.env` together with
-> `ACCEL_MOUNT_PATH` pointing to the host NPU device node — this is not
-> auto-detected and must be set manually — to compile the LLM for the
-> NPU. OVMS logs
-> `Available devices for Open VINO: CPU, GPU, NPU` and the model
-> (`Qwen3-4B-int8-ov`) compiles successfully.
+> [!IMPORTANT]
+> **`TARGET_DEVICE=NPU` is not supported for `ovms-llm`.**
+> Device passthrough and model compilation both work — the `ovms-llm`
+> container has NPU passthrough via the same `ACCEL_MOUNT_PATH`/`/dev/accel`
+> mechanism used by `audio-analyzer` and `queue-service`, OVMS logs
+> `Available devices for Open VINO: CPU, GPU, NPU`, and `Qwen3-4B-int8-ov`
+> compiles successfully. Generation is nevertheless unusable:
 >
-> **NPU inference has been observed to fail at request time** on at least
-> one validated host, even after a successful compile — with two distinct
-> symptoms seen: a short chat-completion request failed with
-> `zeFenceHostSynchronize result: ZE_RESULT_ERROR_UNKNOWN` inside OVMS's
-> LLM executor, and a longer RAG-augmented prompt (routed through
-> `rag-service`) failed with `Input length exceeds the maximum allowed
-> length`. Both point to NPU driver/runtime or static-shape/context-length
-> limitations for this model's KV-cache/stateful execution graph, not a
-> configuration issue. Validate end-to-end generation with realistic
-> prompt lengths (not just `/v3/models` or container health) before
-> relying on `TARGET_DEVICE=NPU` for `ovms-llm` in production.
+> - **INT8** is numerically correct but takes 191–801 s per call, and a single
+>   voice turn issues several. That is roughly 100× too slow.
+> - **INT4** (`OpenVINO/Qwen3-4B-int4-ov`) is fast (~8 s) but numerically
+>   broken on NPU — it emits repeated tokens instead of text and never forms a
+>   tool call.
+> - The NPU-optimised channel-wise tier (`int4-cw`) is not published for
+>   Qwen3-4B, only Qwen3-8B.
 >
-> **Use `TARGET_DEVICE=CPU` or `TARGET_DEVICE=GPU`** if the host does not
-> have an NPU, `ACCEL_MOUNT_PATH` is not set, or NPU generation requests
-> fail as described above.
+> Out of the box you will instead hit `HTTP 400 — Input length exceeds the
+> maximum allowed length`, because the NPU plugin caps prompts at 1024 tokens.
+> Full measurements and analysis:
+> [`TARGET_DEVICE=NPU` troubleshooting](../troubleshooting.md#target_devicenpu--llm-turns-fail-with-sorry-i-encountered-an-error)
+> (ITEP-96031). `setup_models.sh --device NPU` refuses to run for this reason;
+> use `--device NPU --skip-ovms` to target the NPU with the other services.
+>
+> **Use `TARGET_DEVICE=GPU`** (recommended) **or `TARGET_DEVICE=CPU`.**
+> This restriction applies only to the OVMS-served LLM — `queue-service`,
+> `identity-service` and `whisper-tiny`/`whisper-base` ASR still use the NPU.
 
 ## RAG Service Embedding/Reranker Device (`RAG_EMBEDDING_DEVICE`, `RAG_RERANKER_DEVICE`)
 
@@ -409,7 +410,7 @@ Step-by-step workflow to run this stack with Intel NPU acceleration where suppor
 | Identity Service voice/ECAPA-TDNN (`IDENTITY_DEVICE`) | ❌ No — dynamic shape rejected by NPU compiler |
 | Audio Analyzer ASR (`models.asr.device`) | ⚠️ `whisper-tiny`/`whisper-base` only — see [ASR Support Matrix](#asr-support-matrix) |
 | Audio Analyzer Diarization (`models.diarization.device`) | ❌ No — CPU only |
-| OVMS-LLM (`TARGET_DEVICE`) | ⚠️ Compiles, but inference fails at runtime — not production-ready |
+| OVMS-LLM (`TARGET_DEVICE`) | ❌ No — compiles, but INT8 is ~100× too slow and INT4 is numerically broken — see [`TARGET_DEVICE`](#ovms-llm-device-target_device) |
 | RAG Service embedding/reranker (`RAG_EMBEDDING_DEVICE`/`RAG_RERANKER_DEVICE`) | ❌ No — dynamic shape rejected by NPU compiler |
 | Text-to-Speech (`models.tts.device`) | ❌ No |
 
