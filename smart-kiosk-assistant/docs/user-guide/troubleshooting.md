@@ -50,11 +50,11 @@ The device field lives in the per-service pinned config (see
 [Configuration](./get-started/configuration.md#inference-device)). If the device
 does not appear in the logs:
 
-- Check the value is supported for that model (e.g. `audio-analyzer`
+- Check the value is supported for that model (e.g., `audio-analyzer`
   ASR supports `CPU` for `provider: openai`, and `CPU|GPU|NPU` for
   `provider: openvino` — `NPU` only works with `whisper-tiny`/`whisper-base`,
   see [ASR Support Matrix](./get-started/configuration.md#asr-support-matrix)).
-- For `GPU`: confirm `/dev/dri` exists and the Intel OpenVINO GPU
+- For `GPU`: confirm `/dev/dri` exists and the OpenVINO™ GPU
   runtime is installed.
 - Restart the affected service after the change:
 
@@ -62,7 +62,7 @@ does not appear in the logs:
   docker compose up -d --build --force-recreate <service-name>
   ```
 
-- Confirm OpenVINO picked the device:
+- Confirm OpenVINO™ picked the device:
 
   ```bash
   docker compose logs <service-name> | grep -i -E "device|compiling|GPU|CPU"
@@ -85,7 +85,7 @@ docker logs audio-analyzer
 ASR provider/device. The ASR selection is read only from
 `configs/audio-analyzer/config.yaml`.
 
-> [!IMPORTANT]
+> **Important:**
 > `audio-analyzer` ASR on NPU works only for `whisper-tiny`/`whisper-base`;
 > `whisper-small`+ fails to compile. `make check-env` does not check model
 > name, so a `whisper-small`+ NPU config passes `check-env` but crash-loops
@@ -105,7 +105,7 @@ Before startup, run:
 make check-env
 ```
 
-### Error: OpenVINO does not report an NPU device
+### Error: OpenVINO™ does not report an NPU device
 
 ```bash
 ls -l /dev/accel/
@@ -121,7 +121,7 @@ ACCEL_MOUNT_PATH=/dev/accel/accel0 docker compose up -d queue-service
 ### `models.asr.device=NPU` Fails to Compile for `audio-analyzer`
 
 | Provider + Device | Model | Result |
-|---|---|---|
+| --- | --- | --- |
 | `openvino` + `NPU` | `whisper-tiny`/`whisper-base` | ✅ Works |
 | `openvino` + `NPU` | `whisper-small`+ | ❌ `Check '!self_attn_nodes.empty()' failed` |
 | `openvino` + `GPU`/`CPU` | any | ✅ Works |
@@ -146,7 +146,7 @@ Batching is CPU/GPU only). The NPU plugin caps prompts at **1024 tokens** by
 default. This agent's prompt is far larger:
 
 | Prompt | Tokens | vs 1024 |
-|---|---:|---:|
+| --- | ---: | ---: |
 | System instruction only | ~1,530 | 1.5x |
 | \+ 12 MCP tool schemas (a normal turn) | ~3,900 | 3.8x |
 | \+ one tool result (2nd round-trip) | ~4,200 | 4.1x |
@@ -155,7 +155,7 @@ Every prompt exceeds the cap, so OVMS rejects the request with
 `HTTP 400 — Input length exceeds the maximum allowed length`. The agent
 endpoint swallows the error and surfaces the canned reply.
 
-> [!WARNING]
+> **Warning:**
 > `MAX_PROMPT_LEN` must be a **top-level** key of `plugin_config`. Written as
 > `{"DEVICE_PROPERTIES":{"NPU":{"MAX_PROMPT_LEN":8192}}}` it is accepted at load
 > time — the servable still reports `AVAILABLE` — but is **silently ignored**,
@@ -181,7 +181,7 @@ while leaving the LLM on GPU.
 and OVMS 2026.3, using a graph with the prompt cap correctly raised:
 
 | Weight format | Output quality | 2,559-token tool-calling turn |
-|---|---|---:|
+| --- | --- | ---: |
 | INT8 (default) | ✅ correct tool call | **801 s** |
 | INT4 (`Qwen3-4B-int4-ov`) | ❌ garbage — `"the the the…"`, `"ômeôme…"` | 8 s |
 | INT4 channel-wise (`int4-cw`) | — | not published for Qwen3-4B (only 8B) |
@@ -206,7 +206,7 @@ Other Stateful-servable constraints that apply if this is ever revisited:
   even when OVMS itself would eventually answer.
 - `finish_reason=length` is unsupported, as are beam search, `n > 1` and logprobs.
 
-> [!IMPORTANT]
+> **Important:**
 > `rag-service` embedding/reranker (`RAG_EMBEDDING_DEVICE` /
 > `RAG_RERANKER_DEVICE`, independent of `TARGET_DEVICE`) **cannot** compile on
 > NPU at all — they are exported with dynamic sequence-length shapes, which the
@@ -228,7 +228,7 @@ in Docker named volumes (`audio_analyzer_models`,
 that ownership, so the usual host-side ownership errors do not apply.
 If you still see:
 
-```
+```text
 PermissionError: [Errno 13] Permission denied: '...'
 ```
 
@@ -245,6 +245,7 @@ docker volume rm \
   smart-kiosk-assistant_text_to_speech_cache
 docker compose up -d
 ```
+
 Replace `smart-kiosk-assistant_` with whatever Compose project prefix
 `docker volume ls` shows on your host. Resetting a volume forces the
 services to re-download model assets on next startup.
@@ -258,7 +259,7 @@ runs on a remote or headless machine and you open
 (customer) directly, the page itself loads and renders normally, but every
 microphone action fails with:
 
-```
+```text
 Microphone access requires HTTPS or localhost.
 ```
 
@@ -320,7 +321,7 @@ anything beyond a quick demo:
 Speaker diarization pulls **three gated** Pyannote models from HuggingFace:
 
 | Model | Gated | Why it is fetched |
-|---|---|---|
+| ----- | ----- | ----------------- |
 | [`pyannote/speaker-diarization-3.1`](https://huggingface.co/pyannote/speaker-diarization-3.1) | Yes | Configured pipeline (`models.diarization.name`) |
 | [`pyannote/segmentation-3.0`](https://huggingface.co/pyannote/segmentation-3.0) | Yes | Segmentation dependency of the pipeline |
 | [`pyannote/speaker-diarization-community-1`](https://huggingface.co/pyannote/speaker-diarization-community-1) | Yes | Pulled by `pyannote.audio` during pipeline setup |
@@ -331,7 +332,7 @@ All three gated repos must be accepted; accepting only the configured
 
 Typical `audio-analyzer` log signature:
 
-```
+```text
 401 Client Error ... Cannot access gated repo for url
 https://huggingface.co/pyannote/segmentation-3.0/resolve/main/config.yaml
 ```
@@ -346,9 +347,9 @@ To fix:
 
 2. While signed in with the **same** HuggingFace account that owns the
    token, accept the licence on all three pages:
-   - https://huggingface.co/pyannote/speaker-diarization-community-1
-   - https://huggingface.co/pyannote/speaker-diarization-3.1
-   - https://huggingface.co/pyannote/segmentation-3.0
+   - <https://huggingface.co/pyannote/speaker-diarization-community-1>
+   - <https://huggingface.co/pyannote/speaker-diarization-3.1>
+   - <https://huggingface.co/pyannote/segmentation-3.0>
 
 3. Recreate the service so it retries the download:
 
@@ -373,7 +374,7 @@ missing. Always check the logs rather than the health endpoint.
 
 - Confirm the knowledge base was ingested. The operator UI exposes a
   Knowledge Base panel; see also
-  [rag-service/README.md](https://github.com/intel-retail/voice-enabled-interactions/blob/main/smart-kiosk-assistant/rag-service/README.md).
+  [rag-service/README.md](https://github.com/intel-retail/voice-enabled-interactions/blob/release-2026.2.0/smart-kiosk-assistant/rag-service/README.md).
 - Check `rag-service` logs for retrieval scores and reranker output.
 - Try the same question from the API to rule out the UI:
 

@@ -1,6 +1,6 @@
 # Smart Kiosk Assistant
 
-Smart Kiosk Assistant is a voice-first retrieval-augmented kiosk stack for retail, QSR, and other customer-facing deployments. A browser session captures microphone audio, streams it through speech-to-text, retrieves grounded answers from a local knowledge base, and plays a generated spoken response back to the user. The full stack is designed to run locally on Intel CPU/GPU with OpenVINO-backed services.
+Smart Kiosk Assistant is a voice-first retrieval-augmented kiosk stack for retail, QSR, and other customer-facing deployments. A browser session captures microphone audio, streams it through speech-to-text, retrieves grounded answers from a local knowledge base, and plays a generated spoken response back to the user. The full stack is designed to run locally on Intel CPU/GPU with OpenVINO™-backed services.
 
 ## What This Repository Contains
 
@@ -19,7 +19,7 @@ Smart Kiosk Assistant is a voice-first retrieval-augmented kiosk stack for retai
 1. The browser UI captures microphone audio and sends it to `kiosk-core`.
 2. `kiosk-core` forwards audio to `audio-analyzer` for transcription.
 3. `kiosk-core` sends the transcription, plus any runtime context, to `rag-service`.
-4. `rag-service` retrieves relevant chunks from Chroma, prompts the OpenVINO LLM, and streams the answer back.
+4. `rag-service` retrieves relevant chunks from Chroma, prompts the OpenVINO™ LLM, and streams the answer back.
 5. `kiosk-core` forwards the answer text to `text-to-speech`, stores the generated audio, and returns both text and audio metadata to the UI.
 
 ## Service Topology
@@ -27,7 +27,7 @@ Smart Kiosk Assistant is a voice-first retrieval-augmented kiosk stack for retai
 All five services are started by the top-level [docker-compose.yml](./docker-compose.yml).
 
 | Service | Port | Role | Source |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `audio-analyzer` | `8010` | Speech-to-text | [intel/audio-analyzer](https://hub.docker.com/r/intel/audio-analyzer) |
 | `text-to-speech` | `8011` | Speech synthesis | [intel/text-to-speech](https://hub.docker.com/r/intel/text-to-speech) |
 | `rag-service` | `8020` | Retrieval, ingestion, answer generation | [rag-service/README.md](./rag-service/README.md) |
@@ -40,7 +40,7 @@ All five services are started by the top-level [docker-compose.yml](./docker-com
 Clone the repository and pull the prebuilt images from Docker Hub:
 
 ```bash
-git clone -b <release-or-tag> --single-branch https://github.com/intel-retail/voice-enabled-interactions.git  #e.g. v4.0.0
+git clone -b release-2026.2.0 --single-branch https://github.com/intel-retail/voice-enabled-interactions.git
 cd voice-enabled-interactions/smart-kiosk-assistant
 docker compose pull
 docker compose up -d
@@ -50,11 +50,11 @@ Open [http://127.0.0.1:7860](http://127.0.0.1:7860) for the operator
 browser UI (chat + performance dashboard), and
 [http://127.0.0.1:7861](http://127.0.0.1:7861) for the customer-facing
 kiosk screen (queue-aware menu, cart, voice "Ask" button) — see
-[docs/user-guide/get-started/configuration.md](./docs/user-guide/get-started/configuration.md#kiosk_ui_mode).
+[docs/user-guide/get-started/configuration.md](./docs/user-guide/get-started/configuration.md#kiosk-ui-runtime-mode-kiosk_ui_mode).
 
 All five images (`audio-analyzer`, `text-to-speech`, `rag-service`,
 `kiosk-core`, `kiosk-ui`) are pulled from the `intel/` namespace at the
-tag pinned in [.env](./.env). Model files and caches are stored in Docker
+tag pinned in [.env.example](./.env.example). Model files and caches are stored in Docker
 named volumes, so no host directory layout needs to be prepared in
 advance.
 

@@ -2,10 +2,10 @@
 
 <!--hide_directive
 <div class="component_card_widget">
-  <a class="icon_github" href="https://github.com/intel-retail/voice-enabled-interactions/tree/main/smart-kiosk-assistant">
+  <a class="icon_github" href="https://github.com/intel-retail/voice-enabled-interactions/tree/release-2026.2.0/smart-kiosk-assistant">
      GitHub
   </a>
-  <a class="icon_document" href="https://github.com/intel-retail/voice-enabled-interactions/blob/main/smart-kiosk-assistant/README.md">
+  <a class="icon_document" href="https://github.com/intel-retail/voice-enabled-interactions/blob/release-2026.2.0/smart-kiosk-assistant/README.md">
      Readme
   </a>
 </div>
@@ -17,18 +17,18 @@ Smart Kiosk Assistant is a voice-first, retrieval-augmented kiosk stack
 for retail, Quick Service Restaurant (QSR), and similar customer-facing deployments. The browser
 captures microphone audio, the stack transcribes it, retrieves a grounded
 answer from a local knowledge base, and plays a synthesized reply. All
-inference runs locally on Intel CPU or GPU via OpenVINO.
+inference runs locally on Intel CPU or GPU via OpenVINO™.
 
 ## Services
 
-| Service          | Port | Role                                           |
-| ---------------- | ---- | ---------------------------------------------- |
-| `audio-analyzer` | 8010 | Speech-to-text (Whisper)                       |
-| `text-to-speech` | 8011 | Speech synthesis (SpeechT5 / Qwen-TTS)         |
-| `rag-service`    | 8020 | Knowledge-base retrieval and answer generation |
-| `kiosk-core`     | 8012 | FastAPI session orchestrator                   |
-| `kiosk-ui`       | 7860 | React browser interface — operator screen       |
-| `kiosk-ui-customer` | 7861 | React browser interface — customer screen   |
+| Service             | Port | Role                                           |
+| ------------------- | ---- | ---------------------------------------------- |
+| `audio-analyzer`    | 8010 | Speech-to-text (Whisper)                       |
+| `text-to-speech`    | 8011 | Speech synthesis (SpeechT5 / Qwen-TTS)         |
+| `rag-service`       | 8020 | Knowledge-base retrieval and answer generation |
+| `kiosk-core`        | 8012 | FastAPI session orchestrator                   |
+| `kiosk-ui`          | 7860 | React browser interface — operator screen      |
+| `kiosk-ui-customer` | 7861 | React browser interface — customer screen      |
 
 `audio-analyzer`, `text-to-speech`, and `rag-service` host the inference
 models. `kiosk-core` and `kiosk-ui` are I/O-only.
