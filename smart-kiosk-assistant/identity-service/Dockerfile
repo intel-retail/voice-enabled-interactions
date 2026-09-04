@@ -3,7 +3,7 @@
 # Base image bundles Intel OpenVINO + DL Streamer + GStreamer, matching the
 # gvadetect/gvaclassify pipelines and providing the OpenVINO runtime used for
 # face/voice embedding extraction (Phase 4+).
-FROM intel/dlstreamer:2026.2.0-ubuntu24-rc2
+FROM intel/dlstreamer:2026.2.0-ubuntu24-rc3
 
 # The dlstreamer image runs as a non-root user; switch to root to install deps.
 USER root

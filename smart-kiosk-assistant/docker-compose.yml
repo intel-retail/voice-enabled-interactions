@@ -149,11 +149,11 @@ services:
     #
     # Those fixes (FastAPI + uvicorn, /health, bounded qmassa collection via
     # collect_gpu.sh) have since been merged back into the edge-ai-suites
-    # source, published as hl-ai-metrics-collector:2026.2.0-rc2, so this
+    # source, published as hl-ai-metrics-collector:2026.2.0-rc3, so this
     # service can go back to pulling the shared image instead of shadowing it
     # with a locally-built one. Override the tag with METRICS_COLLECTOR_TAG in
     # .env if a newer version is published.
-    image: ${REGISTRY:-intel}/hl-ai-metrics-collector:${METRICS_COLLECTOR_TAG:-2026.2.0-rc2}
+    image: ${REGISTRY:-intel}/hl-ai-metrics-collector:${METRICS_COLLECTOR_TAG:-2026.2.0-rc3}
     container_name: metrics-collector
     privileged: true
     pid: host
