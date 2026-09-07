@@ -175,7 +175,7 @@ still boots (`inference_ready=false`); `verify`/`register` report *not ready*.
 ```
 identity-service/
 ├── main.py                         # FastAPI app + endpoints + lifespan
-├── Dockerfile                      # FROM intel/dlstreamer:2026.2.0-ubuntu24-rc2
+├── Dockerfile                      # FROM intel/dlstreamer:2026.2.0-ubuntu24-rc3
 ├── requirements.txt
 ├── identity_core/
 │   ├── config.py                   # typed Settings (YAML + env)

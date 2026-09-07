@@ -33,23 +33,6 @@
   Verify with `ls /dev/dri/renderD*`. If the packages are not found,
   follow the [Intel GPU driver guide](https://dgpu-docs.intel.com).
 
-## Host Packages (Standalone Run Only)
-
-When running `kiosk-core` and the Gradio UI directly on the host:
-
-```bash
-sudo apt-get update
-sudo apt-get install -y ffmpeg alsa-utils libsndfile1
-```
-
-`audio-analyzer`, `text-to-speech`, and `rag-service` are still recommended
-to run in containers even in this mode.
-
-## Python (Standalone Run Only)
-
-- Python 3.10 or newer.
-- Dependencies installed from `requirements.txt`.
-
 ## Network
 
 - Outbound internet access on first run to download model assets from

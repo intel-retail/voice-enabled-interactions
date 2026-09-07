@@ -83,6 +83,18 @@ view with the queue-aware menu, live cart, and a full-width **Ask**
 button. Intended for the physical kiosk touchscreen (tested at 1920×1080
 landscape) while the operator screen runs on a separate monitor.
 
+> **Running on a remote or headless host?** Browsers only grant microphone
+> access on a secure origin, so opening `http://<remote-ip>:7860` directly
+> loads the page but fails with *"Microphone access requires HTTPS or
+> localhost."* Forward the ports over SSH and use `127.0.0.1`:
+>
+> ```bash
+> ssh -L 7860:localhost:7860 -L 7861:localhost:7861 <user>@<remote-ip>
+> ```
+>
+> See [Microphone Does Not Work Over a Remote IP](../troubleshooting.md#microphone-does-not-work-over-a-remote-ip-insecure-origin)
+> for the alternative Chrome flag workaround.
+
 ## Logs
 
 ```bash

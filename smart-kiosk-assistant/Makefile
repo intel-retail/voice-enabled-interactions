@@ -22,17 +22,29 @@ export
 
 COMPOSE_FILE     ?= docker-compose.yml
 
-# REGISTRY=false  → build images locally from source (default for dev)
-# REGISTRY=true   → pull pre-built images from Docker Hub / use .env REGISTRY value
-# NOTE: "false" is a build-mode flag only. docker-compose always receives the real
-#       registry name (REGISTRY=intel) so image tags are never "false/<svc>:...".
+# REGISTRY=false  → build images locally from source
+# REGISTRY=true   → pull pre-built images from the registry
+#
+# NOTE: `-include .env` above runs BEFORE this assignment, and the shipped
+#       .env sets REGISTRY=intel. Because `?=` does not override an
+#       already-set variable, the effective default when a .env is present is
+#       PULL, not build. Pass REGISTRY=false explicitly to build locally:
+#           make build REGISTRY=false
+#
+# NOTE: "false" and "true" are build-mode flags only. docker-compose always
+#       receives the real registry name (REGISTRY=intel) so image tags are never
+#       "false/<svc>:..." or "true/<svc>:...". Passing an explicit registry name
+#       (e.g. REGISTRY=myrepo.example.com/team) also selects pull mode and is
+#       forwarded to docker-compose verbatim — that registry must mirror every
+#       image, including the upstream audio-analyzer, text-to-speech, and
+#       hl-ai-metrics-collector, since `make up` resolves them the same way.
 REGISTRY         ?= false
 
 # _DOCKER_REGISTRY: the actual registry prefix passed to docker-compose.
-# When the user passes REGISTRY=false it is treated as a build-mode switch;
-# the real registry name comes from .env (default: intel).
+# When the user passes REGISTRY=false or REGISTRY=true it is treated as a
+# build-mode switch; the real registry name comes from .env (default: intel).
 _ENV_REGISTRY    ?= intel
-_DOCKER_REGISTRY  = $(if $(filter false FALSE,$(REGISTRY)),$(_ENV_REGISTRY),$(REGISTRY))
+_DOCKER_REGISTRY  = $(if $(filter false FALSE true TRUE,$(REGISTRY)),$(_ENV_REGISTRY),$(REGISTRY))
 
 RELEASE_TAG      ?= 2026.1.0
 export TAG       := $(RELEASE_TAG)
@@ -113,7 +125,7 @@ help: ## Show this help message
 	@echo "  make show-config       Print resolved configuration"
 	@echo ""
 	@echo "$(YELLOW)Core Commands:$(NC)"
-	@echo "  make build             Build (REGISTRY=false) or pull (REGISTRY=true) images"
+	@echo "  make build             Pull images (default); REGISTRY=false builds locally"
 	@echo "  make up                Start all services"
 	@echo "  make down              Stop all services"
 	@echo "  make restart           Stop then start all services"
@@ -341,14 +353,14 @@ show-config: ## Print resolved configuration
 # Build
 # =============================================================================
 
-build: check-env ## Build (REGISTRY=false) or pull (REGISTRY=true) all images
+build: check-env ## Pull images (default with .env); REGISTRY=false builds locally
 	@echo "$(BLUE)Preparing Docker images...$(NC)"
 	@if [ "$(REGISTRY)" = "false" ] || [ "$(REGISTRY)" = "FALSE" ]; then \
 		echo "$(YELLOW)  REGISTRY=false → Building local services from source$(NC)"; \
 		REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) build $(LOCAL_ONLY_SERVICES) $(_IDENTITY_SVC); \
 	else \
-		echo "$(YELLOW)  REGISTRY=$(REGISTRY) → Pulling images from registry$(NC)"; \
-		REGISTRY=$(REGISTRY) $(COMPOSE_BASE) pull $(LOCAL_ONLY_SERVICES); \
+		echo "$(YELLOW)  REGISTRY=$(REGISTRY) → Pulling images from registry '$(_DOCKER_REGISTRY)'$(NC)"; \
+		REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull $(LOCAL_ONLY_SERVICES); \
 		if [ -n "$(_IDENTITY_SVC)" ]; then \
 			echo "$(YELLOW)  Building identity-service locally (no registry image)...$(NC)"; \
 			REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) build identity-service; \

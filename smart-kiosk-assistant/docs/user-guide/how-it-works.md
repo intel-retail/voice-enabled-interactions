@@ -14,10 +14,12 @@ speech synthesis through three model-hosting microservices.
 
 ## Components
 
-- `kiosk-ui` — Gradio interface. Captures microphone audio via the Web
-  Audio API and posts it to `kiosk-core`. Polls the session endpoint
-  until answer text and generated audio are available, then plays the
-  audio clips back in order.
+- `kiosk-ui` — React (Vite + TypeScript) single-page application served by
+  nginx. Captures microphone audio via the Web Audio API and posts it to
+  `kiosk-core`. Polls the session endpoint until answer text and generated
+  audio are available, then plays the audio clips back in order. The same
+  image also serves the customer screen (`kiosk-ui-customer`) via
+  `KIOSK_UI_MODE`.
 - `kiosk-core` — FastAPI session orchestrator. Owns the per-session
   state machine, forwards audio to `audio-analyzer`, sends the
   transcription to `rag-service`, and streams the generated answer

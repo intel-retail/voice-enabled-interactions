@@ -149,11 +149,11 @@ services:
     #
     # Those fixes (FastAPI + uvicorn, /health, bounded qmassa collection via
     # collect_gpu.sh) have since been merged back into the edge-ai-suites
-    # source, published as hl-ai-metrics-collector:2026.2.0-rc2, so this
+    # source, published as hl-ai-metrics-collector:2026.2.0-rc3, so this
     # service can go back to pulling the shared image instead of shadowing it
     # with a locally-built one. Override the tag with METRICS_COLLECTOR_TAG in
     # .env if a newer version is published.
-    image: ${REGISTRY:-intel}/hl-ai-metrics-collector:${METRICS_COLLECTOR_TAG:-2026.2.0-rc2}
+    image: ${REGISTRY:-intel}/hl-ai-metrics-collector:${METRICS_COLLECTOR_TAG:-2026.2.0-rc3}
     container_name: metrics-collector
     privileged: true
     pid: host
@@ -512,7 +512,8 @@ services:
       KIOSK_CORE_TTS_VOICE:    Ryan
       KIOSK_CORE_METRICS_URL:  http://metrics-collector:9000
       # Diarization — re-enable once HF terms are accepted for pyannote models.
-      # Accept terms at: https://huggingface.co/pyannote/speaker-diarization-3.1
+      # Accept terms at: https://huggingface.co/pyannote/speaker-diarization-community-1
+      #                  https://huggingface.co/pyannote/speaker-diarization-3.1
       #                  https://huggingface.co/pyannote/segmentation-3.0
       # Was hardcoded to "true" here, which silently ignored any
       # KIOSK_CORE_DIARIZATION_ENABLED=false set in the shell/.env — only

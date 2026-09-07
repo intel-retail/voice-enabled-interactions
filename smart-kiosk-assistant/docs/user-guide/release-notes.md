@@ -45,6 +45,7 @@ This release delivers a unified Smart Kiosk Assistant platform with dual React-b
 
 - **Sample RTSP Video Provisioning:** Added configurable tooling to download and provision sample video clips required by the queue analytics pipeline.
 
+
 ## 2026.1.0
 
 The initial release of Smart Kiosk Assistant marks the launch of a voice-enabled

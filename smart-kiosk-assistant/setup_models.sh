@@ -25,7 +25,10 @@
 #   ./setup_models.sh [OPTIONS]
 #
 # Options:
-#   --device  CPU|GPU|NPU   Target inference device for OVMS  (default: GPU)
+#   --device  CPU|GPU       Target inference device for OVMS  (default: GPU)
+#                           NPU is not supported for the OVMS-served LLM; use
+#                           --device NPU --skip-ovms to target the NPU with the
+#                           other services (see ITEP-96031).
 #   --int4                  Use INT4 model instead of INT8 (smaller, less accurate)
 #   --skip-ovms             Skip the OVMS LLM model download
 #   --skip-queue            Skip the YOLO26 queue-service model download/export
@@ -36,6 +39,7 @@
 # Examples:
 #   ./setup_models.sh                        # GPU (default, INT8) + YOLO26
 #   ./setup_models.sh --device CPU           # CPU-only systems
+#   ./setup_models.sh --device NPU --skip-ovms   # NPU for queue/identity/ASR only
 #   ./setup_models.sh --int4                 # INT4 (smaller, faster, less accurate)
 #   ./setup_models.sh --skip-queue           # LLM only, skip queue-service model
 #   ./setup_models.sh --identity             # LLM + identity (face detect/reid + ECAPA voice)
@@ -136,6 +140,28 @@ done
 
 if [[ "${TARGET_DEVICE}" != "CPU" && "${TARGET_DEVICE}" != "GPU" && "${TARGET_DEVICE}" != "NPU" ]]; then
     echo "ERROR: --device must be CPU, GPU, or NPU (got: ${TARGET_DEVICE})"
+    exit 1
+fi
+
+# NPU is not a usable device for the served LLM, so fail here rather than write
+# TARGET_DEVICE=NPU into .env and produce a stack that starts cleanly and then
+# fails on every turn. Measured on an MTL NPU with Qwen3-4B and OVMS 2026.3
+# (ITEP-96031):
+#   - INT8 is correct but takes 191-801s per call — a turn makes several.
+#   - INT4 (OpenVINO/Qwen3-4B-int4-ov) is group-quantized and numerically
+#     broken on NPU: it emits "the the the..." instead of text.
+#   - The NPU-optimized channel-wise tier (int4-cw) is not published for
+#     Qwen3-4B, only Qwen3-8B.
+# The NPU is still used by queue-service, identity-service and whisper-tiny
+# ASR — this restriction applies only to the OVMS-served LLM.
+if [ "${TARGET_DEVICE}" = "NPU" ] && [ "${SKIP_OVMS}" != "true" ]; then
+    echo "ERROR: NPU is not supported for the OVMS-served LLM."
+    echo "       Qwen3-4B on NPU is either correct but ~100x too slow (INT8)"
+    echo "       or fast but numerically broken (INT4). See ITEP-96031 and"
+    echo "       docs/user-guide/troubleshooting.md for the measurements."
+    echo ""
+    echo "       Use:  $0 --device GPU        (recommended)"
+    echo "             $0 --device NPU --skip-ovms   (NPU for the other models)"
     exit 1
 fi
 

@@ -27,12 +27,12 @@ so the two repositories must sit side by side:
         └── text-to-speech/
 ```
 
-From whatever parent directory you keep source in:
+From whatever parent directory you keep the source in, run:
 
 ```bash
-git clone https://github.com/intel-retail/voice-enabled-interactions.git
+git clone -b main --single-branch https://github.com/intel-retail/voice-enabled-interactions.git
 cd voice-enabled-interactions/
-git clone --depth 1 --filter=blob:none --sparse \
+git clone -b main --depth 1 --filter=blob:none --sparse \
   https://github.com/open-edge-platform/edge-ai-libraries.git
 git -C edge-ai-libraries sparse-checkout set \
   microservices/audio-analyzer microservices/text-to-speech
@@ -72,7 +72,7 @@ OVMS serves. This runs once and caches into `./models/`:
 ./setup_models.sh --int4
 ```
 
-`setup_models.sh` downloads the pre-converted OpenVINO model from
+`setup_models.sh` downloads the pre-converted OpenVINO™ model from
 HuggingFace Hub and updates `OVMS_MODEL_NAME`, `TARGET_DEVICE`, and
 `RENDER_GID` in `.env`. See `./setup_models.sh --help` for all options.
 
@@ -125,40 +125,15 @@ docker build -t intel/text-to-speech:local \
 # rag-service
 docker build -t intel/rag-service:local ./rag-service
 
-# kiosk-core / kiosk-ui (same Dockerfile, different entrypoints)
+# kiosk-core
 docker build -t intel/kiosk-core:local .
-docker build -t intel/kiosk-ui:local   .
+
+# kiosk-ui (React SPA served by nginx)
+docker build -t intel/kiosk-ui:local ./kiosk-ui
 ```
 
-The `kiosk-ui` container reuses the `kiosk-core` image and runs
-`python3 gradio_app.py` as its command.
-
-## Build a Python Environment (Standalone kiosk-core + UI)
-
-`kiosk-core` and `kiosk-ui` can run directly on the host while the three
-model-hosting services run in containers. Install host packages, then
-create a virtual environment and install dependencies.
-
-`kiosk-core` requires **Python 3.12** (matching the `python:3.12-slim` base
-image used by the Dockerfile). `openwakeword`'s declared `tflite-runtime`
-dependency has no wheels for Python 3.12+, but `kiosk-core` only uses
-openwakeword's ONNX inference path by default, so install `requirements.txt`
-first, then `openwakeword` itself with `--no-deps` in a separate pip
-invocation, exactly as the Dockerfile does:
-
-```bash
-sudo apt-get update
-sudo apt-get install -y ffmpeg alsa-utils libsndfile1 libportaudio2
-
-python3.12 -m venv .venv
-source .venv/bin/activate
-python --version   # should report Python 3.12.x
-pip install --upgrade pip
-pip install -r requirements.txt
-pip install --no-deps openwakeword==0.6.0
-```
-
-See [Run On the Host](./run-standalone.md) for the launch commands.
+The `kiosk-ui` image serves both the operator screen and the customer
+screen; the mode is selected at container start via `KIOSK_UI_MODE`.
 
 ## Verifying the Build
 

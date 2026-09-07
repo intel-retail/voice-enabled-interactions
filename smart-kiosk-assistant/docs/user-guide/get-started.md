@@ -28,7 +28,12 @@ session and product ordering, `kiosk-ui` is the React front end, and
 - Intel hardware (CPU, iGPU, or NPU)
 - Intel GPU drivers (recommended) — see the
   [Intel GPU driver guide](https://dgpu-docs.intel.com)
-- A [HuggingFace account and access token](https://huggingface.co/settings/tokens)
+- A [HuggingFace account and access token](https://huggingface.co/settings/tokens),
+  with the three gated Pyannote licences accepted — required for speaker
+  diarization:
+  [`speaker-diarization-community-1`](https://huggingface.co/pyannote/speaker-diarization-community-1),
+  [`speaker-diarization-3.1`](https://huggingface.co/pyannote/speaker-diarization-3.1),
+  and [`segmentation-3.0`](https://huggingface.co/pyannote/segmentation-3.0)
 - At least 30 GB free disk space for models and Docker images
 
 > **Note:** First-time setup downloads the OVMS LLM model (~4 GB) plus the
@@ -70,7 +75,7 @@ Skip this block and set `TARGET_DEVICE=CPU` in `.env` if no Intel GPU is availab
 ## Step 2: Clone the Repository
 
 ```bash
-git clone https://github.com/intel-retail/voice-enabled-interactions.git
+git clone -b <release-or-tag> --single-branch https://github.com/intel-retail/voice-enabled-interactions.git  #e.g. v4.0.0
 cd voice-enabled-interactions/smart-kiosk-assistant
 ```
 
@@ -83,14 +88,26 @@ make init-env        # copies .env.example → .env
 ```
 
 Open `.env` and set your HuggingFace token (free account at
-https://huggingface.co/settings/tokens). You must also accept the Pyannote
-licence at https://huggingface.co/pyannote/speaker-diarization-3.1 (required
-for speaker diarization):
+https://huggingface.co/settings/tokens):
 
 ```bash
 # .env
 HF_TOKEN=hf_your_token_here
 ```
+
+Speaker diarization uses three **gated** Pyannote models. While signed in to
+HuggingFace with the same account that owns the token, accept the licence on
+**all three** model pages — accepting only some of them is not enough, and the
+`audio-analyzer` container will fail to download the pipeline:
+
+- https://huggingface.co/pyannote/speaker-diarization-community-1
+- https://huggingface.co/pyannote/speaker-diarization-3.1
+- https://huggingface.co/pyannote/segmentation-3.0
+
+> **Note:** If you do not want to accept these licences, set
+> `KIOSK_CORE_DIARIZATION_ENABLED=false` in `.env`. The stack starts normally
+> and speech-to-text keeps working — only per-speaker attribution is
+> unavailable.
 
 For Intel GPU inference (the default `TARGET_DEVICE=GPU`), set `RENDER_GID`
 so containers can access `/dev/dri`:
@@ -305,7 +322,6 @@ make clean           # stop and remove named volumes for a clean restart
 ./get-started/system-requirements.md
 ./get-started/build-from-source.md
 ./get-started/run-container.md
-./get-started/run-standalone.md
 ./get-started/configuration.md
 
 :::

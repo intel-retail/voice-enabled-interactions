@@ -240,7 +240,7 @@ The session snapshot returned by **Get Session**, **Start**, and **Start File** 
 |---|---|---|
 | `index` | `int` | 1-based sentence index within the session |
 | `text` | `string` | Sentence text that was synthesized |
-| `audio_file` | `string` | Absolute path to the generated WAV file on the server. Accessible to the Gradio UI when both share the same `generated_audio/` volume mount. |
+| `audio_file` | `string` | Absolute path to the generated WAV file on the server. Accessible to the kiosk UI when both share the same `generated_audio/` volume mount. |
 
 ---
 

@@ -81,8 +81,9 @@ model:
   #                and any YOLO whose converter is actually supported)
   #   decoder   -> gvainference + src/yolo_decoder.py
   #
-  # YOLO26 REQUIRES `decoder`. DLStreamer 2026.1.0 and 2026.2.0-rc2 only ship
-  # YOLO converters up to `yolo_v8`. Setting converter `yolo_v10`/`yolo_v11`
+  # YOLO26 REQUIRES `decoder`. DLStreamer 2026.1.0 and 2026.2.0 (through
+  # -rc3) only ship YOLO converters up to `yolo_v8`. Setting converter
+  # `yolo_v10`/`yolo_v11`
   # in the model-proc is accepted WITHOUT ANY ERROR but decodes to zero
   # detections, which presents exactly like an empty camera. Do not "simplify"
   # this back to gvadetect without first confirming detections actually appear.

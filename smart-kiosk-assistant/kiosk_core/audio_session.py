@@ -102,6 +102,67 @@ _WHISPER_FILLER = re.compile(
     re.IGNORECASE,
 )
 
+_DEDUP_PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
+
+
+def _collapse_repeated_phrases(text: str) -> str:
+    """Fold consecutive repeated word runs (window 1-8) to a single occurrence.
+
+    Applied to a fixpoint so triples collapse too. Safety net for transcripts
+    assembled from multiple ASR chunks where the same utterance can appear
+    twice ("How are you today? How are you today?").
+    """
+    if len(text.split()) < 2:
+        return text
+
+    def _one_pass(words: list[str]) -> list[str]:
+        result: list[str] = []
+        i = 0
+        while i < len(words):
+            matched = False
+            max_window = min(8, (len(words) - i) // 2)
+            for w in range(max_window, 0, -1):
+                if words[i:i + w] == words[i + w:i + 2 * w]:
+                    result.extend(words[i:i + w])
+                    i += 2 * w
+                    matched = True
+                    break
+            if not matched:
+                result.append(words[i])
+                i += 1
+        return result
+
+    current = text.split()
+    for _ in range(8):
+        collapsed = _one_pass(current)
+        if collapsed == current:
+            break
+        current = collapsed
+    return " ".join(current)
+
+
+def _assemble_transcript(parts: list[str]) -> str:
+    """Join transcript chunk parts, dropping consecutive duplicates.
+
+    A chunk's text that repeats the previous kept part (case/punctuation-
+    insensitive) is skipped before joining, then any residual repeated phrase
+    inside the joined string is collapsed. This is the single assembly point
+    for the user-visible transcript, so it guards against duplicate text no
+    matter which upstream ASR path produced it.
+    """
+    deduped: list[str] = []
+    prev_norm: str | None = None
+    for part in parts:
+        if not part:
+            continue
+        norm = " ".join(_DEDUP_PUNCT_RE.sub(" ", part.lower()).split())
+        if norm and norm == prev_norm:
+            continue
+        deduped.append(part)
+        prev_norm = norm
+    return _collapse_repeated_phrases(" ".join(deduped).strip())
+
+
 # Domain vocabulary for the semantic fallback in _filter_target_speaker.
 # When the primary customer is silent for an entire chunk this set is used
 # to decide whether a background speaker said something kiosk-relevant enough
@@ -340,7 +401,7 @@ class BaseAudioSession:
 
     def snapshot(self) -> dict[str, object]:
         with self._lock:
-            transcript = " ".join(part for part in self.transcript_parts if part).strip()
+            transcript = _assemble_transcript(self.transcript_parts)
             response_text = "".join(self.response_parts).strip()
             return {
                 "session_id": self.session_id,
@@ -539,7 +600,7 @@ class BaseAudioSession:
         # ended with an error mid-stream (e.g. a transient ASR failure on one
         # chunk).  Only skip entirely when NO audio was captured at all.
         self._t_turn_start = time.monotonic()
-        transcript = " ".join(part for part in self.transcript_parts if part).strip()
+        transcript = _assemble_transcript(self.transcript_parts)
         if transcript:
             # A real, accepted transcript ends any rejection streak for this
             # conversation — the customer was just heard, so a stale streak
