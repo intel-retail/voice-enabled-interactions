@@ -9,7 +9,7 @@ YOLO11) purely through configuration: ``pipeline.py`` only ever reads
 ``ir_path``/``proc_path``, while this module resolves *how* the IR is
 obtained. The ``omz`` provider downloads the pre-converted IR directly from the
 Intel Open Model Zoo storage server (the same artifact ``omz_downloader``
-fetches), because the ``intel/dlstreamer:2026.2.0-ubuntu24-rc2`` image ships neither
+fetches), because the ``intel/dlstreamer:2026.2.0-ubuntu24`` image ships neither
 the OMZ CLI tools nor ``openvino-dev``.
 """
 import logging

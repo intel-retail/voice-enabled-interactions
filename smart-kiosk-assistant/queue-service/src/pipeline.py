@@ -53,7 +53,7 @@ _PERSON_FILTER_TYPE = "person_filter"
 # gvapython binding for the YOLO26 tensor decoder.
 #
 # YOLO26 cannot go through `gvadetect`: the newest YOLO post-processing
-# converter compiled into DLStreamer 2026.1.0 and 2026.2.0-rc1 is `yolo_v8`.
+# converter compiled into DLStreamer 2026.1.0 and 2026.2.0 is `yolo_v8`.
 # The `yolo_v10`/`yolo_v11` names are *accepted without error* yet decode to
 # zero detections, whereas an unknown name is rejected loudly -- a silent
 # failure that looks exactly like "the camera sees nobody".
