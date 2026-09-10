@@ -1,7 +1,7 @@
 # identity-service runtime dependencies.
 #
 # NOTE: OpenVINO, GStreamer and DL Streamer are provided by the base image
-# (intel/dlstreamer:2026.2.0-ubuntu24-rc2), so they are intentionally NOT pinned
+# (intel/dlstreamer:2026.2.0-ubuntu24), so they are intentionally NOT pinned
 # here.  faiss/opencv/numpy/etc. are added in Phase 3–4 as the pipeline lands.
 fastapi==0.116.1
 uvicorn==0.35.0

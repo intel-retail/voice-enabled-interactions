@@ -8,7 +8,6 @@
 # prerolls. Verified with the identical yolo26n_static.xml in both images:
 #
 #   intel/dlstreamer:2026.1.0-ubuntu24      (OpenVINO 2026.1) -> fails
-#   intel/dlstreamer:2026.2.0-ubuntu24-rc2  (OpenVINO 2026.2) -> works
 #   intel/dlstreamer:2026.2.0-ubuntu24      (OpenVINO 2026.2) -> works
 #
 # person-detection-retail-0013 loads fine on both, so a green pipeline with
