@@ -13,7 +13,7 @@ Why this exists instead of ``gvadetect``
 ----------------------------------------
 ``gvadetect`` post-processes detections with a named converter from the
 model-proc JSON. The converters compiled into DLStreamer 2026.1.0 *and*
-2026.2.0-rc1 top out at ``yolo_v8``. YOLO26's ``yolo_v10``-style output is
+2026.2.0 top out at ``yolo_v8``. YOLO26's ``yolo_v10``-style output is
 *accepted* by the ``yolo_v10``/``yolo_v11`` converter names -- no error, no
 warning -- but parses to **zero detections**, while a genuinely unknown
 converter name is rejected loudly. That silent-success failure mode is the
