@@ -27,12 +27,12 @@ so the two repositories must sit side by side:
         └── text-to-speech/
 ```
 
-From whatever parent directory you keep source in:
+From whatever parent directory you keep the source in, run:
 
 ```bash
-git clone -b <release-or-tag> --single-branch https://github.com/intel-retail/voice-enabled-interactions.git  #e.g. v4.0.0
+git clone -b main --single-branch https://github.com/intel-retail/voice-enabled-interactions.git
 cd voice-enabled-interactions/
-git clone --depth 1 --filter=blob:none --sparse \
+git clone -b main --depth 1 --filter=blob:none --sparse \
   https://github.com/open-edge-platform/edge-ai-libraries.git
 git -C edge-ai-libraries sparse-checkout set \
   microservices/audio-analyzer microservices/text-to-speech
@@ -72,7 +72,7 @@ OVMS serves. This runs once and caches into `./models/`:
 ./setup_models.sh --int4
 ```
 
-`setup_models.sh` downloads the pre-converted OpenVINO model from
+`setup_models.sh` downloads the pre-converted OpenVINO™ model from
 HuggingFace Hub and updates `OVMS_MODEL_NAME`, `TARGET_DEVICE`, and
 `RENDER_GID` in `.env`. See `./setup_models.sh --help` for all options.
 
