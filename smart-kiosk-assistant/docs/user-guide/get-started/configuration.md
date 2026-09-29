@@ -340,6 +340,61 @@ loaded via `OVModelForFeatureExtraction`/equivalent
 > bottleneck (the LLM is). `CPU` is normally fast enough for
 > embedding/reranking; `GPU` is the default to match prior behavior.
 
+## Device-Combination Benchmarking (`PROFILE`)
+
+To compare inference devices (ASR on CPU/GPU/NPU × TTS on CPU/GPU/NPU, with
+the LLM pinned to GPU) you do **not** need to edit any mounted `config.yaml`.
+The variables below override the audio-analyzer and text-to-speech configs
+from the environment. Every default reproduces the checked-in YAML exactly,
+so an ordinary `make up` is unaffected.
+
+| Variable | Default (= shipped config) | Purpose |
+| --- | --- | --- |
+| `ASR_MODEL` | `distil-whisper/distil-small.en` | ASR checkpoint |
+| `ASR_DEVICE` | `GPU` | ASR final-commit device |
+| `ASR_PREVIEW_DEVICE` | `${ASR_DEVICE}` | Streaming/partial ASR pool device |
+| `DIARIZATION_DEVICE` | `CPU` | Diarization device (**CPU only**) |
+| `TTS_MODEL` | `kokoro` | TTS model |
+| `TTS_RUNTIME` | `kokoro` | TTS engine/runtime |
+| `TTS_DEVICE` | `CPU` | TTS device |
+| `TTS_SPEAKER` | `am_michael` | Voice (must match the model) |
+| `TTS_DTYPE` | `int8` | TTS precision (**GPU requires `fp16`**) |
+| `TTS_MODEL_VARIANT` | `custom_voice` | Model variant |
+| `KIOSK_RESULTS_HOST_DIR` | `./results` | Results bind mount (set by `PROFILE`) |
+| `KIOSK_METRICS_HOST_DIR` | `./metrics` | Metrics bind mount (set by `PROFILE`) |
+
+The supported workflow is a **profile** — an env file under
+`configs/benchmark-profiles/` holding one device combination:
+
+```bash
+make list-profiles
+make validate-profile PROFILE=asr-npu_tts-cpu   # pre-flight only, no bring-up
+make benchmark        PROFILE=asr-npu_tts-cpu   # -> results/asr-npu_tts-cpu/
+make benchmark-matrix                           # every profile + comparison
+```
+
+Each profile writes to its own `results/<profile>/` and `metrics/<profile>/`
+directory. Never point two profiles at one directory: the metrics consolidator
+matches extractors by filename *substring* and would silently average unrelated
+runs into a single meaningless row.
+
+> **`make validate-profile` is mandatory and runs automatically before
+> `make benchmark`.** Besides rejecting impossible combinations, it catches the
+> dangerous failure mode: `docker-compose.yml` mounts
+> `${ACCEL_MOUNT_PATH:-/dev/null}`, so with the portable default an "NPU"
+> profile **silently runs on CPU**, succeeds, and files plausible numbers under
+> an NPU label. The validator errors if `ACCEL_MOUNT_PATH` is unset, `/dev/null`
+> or missing, and verifies the host actually exposes the requested GPU/NPU.
+
+Because the production defaults cannot span all three devices
+(`distil-small.en` corrupts on NPU, `whisper-small`+ fails to compile on NPU,
+and Kokoro is CPU-only), the matrix pins `whisper-base` and
+`microsoft/speecht5_tts` on the `openvino` runtime so that **device is the only
+variable**. `baseline-production` measures the shipped configuration and should
+be compared on absolute latency only — it is *not* the `asr-gpu_tts-cpu` cell.
+
+See `configs/benchmark-profiles/README.md` for the full compatibility matrix.
+
 ## Environment Variables
 
 kiosk-core has no config file. All settings are controlled through environment variables.

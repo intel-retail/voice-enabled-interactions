@@ -204,7 +204,7 @@ services:
       METRICS_HTTP_PORT: "9000"
       NPU_LOG:           /tmp/results/npu_usage.csv
     volumes:
-      - ./metrics:/tmp/results
+      - ${KIOSK_METRICS_HOST_DIR:-./metrics}:/tmp/results
       - /sys/devices:/sys/devices
       - /dev/dri:/dev/dri:rw
       - /sys/kernel/debug:/sys/kernel/debug:ro
@@ -313,6 +313,24 @@ services:
       # Do NOT set ASR_DEVICE=NPU while models.asr.name is distil-small.en —
       # that combination is confirmed to corrupt output on this stack.
       AUDIO_ANALYZER__MODELS__ASR__DEVICE: ${ASR_DEVICE:-CPU}
+      # ASR model override — paired with ASR_DEVICE because the two are not
+      # independent: distil-small.en corrupts output on NPU (see above), so a
+      # device-combination benchmark profile that selects ASR_DEVICE=NPU must
+      # also move the model to an NPU-safe one. Defaults to empty so the
+      # mounted config.yaml's own models.asr.name wins when unset (compose
+      # omits an env var entirely when its value resolves to the empty string
+      # only for `KEY:` form, so the default here is the config's own value).
+      AUDIO_ANALYZER__MODELS__ASR__NAME: ${ASR_MODEL:-distil-whisper/distil-small.en}
+      # Preview (partial/streaming) ASR pool device. Distinct from the
+      # final-commit pool above — config.yaml carries models.asr.preview.device
+      # separately. Falls back to ASR_DEVICE so a profile only has to set one
+      # variable unless it deliberately splits the two pools.
+      AUDIO_ANALYZER__MODELS__ASR__PREVIEW__DEVICE: ${ASR_PREVIEW_DEVICE:-${ASR_DEVICE:-CPU}}
+      # Diarization device. Loaded via torch.device(<value>) — PyTorch has no
+      # "gpu" string (Intel GPU would need "xpu", which this component does not
+      # wire), so CPU is the only valid value today. Exposed anyway so a
+      # benchmark profile records it explicitly rather than leaving it implicit.
+      AUDIO_ANALYZER__MODELS__DIARIZATION__DEVICE: ${DIARIZATION_DEVICE:-CPU}
     volumes:
       # Kiosk-pinned config (see ./configs/README.md) — mounted as the
       # service config without modifying edge-ai-libraries.
@@ -352,6 +370,12 @@ services:
       - "8011:8011"
     devices:
       - /dev/dri:/dev/dri
+      # Intel NPU passthrough — same ACCEL_MOUNT_PATH mechanism as
+      # audio-analyzer/rag-service/identity-service. Required before
+      # TTS_DEVICE=NPU can do anything: without this the container has no
+      # accel node, OpenVINO silently falls back to CPU, and the run is
+      # mislabelled rather than failed. /dev/null is the inert default.
+      - ${ACCEL_MOUNT_PATH:-/dev/null}:/dev/accel/accel0
     group_add:
       - video
       - "${RENDER_GID:-992}"
@@ -359,6 +383,33 @@ services:
       # Point HF cache under ~/.cache so a single ./.cache mount persists
       # every model cache the service uses (HF, torch hub, etc.).
       HF_HOME: /app/text-to-speech/.cache/huggingface
+      # ── TTS engine selection (device-combination benchmarking) ────────────
+      # These four move together and MUST stay consistent — the TTS factory
+      # picks an implementation from (name, runtime) and then hands `device`
+      # to it, so an inconsistent triple fails at model load, not at request
+      # time. See configs/benchmark-profiles/README.md for the valid matrix.
+      #
+      #   Kokoro   : name=kokoro,                    runtime=kokoro,   CPU only
+      #   SpeechT5 : name=microsoft/speecht5_tts,    runtime=openvino, CPU|GPU|NPU
+      #   Qwen     : name=Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice,
+      #                                              runtime=openvino, CPU|GPU
+      #
+      # Defaults reproduce the shipped config.yaml exactly, so an unset
+      # environment behaves precisely as before this block existed.
+      TEXT_TO_SPEECH__MODELS__TTS__NAME:            ${TTS_MODEL:-kokoro}
+      TEXT_TO_SPEECH__MODELS__TTS__RUNTIME:         ${TTS_RUNTIME:-kokoro}
+      TEXT_TO_SPEECH__MODELS__TTS__DEVICE:          ${TTS_DEVICE:-CPU}
+      # dtype is NOT cosmetic on GPU: int8 on this iGPU measured 281s first
+      # call / 8.7s steady-state vs 0.92s on CPU, while fp16 is fine after
+      # warmup. Any GPU profile must set TTS_DTYPE=fp16 — validate_device_
+      # profile.py enforces this so a bad pairing fails in seconds rather
+      # than producing a plausible-but-wrong table 20 minutes later.
+      TEXT_TO_SPEECH__MODELS__TTS__DTYPE:           ${TTS_DTYPE:-int8}
+      # Voice vocabularies are per-implementation and do not overlap: Kokoro
+      # wants am_michael, SpeechT5/Qwen want Ryan. Switching the model without
+      # switching the speaker makes every synthesis request fail validation.
+      TEXT_TO_SPEECH__MODELS__TTS__DEFAULT_SPEAKER: ${TTS_SPEAKER:-am_michael}
+      TEXT_TO_SPEECH__MODELS__TTS__MODEL_VARIANT:   ${TTS_MODEL_VARIANT:-custom_voice}
       # 2 uvicorn worker PROCESSES so overlapping synth calls (e.g. a
       # speculative draft's pre-synthesis running alongside the real turn's
       # TTS) actually run concurrently instead of queueing behind Kokoro's
@@ -844,7 +895,7 @@ services:
       - kiosk_db:/app/data
       - ./configs/ordering:/app/configs/ordering:ro
       - ./conversations:/app/conversations
-      - ./results:/app/results
+      - ${KIOSK_RESULTS_HOST_DIR:-./results}:/app/results
     depends_on:
       audio-analyzer:
         condition: service_healthy
