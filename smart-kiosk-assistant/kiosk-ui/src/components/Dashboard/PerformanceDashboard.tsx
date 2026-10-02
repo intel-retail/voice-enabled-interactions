@@ -10,7 +10,7 @@
  *   │  🎤 → [ASR] → [Retrieval] → [LLM] → [TTS] → 🔊 │
  *   └─────────────────────────────────────────────┘
  *   ┌─ Performance KPIs ──────────────────────────┐
- *   │  ⚡ E2E  |  🎙 ASR  |  🧠 LLM  |  🔊 TTS  │
+ *   │  🗣️ V2V  |  🎙 ASR  |  🧠 LLM  |  🔊 TTS  │
  *   └─────────────────────────────────────────────┘
  *   ┌─ Hardware Utilization (live) ───────────────┐
  *   │  CPU ██░░  GPU ██░░  NPU ██░░               │
@@ -105,6 +105,8 @@ export function PerformanceDashboard({
 
             {/* Executive KPIs */}
             <ExecutiveKpis kpis={kpis} />
+
+            <div className="h-px bg-gray-200" />
 
             <div className="flex items-start justify-between gap-4">
               <p className="min-w-0 flex-1 text-justify text-[10px] leading-snug text-gray-400 italic">

@@ -33,9 +33,11 @@ from plugins.kiosk import cart_state_guard
 from agentic import config as agent_cfg
 from plugins.kiosk import confirm_guard
 from agentic import domain_config
+from plugins.kiosk import directive_mode
 from plugins.kiosk import item_intent_guard
 from agentic import llm_metrics
 from plugins.kiosk import menu_guard
+from plugins.kiosk import price_guard
 from plugins.kiosk import removal_guard
 from plugins.kiosk import reply_templates
 from agentic.adk_runtime import create_adk_model, create_runner, create_session_service
@@ -94,6 +96,116 @@ _DIETARY_INJECTED_TOOLS: action_result._MutableToolSet = action_result._MutableT
 # rationale as ``_dietary_ctx`` above.
 _utterance_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
     "utterance_ctx", default=""
+)
+
+
+# Tools that write to the orders/order_items tables. ``dry_run`` is forced
+# onto every call to one of these while a speculative draft is running (see
+# ``_speculative_ctx`` below), regardless of what the LLM generates — dry_run
+# is stripped from the model-visible schema entirely (like user_id/dietary),
+# so the model can never see or set it itself. This is a static, mechanical
+# list (unlike the role-classified sets above) because "never persist during
+# speculation" must hold for every DB-writing tool unconditionally, not just
+# ones matching a configurable guard role pattern.
+_MUTATING_TOOLS: frozenset[str] = frozenset({
+    "place_order", "update_order", "confirm_active_order",
+    "remove_from_order", "cancel_order", "confirm_order",
+})
+
+
+def _injected_param_names(tool_name: str) -> set[str]:
+    """Return the parameters ``_mcp_fn`` supplies itself for ``tool_name``.
+
+    These are exactly the parameters hidden from the model-visible schema in
+    :meth:`OrderingAgent._make_mcp_callable`. Kept as one function so the
+    schema and the description can never disagree about what is hidden.
+
+    Args:
+        tool_name: MCP tool being wrapped.
+
+    Returns:
+        Parameter names the runtime injects for this tool.
+    """
+    hidden: set[str] = set()
+    if tool_name in _USER_ID_INJECTED_TOOLS:
+        hidden.add("user_id")
+    if tool_name in _DIETARY_INJECTED_TOOLS:
+        hidden.add("dietary")
+    if tool_name in _MUTATING_TOOLS:
+        hidden.add("dry_run")
+    return hidden
+
+
+# Matches a Google-style ``Args:`` entry, capturing its indent and name.
+_ARGS_ENTRY_RE = re.compile(r"^(\s*)(\w+)\s*(?:\([^)]*\))?:\s")
+
+
+def _scrub_injected_args(description: str, hidden: set[str]) -> str:
+    """Remove the ``Args:`` entries for runtime-injected parameters.
+
+    Hiding a parameter from the JSON schema is not enough on its own: the tool
+    description still documents it, and the model follows the prose. Measured
+    against OVMS, ``place_order`` kept emitting ``"user_id": "kiosk-user"``
+    purely because its docstring described the argument — 27 emitted tokens
+    instead of 17, i.e. ~360ms of avoidable decode on the voice-to-voice
+    critical path (1,438ms → 1,079ms).
+
+    Only the entries for ``hidden`` parameters are removed; every other line,
+    including the behavioural guidance the ordering guards depend on, is left
+    untouched. Blanket-truncating descriptions was measured to be faster still
+    but made the model emit malformed calls (``{"items": {"classic chicken":
+    "1"}}``), so it is deliberately not done here.
+
+    Args:
+        description: The MCP tool's ``prompt_description``.
+        hidden:      Parameter names the runtime injects.
+
+    Returns:
+        The description with those parameters' ``Args:`` entries removed.
+    """
+    if not hidden or not description:
+        return description
+
+    lines = description.splitlines()
+    kept: list[str] = []
+    dropping_indent: int | None = None
+    for line in lines:
+        match = _ARGS_ENTRY_RE.match(line)
+        if match is not None:
+            indent = len(match.group(1))
+            # A new entry at or above the dropped entry's level ends the drop.
+            if dropping_indent is not None and indent <= dropping_indent:
+                dropping_indent = None
+            if match.group(2) in hidden and dropping_indent is None:
+                dropping_indent = indent
+                continue
+        elif dropping_indent is not None:
+            # Continuation lines are indented past the entry they belong to;
+            # a blank line or an outdent ends the entry.
+            if line.strip() and len(line) - len(line.lstrip()) > dropping_indent:
+                continue
+            dropping_indent = None
+        if dropping_indent is None:
+            kept.append(line)
+    return "\n".join(kept)
+
+# Set for the duration of a speculative (cache-warming / draft) agent call —
+# see ``OrderingAgent.chat(..., speculative=True)``. When true, ``_mcp_fn``
+# forces ``dry_run=True`` onto every tool in ``_MUTATING_TOOLS`` so a
+# speculative run — triggered from a still-changing, unconfirmed ASR preview
+# — can never write a real row to the orders database. Defaults to False so
+# a real (non-speculative) turn always persists normally, fail-safe.
+_speculative_ctx: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "speculative_ctx", default=False
+)
+
+# The tool_name+kwargs actually dispatched this turn, captured by _mcp_fn so
+# a speculative draft's tool call(s) can be replayed for real (dry_run=False)
+# at commit time without asking the LLM to decide again — see
+# ``OrderingAgent.chat()``'s ``tool_call_detail`` return field and the
+# replay path in ``kiosk_core/audio_session.py``. Reset per-turn in chat().
+_tool_call_log_ctx: contextvars.ContextVar[list[dict[str, Any]] | None] = (
+    contextvars.ContextVar("tool_call_log_ctx", default=None)
 )
 
 
@@ -1203,6 +1315,17 @@ def _strip_tool_syntax(reply: str) -> str:
 # receives a half-formed clause.
 _SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+")
 
+# Phrase (clause) boundaries: sentence terminators, plus a comma that is not
+# part of digit-grouping (e.g. the "," in "1,234" must never split). Releasing
+# at comma boundaries — not just full sentences — lets TTS start on "Sure,"
+# or "Your total is now 169 rupees," well before the model finishes the
+# sentence, shrinking time-to-first-informative-audio the same way
+# kiosk-voice-lab-main's ``speak_streaming()`` phrase splitter does. Every
+# safety condition in ``_SentenceGate._is_safe()`` still applies per phrase —
+# they are local (word-boundary) regex checks, so a claim never straddles a
+# phrase boundary undetected.
+_PHRASE_BREAK_RE = re.compile(r"(?<=[.!?])\s+|(?<!\d)(?<=,)\s+")
+
 
 def _normalise_for_compare(text: str) -> str:
     """Collapse whitespace so streamed and final text can be prefix-compared.
@@ -1233,15 +1356,20 @@ class _SentenceGate:
     because a later guard may rewrite text we would otherwise have spoken.
     """
 
-    def __init__(self, message: str, emit) -> None:
+    def __init__(self, message: str, emit, *, pregrounded: bool = False) -> None:
         """Initialise the gate.
 
         Args:
-            message: The customer's utterance, needed to detect confirm intent.
-            emit:    Callback invoked with each sentence cleared for speech.
+            message:     The customer's utterance, needed to detect confirm intent.
+            emit:        Callback invoked with each sentence cleared for speech.
+            pregrounded: Whether an authoritative ``[knowledge]`` block was
+                injected into this turn's prompt. Such a turn answers from that
+                block and is *expected* to call no tool, which relaxes
+                condition (a) below.
         """
         self._message = message
         self._emit = emit
+        self._pregrounded = pregrounded
         self._buffer = ""
         self._released: list[str] = []
         self._open = True
@@ -1266,7 +1394,26 @@ class _SentenceGate:
         #     [knowledge] markers / out-of-scope questions): it likewise only
         #     fires when `not tool_calls`, so a sentence it would replace can
         #     never have been released early.
-        if not tool_calls:
+        #
+        #     A *pre-grounded* turn is the one exception, and it is exempt for
+        #     the same reason chat() exempts it: the authoritative knowledge was
+        #     already placed in the prompt, so "no tool call" is the intended
+        #     outcome rather than a grounding failure. Every guard this
+        #     condition mirrors is itself disabled on such a turn — the
+        #     missing-tool-call retry, _force_knowledge(), and the ungrounded
+        #     reply guard are all additionally gated on `not pregrounded`.
+        #
+        #     The one whole-reply guard that is NOT pregrounded-exempt is the
+        #     catalogue-promise recovery, and it cannot collide here:
+        #     pre-grounding is only applied to a knowledge question that does
+        #     *not* match the catalogue regex, so the two are mutually
+        #     exclusive by construction.
+        #
+        #     That leaves _strip_knowledge_markers(), which does still rewrite a
+        #     pre-grounded reply when the model parrots the injected block back.
+        #     Condition (d2) below withholds exactly those sentences, so it is
+        #     load-bearing now rather than merely defensive.
+        if not tool_calls and not self._pregrounded:
             return False
         # (b) _force_confirm() replaces the reply on confirm-intent turns.
         if self._confirm_intent:
@@ -1313,13 +1460,18 @@ class _SentenceGate:
         #      TTS first.
         if removal_guard.claims_removal(sentence) and not removal_guard.current_state().succeeded:
             return False
+        # (c5) A restated total is only trustworthy when it matches this
+        #      turn's own tool result; chat() corrects a mismatch post-hoc via
+        #      price_guard.validate_reply(). See agentic/price_guard.py.
+        if price_guard.mismatched(sentence):
+            return False
         # (d) Anything that would be stripped or substituted wholesale.
         if _ERROR_PAYLOAD_RE.search(sentence) or _TOOL_SYNTAX_RE.search(sentence):
             return False
         # (d2) A parroted pre-grounding delimiter is rewritten by
-        #      _strip_knowledge_markers(). Condition (a) already withholds
-        #      pre-grounded turns (they run no tool), but this stays explicit
-        #      so the gate keeps mirroring chat() one-for-one.
+        #      _strip_knowledge_markers(). On a pre-grounded turn condition (a)
+        #      no longer withholds the reply, so this is the sole check
+        #      standing between a parroted "[knowledge]" and TTS.
         if _KNOWLEDGE_MARKER_RE.search(sentence):
             return False
         # (d3) A hallucinated citation marker is rewritten by
@@ -1336,7 +1488,11 @@ class _SentenceGate:
         return True
 
     def feed(self, delta: str, tool_calls: list[str]) -> None:
-        """Accumulate a streamed fragment and release any complete safe sentences.
+        """Accumulate a streamed fragment and release any complete safe phrases.
+
+        Releases at both sentence and comma boundaries (see
+        ``_PHRASE_BREAK_RE``) so TTS can start on an early clause instead of
+        waiting for the whole sentence.
 
         Args:
             delta:      Newly generated text.
@@ -1345,7 +1501,7 @@ class _SentenceGate:
         if not self._open or not delta:
             return
         self._buffer += delta
-        parts = _SENTENCE_END_RE.split(self._buffer)
+        parts = _PHRASE_BREAK_RE.split(self._buffer)
         # The trailing element has no terminator yet, so it stays buffered.
         self._buffer = parts.pop() if parts else ""
         for sentence in parts:
@@ -1965,6 +2121,13 @@ class OrderingAgent:
                 diet = _dietary_ctx.get()
                 if diet:
                     kwargs["dietary"] = diet
+            if tool_name in _MUTATING_TOOLS:
+                # Force dry_run onto every DB-writing tool while a speculative
+                # draft is running — never trust/expose this to the LLM (it
+                # is stripped from the schema below). Explicitly forced False
+                # otherwise, so a real turn always persists normally even if
+                # some stale value leaked in from elsewhere.
+                kwargs["dry_run"] = _speculative_ctx.get()
             if tool_name in action_result.CLAIM_TOOLS[action_result.ITEM_ADDED]:
                 # Catch a stale/pending item reference the model failed to
                 # update against what the customer just said this turn (e.g.
@@ -1997,6 +2160,15 @@ class OrderingAgent:
                         kwargs["items"] = filtered
             logger.info("[AGENT→MCP] tool=%s args=%s", tool_name, kwargs)
             result = await call_tool(tool_name, kwargs)
+            # Capture the exact tool_name+kwargs+result dispatched this turn
+            # so a speculative draft can be replayed for real (dry_run=False,
+            # same args) at commit time instead of re-running the LLM — see
+            # ``chat()``'s ``tool_call_detail`` return and the replay path in
+            # ``kiosk_core/audio_session.py``. Only meaningful for mutating
+            # tools; harmless to record reads too (never replayed).
+            _log = _tool_call_log_ctx.get()
+            if _log is not None:
+                _log.append({"tool_name": tool_name, "kwargs": dict(kwargs), "result": result})
             # Record the outcome *before* compression: the menu guard needs the
             # tool's own error payload, and compression is free to reshape a
             # successful result.
@@ -2004,6 +2176,7 @@ class OrderingAgent:
             menu_guard.record_tool_result(tool_name, result)
             removal_guard.record_tool_result(tool_name, result)
             confirm_guard.record_tool_result(tool_name, result)
+            price_guard.record_tool_result(tool_name, result)
             llm_metrics.record_guard((time.monotonic() - _guard_start) * 1000)
 
             # Refresh this session's cart/upsell memory from whatever the
@@ -2118,7 +2291,10 @@ class OrderingAgent:
             return result
 
         _mcp_fn.__name__ = tool_name
-        _mcp_fn.__doc__ = mcp_tool.description or tool_name
+        _mcp_fn.__doc__ = _scrub_injected_args(
+            mcp_tool.prompt_description or tool_name,
+            _injected_param_names(tool_name),
+        )
 
         # Build an explicit signature from the MCP JSON input schema so ADK
         # introspection produces a correct function-call declaration.
@@ -2149,6 +2325,12 @@ class OrderingAgent:
             # place_order/update_order — strip it to prevent the model from
             # hallucinating dietary values (e.g. "vegetarian" for chicken).
             if pname == "dietary" and tool_name in _DIETARY_INJECTED_TOOLS:
+                continue
+            # dry_run is a server/agent-internal flag (see _MUTATING_TOOLS
+            # above) — never expose it to the LLM; it is force-set by
+            # _mcp_fn based on _speculative_ctx, not by anything the model
+            # generates.
+            if pname == "dry_run" and tool_name in _MUTATING_TOOLS:
                 continue
             pytype = _infer_json_type(pspec or {})
             annotations[pname] = pytype
@@ -2182,6 +2364,7 @@ class OrderingAgent:
         user_id: str = "anonymous",
         history: list[dict[str, str]] | None = None,
         on_safe_sentence=None,
+        speculative: bool = False,
     ) -> dict[str, Any]:
         """Run one conversational turn and return the agent's response.
 
@@ -2192,11 +2375,22 @@ class OrderingAgent:
             history:    Previous turns [{role, content}, …] — used to seed
                         the ADK session when it does not yet exist (e.g.
                         after a rag-service restart).
+            speculative: If True, this is a speculative draft run — every
+                        mutating MCP tool this turn is forced to ``dry_run``
+                        (see ``_MUTATING_TOOLS``/``_speculative_ctx``), so it
+                        can never write a real order row. Also captures the
+                        exact tool_name+kwargs+result dispatched, returned as
+                        ``tool_call_detail``, so a caller can replay the same
+                        call for real later without re-running the LLM.
 
         Returns:
             dict with keys:
               - ``reply``:     str — the agent's text response.
               - ``tool_calls``: list[str] — tools invoked this turn.
+              - ``tool_call_detail``: list[dict] — {tool_name, kwargs, result}
+                for every tool dispatched this turn, in call order. Always
+                populated (not just for speculative turns) so a real turn's
+                calls can also be inspected if ever needed.
               - ``llm_ms``:      float | None — cumulative genuine LLM time
                 (prefill + decode, i.e. the full round-trip).
               - ``llm_ttft_ms``: float | None — cumulative prefill time only.
@@ -2226,13 +2420,87 @@ class OrderingAgent:
         # attempt re-discovery before this turn so ordering tools work.
         await self._refresh_mcp_tools()
 
-        logger.info("[AGENT] chat session=%s user=%s message=%r", session_id, user_id, message[:120])
+        logger.info(
+            "[AGENT] chat session=%s user=%s speculative=%s message=%r",
+            session_id, user_id, speculative, message[:120],
+        )
+
+        # Scoped to this call's asyncio task (each chat() invocation is its
+        # own top-level task, so this never leaks into a concurrent/real
+        # turn) — forces dry_run onto every mutating tool call below and
+        # starts a fresh capture list for tool_call_detail.
+        speculative_token = _speculative_ctx.set(speculative)
+        tool_call_log_token = _tool_call_log_ctx.set([])
+
+        # Must happen BEFORE the directive-mode branch below, not after it
+        # (the original position, further down this function). Directive
+        # mode returns early on a hit, and every accumulator in llm_metrics
+        # (_mcp_stats, _llm_stats, etc.) starts as None until reset() runs —
+        # record_mcp()/record() silently no-op on a None accumulator. With
+        # reset() only called after the directive-mode return, every
+        # directive-mode turn's real call_tool() timing (confirmed via logs
+        # to actually execute — e.g. place_order) was captured into a dead
+        # accumulator and discarded, so mcp_ms/mcp_calls always came back
+        # None/0 even though the MCP round-trip genuinely happened.
+        llm_metrics.reset()
+
+        # Directive mode: one tool-free completion that carries both the cart
+        # mutation and the speech, so TTS can start while the model is still
+        # generating. Restricted to turns with explicit mutation intent, plus
+        # single-item price questions (<check_price> — answered from the same
+        # cached catalogue already trusted for <act> item names, so no LLM
+        # tool-calling round-trip is needed) — a fallback costs a wasted
+        # generation, and other questions/browse turns have nothing to gain
+        # here. Never used for speculative drafts, which rely on dry_run
+        # plumbing this path does not implement.
+        if (
+            directive_mode.DIRECTIVE_MODE
+            and not speculative
+            and (
+                not reply_templates.is_browse_intent(message)
+                or reply_templates.is_price_query_intent(message)
+            )
+        ):
+            try:
+                menu_block = await directive_mode.get_menu_block()
+                if menu_block:
+                    result = await directive_mode.run_turn(
+                        message=message,
+                        user_id=user_id,
+                        history=history,
+                        menu_block=menu_block,
+                        base_instruction=_AGENT_INSTRUCTION,
+                        on_safe_sentence=on_safe_sentence,
+                    )
+                    if result is not None:
+                        _speculative_ctx.reset(speculative_token)
+                        _tool_call_log_ctx.reset(tool_call_log_token)
+                        return result
+            except Exception:
+                # Never let this optimisation break a turn — the
+                # tool-calling path below is the authoritative one.
+                logger.warning(
+                    "[DIRECTIVE] path failed, falling back to tools", exc_info=True
+                )
 
         from google.genai import types as genai_types
 
         # Seed the ADK session with prior history if the session does not
         # yet exist (rag-service restart scenario).
-        await self._ensure_session(user_id, session_id, history)
+        #
+        # A speculative draft runs against a DERIVED, throwaway session id.
+        # ``run_async`` permanently appends its message, function calls and
+        # reply to whatever session it is given, and a draft's tool results are
+        # fabricated (dry_run=True) from a partial, still-changing preview
+        # transcript. Writing those into the real conversation would leave the
+        # following genuine turn looking at an exchange that already "added"
+        # the items — and, as reset_sessions' own docstring warns, the model
+        # then replays that conclusion instead of calling the tool again, so
+        # the customer is told the order was placed while the DB has nothing.
+        # Prefix-cache warming is unaffected: the cache is keyed on the token
+        # prefix, which _ensure_session reproduces by seeding the same history.
+        adk_session_id = f"{session_id}::spec" if speculative else session_id
+        await self._ensure_session(user_id, adk_session_id, history)
 
         # Prefix the user_id into the first turn so the LLM (and ordering
         # tools) know which customer is speaking without needing a dedicated
@@ -2286,8 +2554,17 @@ class OrderingAgent:
         # Bound to the same per-session _CartState object every turn (not a
         # fresh one) so place_order/update_order results recorded by _mcp_fn
         # persist into the next turn — see _CartState docstring.
+        #
+        # A speculative draft gets a THROWAWAY _CartState instead. Its tool
+        # calls run with dry_run=True, so the payloads it sees describe an
+        # uncommitted cart built from a partial, still-changing preview
+        # transcript. Writing those into the shared object would make
+        # cart_state_guard.filter_stale_and_unconfirmed_items treat the
+        # customer's genuine add as "already in cart" on the real turn that
+        # follows, and silently drop it.
         cart_state_token = _cart_state_ctx.set(
-            self._cart_states.setdefault(session_id, _CartState())
+            _CartState() if speculative
+            else self._cart_states.setdefault(session_id, _CartState())
         )
 
         # ── Structured root-fact fast path ──────────────────────────────
@@ -2325,9 +2602,12 @@ class OrderingAgent:
                 _user_id_ctx.reset(user_id_token)
                 _utterance_ctx.reset(utterance_token)
                 _cart_state_ctx.reset(cart_state_token)
+                _speculative_ctx.reset(speculative_token)
+                _tool_call_log_ctx.reset(tool_call_log_token)
                 return {
                     "reply": spoken,
                     "tool_calls": [],
+                    "tool_call_detail": [],
                     "llm_ms": None,
                     "llm_ttft_ms": None,
                     "llm_calls": 0,
@@ -2400,16 +2680,17 @@ class OrderingAgent:
         menu_guard.begin_turn()
         removal_guard.begin_turn()
         confirm_guard.begin_turn()
+        price_guard.begin_turn()
         _tool_call_count_ctx.set(_ToolCallCounter())
 
         try:
             gate = (
-                _SentenceGate(message, on_safe_sentence)
+                _SentenceGate(message, on_safe_sentence, pregrounded=pregrounded)
                 if (on_safe_sentence is not None and agent_cfg.STREAM_SENTENCES)
                 else None
             )
             reply_parts, tool_calls = await self._run_turn(
-                user_id, session_id, content, gate=gate
+                user_id, adk_session_id, content, gate=gate
             )
 
             # A turn that answers a catalogue question, promises a lookup, or
@@ -2457,7 +2738,7 @@ class OrderingAgent:
                     role="user",
                     parts=[genai_types.Part(text=nudge_text)],
                 )
-                retry_parts, retry_tools = await self._run_turn(user_id, session_id, nudge)
+                retry_parts, retry_tools = await self._run_turn(user_id, adk_session_id, nudge)
                 if retry_tools or "".join(retry_parts).strip():
                     reply_parts, tool_calls = retry_parts, retry_tools
                     logger.info("[AGENT] Retry produced tool_calls=%s", retry_tools)
@@ -2474,7 +2755,7 @@ class OrderingAgent:
                 # The customer's intent is unambiguous and the action is
                 # deterministic, so recover it in code rather than making them
                 # repeat themselves: resolve their open draft and confirm it.
-                if _CONFIRM_INTENT_RE.search(message):
+                if _CONFIRM_INTENT_RE.search(message) and not _speculative_ctx.get():
                     forced = await self._force_confirm(user_id, session_id)
                     if forced:
                         reply_parts, tool_calls = [forced], ["confirm_active_order"]
@@ -2521,6 +2802,7 @@ class OrderingAgent:
             return {
                 "reply": "Sorry, I encountered an error. Please try again.",
                 "tool_calls": [],
+                "tool_call_detail": _tool_call_log_ctx.get() or [],
                 "llm_ms": llm["ms"],
                 "llm_ttft_ms": llm["ttft_ms"],
                 "llm_calls": llm["calls"],
@@ -2644,6 +2926,18 @@ class OrderingAgent:
                 "| session=%s tool_calls=%s reply=%r",
                 session_id, tool_calls, reply[:160],
             )
+
+        # A restated total is only trustworthy when it matches this turn's own
+        # tool result. Corrected in place (never blocked) — the right number
+        # is already known with certainty, so there is nothing to fall back
+        # to. See agentic/price_guard.py.
+        reply, price_corrected = price_guard.validate_reply(reply)
+        if price_corrected:
+            logger.error(
+                "[AGENT] Hallucinated total corrected against tool result "
+                "| session=%s tool_calls=%s reply=%r",
+                session_id, tool_calls, reply[:160],
+            )
         llm_metrics.record_guard((time.monotonic() - _guard_start) * 1000)
 
         logger.info("[AGENT] Reply length=%d tool_calls=%s latency_ms=%.0f", len(reply), tool_calls, latency_ms)
@@ -2673,6 +2967,7 @@ class OrderingAgent:
         return {
             "reply": reply,
             "tool_calls": tool_calls,
+            "tool_call_detail": _tool_call_log_ctx.get() or [],
             "llm_ms": llm["ms"],
             "llm_ttft_ms": llm["ttft_ms"],
             "llm_calls": llm["calls"],
@@ -2702,7 +2997,16 @@ class OrderingAgent:
             string if there was nothing to confirm.
         """
         try:
-            envelope = await call_tool("confirm_active_order", {"user_id": user_id})
+            # dry_run must be forced here exactly as _mcp_fn does it. This is a
+            # DIRECT call_tool, so it bypasses the _mcp_fn wrapper that normally
+            # injects the flag — without this, a speculative draft running on a
+            # partial preview transcript ("...and that's my order") would really
+            # flip the customer's draft to confirmed, mid-utterance, before they
+            # finished speaking.
+            envelope = await call_tool(
+                "confirm_active_order",
+                {"user_id": user_id, "dry_run": _speculative_ctx.get()},
+            )
         except Exception:
             logger.exception("[AGENT] Deterministic confirm failed | session=%s", session_id)
             return ""
@@ -2877,6 +3181,19 @@ class OrderingAgent:
                     if fn_call is not None and getattr(fn_call, "name", None):
                         tool_calls.append(fn_call.name)
                         logger.info("[AGENT] Tool invoked: %s", fn_call.name)
+                        # Any text accumulated so far in this turn was
+                        # necessarily generated BEFORE this tool call — the
+                        # model "thinking out loud" or asking a clarifying
+                        # question it is about to answer itself once the tool
+                        # result comes back (observed on compound/two-item
+                        # requests, e.g. "Would you like one Peri Peri Fries
+                        # and one Onion Rings?" immediately followed by "Got
+                        # it. ... total is now ₹357."). Speaking both glued
+                        # together with no separator produces a
+                        # self-contradicting reply. Only text generated after
+                        # the LAST tool call in the turn is the grounded final
+                        # answer, so discard everything collected up to now.
+                        reply_parts.clear()
                     if hasattr(part, "text") and part.text:
                         if is_partial:
                             if gate is not None:

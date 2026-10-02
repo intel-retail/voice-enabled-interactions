@@ -30,8 +30,23 @@ scikit-learn==1.9.0
 requests==2.34.2
 python-certifi-win32==1.6.1
 uvicorn==0.35.0
+websockets==16.0
 
 # Ordering feature
 aiosqlite==0.20.0
 PyYAML==6.0.2
 fastmcp==3.2.0
+
+# VLM metrics logging (kiosk_core.audio_session._emit_vlm_metrics /
+# config.VLM_METRICS_ENABLED). Installed straight from the same
+# performance-tools repo already used elsewhere for benchmarking (single
+# source of truth for the plain-text log-format contract that
+# performance-tools/benchmark-scripts/consolidate_multiple_run_of_metrics.py
+# parses), instead of vendoring a manual copy. setup.py in that subdirectory
+# declares no install_requires, so this pulls in only the one small module
+# (vlm_metrics_logger.py) -- not performance-tools' own dev requirements.txt
+# (pandas/matplotlib/etc.), which is unrelated to this package's setup.py.
+# Pinned to @main (no tags exist upstream); if that module's log format ever
+# changes there, kiosk-core's build could pick it up silently -- watch for
+# that on version bumps.
+git+https://github.com/intel-retail/performance-tools.git@main#subdirectory=benchmark-scripts

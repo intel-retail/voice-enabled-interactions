@@ -10,6 +10,7 @@ These tests pin the distinction between "nobody spoke" and "somebody spoke
 and every segment was discarded".
 """
 import threading
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -20,6 +21,13 @@ from kiosk_core.audio_session import BaseAudioSession
 def _make_session(session_id: str = "test-session") -> BaseAudioSession:
     session = BaseAudioSession.__new__(BaseAudioSession)
     session.session_id = session_id
+    # _filter_target_speaker's no-primary-segments path calls
+    # _scope_is_enrolled(), which reads agent_session_id -- __init__
+    # normally sets this, but this harness bypasses __init__ via __new__().
+    # Left un-enrolled here (never calling _mark_scope_enrolled()) so these
+    # tests exercise the same "never enrolled" rejection-accounting path the
+    # analyzer takes before enrollment succeeds.
+    session.agent_session_id = f"{session_id}-conversation"
     session._rejected_speech_chunks = 0
     return session
 
@@ -40,6 +48,16 @@ def _make_finalize_ready_session(session_id: str = "test-session") -> BaseAudioS
     session.on_complete = None
     session._t_turn_start = None
     session._synthesize_response = lambda text: session.response_parts.append(text)  # type: ignore[method-assign]
+    # _finalize_run closes these four client connections during cleanup
+    # (kiosk_core/audio_session.py) -- __init__ normally sets them, but this
+    # harness bypasses __init__ via __new__(). Use MagicMock so .close() is a
+    # real, inspectable no-op instead of relying on _finalize_run's
+    # AttributeError-tolerant cleanup (which exists for robustness, not as a
+    # substitute for a properly-shaped test double).
+    session.client = MagicMock()
+    session.realtime_client = None
+    session.tts_client = MagicMock()
+    session.agent_client = MagicMock()
     return session
 
 
@@ -47,6 +65,10 @@ def _make_finalize_ready_session(session_id: str = "test-session") -> BaseAudioS
 class TestRejectedSpeechAccounting:
     def test_analyzer_rejection_of_real_speech_is_counted(self):
         session = _make_session()
+        # On-topic text ("burger") only gets hard-dropped once the scope is
+        # enrolled -- otherwise the semantic fallback recovers it (see
+        # test_speaker_filter.py's authoritative-rejection tests).
+        session._mark_scope_enrolled()
         segments = [
             {"text": "I want a burger", "speaker": "SPEAKER_01", "is_primary": False},
         ]

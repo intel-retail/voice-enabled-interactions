@@ -34,6 +34,9 @@ export const endpoints = {
   metrics: '/metrics-svc/metrics',
   // pipeline latency (kiosk-core)
   pipelineLatest: '/api/v1/pipeline/latest',
+  // Ring buffer of recent turn traces — powers the per-request voice-to-voice
+  // history under the AI Inference Pipeline panel.
+  pipelineRecent: '/api/v1/pipeline/recent?n=8',
   // identity (biometric auth, proxied to kiosk-core; feature-flag gated)
   identityEnabled: '/api/v1/identity/enabled',
   identityChallenge: '/api/v1/identity/challenge',
@@ -46,7 +49,16 @@ export const tuning = {
   // Upload cadence only — how often buffered audio is POSTed while recording.
   // Kept short so audio reaches the backend promptly; it does NOT bound the
   // ASR chunk (see asrChunkSeconds).
-  chunkSeconds: 2.5,
+  //
+  // Lowered from 2.5s: at 2.5s, trailing silence sat buffered on the client
+  // for up to a full 2.5s before the backend ever saw it, so the endpoint/
+  // completeness shortcut (kiosk_core config.py DEFAULT_ENDPOINT_SHORT_SECONDS)
+  // could never fire in time — the server can't detect silence it hasn't
+  // received yet. 0.5s matches kiosk-voice-lab-main's rolling-snapshot cadence
+  // (pipeline/config.py tick_s=0.4) closely enough to let the backend's
+  // quiet-mode preview acceleration (DEFAULT_REALTIME_PREVIEW_COMMIT_QUIET_SECONDS,
+  // 0.15s) actually have fresh audio to act on.
+  chunkSeconds: 0.5,
   // Max seconds of speech the backend accumulates before force-flushing to
   // Whisper, sent as chunk_seconds on session start.
   //
@@ -91,7 +103,12 @@ export const tuning = {
   // Must stay strictly greater than the backend's adaptive flush pause,
   // otherwise the endpoint always fires first and the pre-warm flush that
   // hides ASR latency can never run.
-  silenceTimeoutSeconds: 1.5,
+  //
+  // 1.1s (kiosk-voice-lab-main parity, endpoint_long_ms): lowered from 1.5s
+  // to match the lab's "unfinished" wait. Mirrors
+  // KIOSK_CORE_SILENCE_TIMEOUT_SECONDS in kiosk_core/config.py — keep both in
+  // sync.
+  silenceTimeoutSeconds: 1.1,
   sampleRate: 16000,
   pollIntervalMs: 350,
   perfRefreshMs: 10000,

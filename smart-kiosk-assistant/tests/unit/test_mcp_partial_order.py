@@ -44,6 +44,9 @@ class _FakeService:
         self.placed_items: list = []
         self.current_order: Order | None = None
         self.confirmed_ids: list[int] = []
+        # dry_run value seen by each mutating call, in call order.
+        self.place_order_dry_runs: list[bool] = []
+        self.confirm_order_dry_runs: list[bool] = []
 
     async def resolve_product(self, ref: str):
         return _CATALOGUE.get(ref)
@@ -59,7 +62,12 @@ class _FakeService:
             return list(_CATALOGUE.values())
         return [p for p in _CATALOGUE.values() if p.category == category]
 
-    async def place_order(self, req):
+    async def place_order(self, req, dry_run: bool = False):
+        # Mirrors OrderingService.place_order(request, dry_run=False). The
+        # speculative-draft path calls every mutating tool with dry_run=True
+        # so an unconfirmed ASR preview can never persist a real order; the
+        # flag is recorded here so tests can assert that contract.
+        self.place_order_dry_runs.append(dry_run)
         self.placed_items = list(req.items)
         items = [
             OrderItem(
@@ -87,7 +95,8 @@ class _FakeService:
     async def get_current_order(self, user_id: str):
         return self.current_order
 
-    async def confirm_order(self, order_id: int):
+    async def confirm_order(self, order_id: int, dry_run: bool = False):
+        self.confirm_order_dry_runs.append(dry_run)
         self.confirmed_ids.append(order_id)
         assert self.current_order is not None
         return self.current_order.model_copy(update={"status": "confirmed"})

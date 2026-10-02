@@ -12,6 +12,11 @@ from kiosk_core.audio_session import BaseAudioSession
 def _make_session(session_id: str = "test-session") -> BaseAudioSession:
     session = BaseAudioSession.__new__(BaseAudioSession)
     session.session_id = session_id
+    # _filter_target_speaker's no-primary-segments path calls
+    # _scope_is_enrolled(), which reads agent_session_id -- __init__
+    # normally sets this (kiosk_core/audio_session.py), but this harness
+    # bypasses __init__ via __new__().
+    session.agent_session_id = f"{session_id}-conversation"
     return session
 
 
@@ -46,6 +51,13 @@ class TestFilterTargetSpeaker:
         bystander inject items into the customer's cart.
         """
         session = _make_session()
+        # Analyzer rejection is only authoritative once the scope has an
+        # enrolled reference voice (_scope_is_enrolled()) -- otherwise it is
+        # deliberately treated as low-confidence and falls back to semantic
+        # heuristics instead of a hard drop. This regression is about the
+        # enrolled case, so mark it enrolled the same way a prior successful
+        # is_primary=True chunk in this conversation would have.
+        session._mark_scope_enrolled()
         segments = [
             {"text": "can I get a burger and fries", "speaker": "SPEAKER_01", "is_primary": False},
         ]
@@ -54,6 +66,7 @@ class TestFilterTargetSpeaker:
     def test_analyzer_rejection_does_not_lock_on_to_interloper(self):
         """A rejected-only chunk must not arm the first-speaker lock."""
         session = _make_session()
+        session._mark_scope_enrolled()
         segments = [
             {"text": "I can add paneer tikka burger", "speaker": "SPEAKER_01", "is_primary": False},
         ]
@@ -70,6 +83,7 @@ class TestFilterTargetSpeaker:
 
     def test_no_primary_and_no_domain_match_drops_chunk(self):
         session = _make_session()
+        session._mark_scope_enrolled()
         segments = [
             {"text": "the weather is nice today", "speaker": "SPEAKER_01", "is_primary": False},
         ]

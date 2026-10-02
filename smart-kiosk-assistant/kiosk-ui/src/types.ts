@@ -75,12 +75,48 @@ export interface KpiData {
 export interface PipelineWall {
   turn_total_ms: number | null;
   time_to_first_audio_ms: number | null;
+  /** Trailing silence the endpointer waited through before committing the turn. */
+  endpoint_wait_ms: number | null;
+  /**
+   * Customer's last word -> first sound out of the speaker. The "voice to
+   * voice" clock — the only figure comparable to external voice-kiosk numbers,
+   * because unlike turn_total_ms it includes the endpoint wait.
+   */
+  voice_to_voice_ms: number | null;
+  /** Same clock, but to the first audio that carries the actual answer. */
+  voice_to_voice_informative_ms: number | null;
+  /** Real ASR round-trip on the final chunk (flush-queue join before turn start). */
+  final_flush_wait_ms: number | null;
+  /**
+   * Browser-mic-release turns only: gap between the customer's true last
+   * speech frame and the flush sequence starting (button-release reaction
+   * time + any trailing buffered frames). Both ends are backend monotonic
+   * timestamps — not network/browser-clock overhead. None on the
+   * silence-timeout endpoint path, where this gap is ~0 by construction.
+   */
+  post_speech_gap_ms: number | null;
+  /**
+   * voice_to_voice_ms minus endpoint_wait_ms — last word -> first sound,
+   * WITHOUT the deliberate trailing-silence wait. The number comparable to
+   * the lab's "pipeline compute only" clock.
+   */
+  voice_to_voice_post_endpoint_ms: number | null;
+  /** True: the sentence-completeness shortcut fired (didn't wait full silence_timeout). */
+  endpoint_shortcut_fired: boolean | null;
 }
 
 export interface PipelineAsrSpan {
   ms: number | null;
   device: string;
   chunks?: number;
+  /**
+   * Continuous-streaming mode only: customer's actual last word -> the
+   * moment a transcript covering it landed from the analyzer. The genuine
+   * ASR compute latency on the critical path (excludes the trailing-silence
+   * wait, which endpoint_wait_ms reports separately). This is the number
+   * being tracked against the ~180-220ms target.
+   */
+  last_word_to_transcript_ms?: number | null;
 }
 
 export interface PipelineRetrievalSpan {
@@ -124,6 +160,8 @@ export interface KpiBundle {
   rag: KpiData;
   tts: KpiData;
   pipeline?: PipelineTurnTrace | null;
+  /** Most recent turns, newest last — one entry per request/response. */
+  pipelineRecent?: PipelineTurnTrace[];
 }
 
 // ── Metrics ─────────────────────────────────────────────────────────────────

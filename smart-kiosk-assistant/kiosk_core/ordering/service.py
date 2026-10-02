@@ -408,7 +408,7 @@ class OrderingService:
     # Orders
     # ------------------------------------------------------------------
 
-    async def place_order(self, request: CreateOrderRequest) -> Order:
+    async def place_order(self, request: CreateOrderRequest, dry_run: bool = False) -> Order:
         """Add items to the customer's cart, creating it only if none is open.
 
         A customer has at most one live cart per visit. The agent cannot be
@@ -420,9 +420,16 @@ class OrderingService:
 
         Args:
             request: Target user and the items to add.
+            dry_run: If ``True``, run every resolution/write step against a
+                real transaction (so the returned preview reflects genuine
+                would-be totals/ids) but never call ``db.commit()`` — the
+                connection close at the end of the ``async with`` block rolls
+                the uncommitted transaction back, so nothing is persisted.
+                Used by speculative drafting to preview a turn's outcome
+                before the customer's utterance is finalised.
 
         Returns:
-            The resulting draft order.
+            The resulting draft order (or its would-be preview if ``dry_run``).
 
         Raises:
             ValueError: If any requested ``product_id`` does not exist.
@@ -443,6 +450,22 @@ class OrderingService:
                 await order_repo.add_item(order_id, item_in, product.price)
 
             total = await order_repo.update_total(order_id)
+
+            if dry_run:
+                # Read the would-be order back from THIS connection/transaction
+                # — the writes above are visible here (same transaction) but
+                # not to any other connection, and never persisted since we
+                # never commit. Must fetch here, not via self.get_order()
+                # afterward, which would open a fresh connection and see the
+                # pre-rollback (i.e. unmodified) state.
+                preview = await order_repo.get(order_id)
+                logger.info(
+                    "[SERVICE] [DRY-RUN] Would %s order_id=%d user=%s total=%.2f (not persisted)",
+                    "add to existing" if reused else "place",
+                    order_id, request.user_id, total,
+                )
+                return preview  # type: ignore[return-value]
+
             await db.commit()
 
         logger.info(
@@ -466,8 +489,16 @@ class OrderingService:
         logger.info("[SERVICE] Retrieved current draft order for user=%s", user_id)
         return order
 
-    async def update_order_items(self, order_id: int, items: list[OrderItemIn]) -> Order:
-        """Add or increment items on an existing draft order."""
+    async def update_order_items(
+        self, order_id: int, items: list[OrderItemIn], dry_run: bool = False
+    ) -> Order:
+        """Add or increment items on an existing draft order.
+
+        Args:
+            order_id: Target draft order.
+            items: Items to add/increment.
+            dry_run: See :meth:`place_order` — preview only, never persisted.
+        """
         async with get_db() as db:
             prod_repo = SqliteProductRepository(db)
             order_repo = SqliteOrderRepository(db)
@@ -486,6 +517,15 @@ class OrderingService:
                 await order_repo.add_item(order_id, item_in, product.price)
 
             total = await order_repo.update_total(order_id)
+
+            if dry_run:
+                preview = await order_repo.get(order_id)
+                logger.info(
+                    "[SERVICE] [DRY-RUN] Would update order_id=%d new_total=%.2f (not persisted)",
+                    order_id, total,
+                )
+                return preview  # type: ignore[return-value]
+
             await db.commit()
 
         logger.info("[SERVICE] Updated order_id=%d new_total=%.2f", order_id, total)
@@ -493,7 +533,7 @@ class OrderingService:
         return updated  # type: ignore[return-value]
 
     async def remove_order_items(
-        self, order_id: int, items: list[RemoveOrderItem]
+        self, order_id: int, items: list[RemoveOrderItem], dry_run: bool = False
     ) -> tuple[Order, list[str]]:
         """Remove items from a draft order.
 
@@ -501,6 +541,7 @@ class OrderingService:
             order_id: Target draft order.
             items: Products to remove. A ``quantity`` of ``None`` means
                 "remove the whole line" rather than decrement.
+            dry_run: See :meth:`place_order` — preview only, never persisted.
 
         Returns:
             ``(updated_order, not_found)`` where ``not_found`` lists the
@@ -531,6 +572,16 @@ class OrderingService:
                     not_found.append(item_in.product_id)
 
             total = await order_repo.update_total(order_id)
+
+            if dry_run:
+                preview = await order_repo.get(order_id)
+                logger.info(
+                    "[SERVICE] [DRY-RUN] Would remove %d item(s) from order_id=%d "
+                    "new_total=%.2f not_found=%s (not persisted)",
+                    len(items) - len(not_found), order_id, total, not_found,
+                )
+                return preview, not_found  # type: ignore[return-value]
+
             await db.commit()
 
         logger.info(
@@ -556,7 +607,7 @@ class OrderingService:
             logger.info("[SERVICE] Cleared %d stale draft cart(s) for user=%s", deleted, user_id)
         return deleted
 
-    async def cancel_current_order(self, user_id: str) -> Order | None:
+    async def cancel_current_order(self, user_id: str, dry_run: bool = False) -> Order | None:
         """Cancel (delete) the customer's entire open draft order, if any.
 
         Distinct from ``remove_order_items``: that call removes one or more
@@ -569,6 +620,10 @@ class OrderingService:
 
         Args:
             user_id: The customer whose draft order to cancel.
+            dry_run: If ``True``, skip the delete entirely and just return the
+                current snapshot — there is nothing else to preview here since
+                the return value is already "the order as it was before
+                cancellation", not a post-write state.
 
         Returns:
             A snapshot of the order as it was immediately before cancellation
@@ -578,6 +633,13 @@ class OrderingService:
         order = await self.get_current_order(user_id)
         if order is None:
             return None
+
+        if dry_run:
+            logger.info(
+                "[SERVICE] [DRY-RUN] Would cancel order_id=%d for user=%s (not persisted)",
+                order.order_id, user_id,
+            )
+            return order
 
         async with get_db() as db:
             repo = SqliteOrderRepository(db)
@@ -590,8 +652,13 @@ class OrderingService:
         )
         return order
 
-    async def confirm_order(self, order_id: int) -> Order:
-        """Confirm a draft order → status becomes 'confirmed'."""
+    async def confirm_order(self, order_id: int, dry_run: bool = False) -> Order:
+        """Confirm a draft order → status becomes 'confirmed'.
+
+        Args:
+            order_id: The draft order to confirm.
+            dry_run: See :meth:`place_order` — preview only, never persisted.
+        """
         async with get_db() as db:
             repo = SqliteOrderRepository(db)
             order = await repo.get(order_id)
@@ -599,6 +666,18 @@ class OrderingService:
                 raise ValueError(f"Order not found: {order_id}")
             if order.status != "draft":
                 raise ValueError(f"Order {order_id} is already {order.status}")
+
+            if dry_run:
+                # Build the would-be confirmed preview without writing —
+                # ``order`` is a draft snapshot, so mark it confirmed only in
+                # the returned copy.
+                preview = order.model_copy(update={"status": "confirmed"})
+                logger.info(
+                    "[SERVICE] [DRY-RUN] Would confirm order_id=%d for user=%s (not persisted)",
+                    order_id, order.user_id,
+                )
+                return preview
+
             await repo.confirm(order_id)
             await db.commit()
 

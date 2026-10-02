@@ -30,6 +30,14 @@ services:
       dockerfile: Dockerfile
     image: ${REGISTRY:-intel}/rtsp-streamer:${RELEASE_TAG:-latest}
     container_name: rtsp-streamer
+    # Gated behind the `queue` compose profile (container-layer flag), same
+    # pattern as identity-service — ON by default via the Makefile's `up`
+    # target (see QUEUE/_QUEUE_PROFILE there), so plain `make up` keeps
+    # today's behaviour unchanged. Disable for a run with
+    # `make up QUEUE=false` to free the ~10-12 CPU cores this + queue-service
+    # otherwise permanently consume (measured: ~650-750% + ~350-500% CPU),
+    # e.g. to isolate/benchmark the voice pipeline's own latency.
+    profiles: ["queue"]
     user: "1000:1000"
     ports:
       - "8554:8554"
@@ -82,6 +90,9 @@ services:
       dockerfile: docker/Dockerfile
     image: ${REGISTRY:-intel}/queue-service:${RELEASE_TAG:-latest}
     container_name: queue-service
+    # Gated behind the `queue` compose profile — see rtsp-streamer above for
+    # the full rationale (ON by default; `make up QUEUE=false` disables it).
+    profiles: ["queue"]
     user: "1000:1000"
     ports:
       - "8090:8090"
@@ -94,6 +105,25 @@ services:
       # QUEUE_DEVICE=GPU|NPU in .env once the target platform supports it —
       # no rebuild required.
       QUEUE_SERVICE__MODEL__DEVICE: ${QUEUE_DEVICE:-CPU}
+      # Keep decoded frames in GPU (VA) memory through inference/tracking/
+      # watermark instead of downloading every frame to system RAM (see
+      # queue-config.yaml `model.va_memory` for the measured CPU cost).
+      # "auto" enables it whenever a /dev/dri render node exists and the
+      # device above isn't CPU — this INCLUDES NPU, which gains nothing
+      # from it (NPU has no VA integration; see that file's comment) but
+      # isn't actively harmed either. If reverting QUEUE_DEVICE back to
+      # NPU, also set QUEUE_VA_MEMORY=false to restore the original,
+      # measured-safe NPU behaviour.
+      QUEUE_SERVICE__MODEL__VA_MEMORY: ${QUEUE_VA_MEMORY:-auto}
+      # Run YOLO26 inference every Nth frame instead of every frame, to shed
+      # GPU cycles when the device above is GPU (shared with ovms-llm).
+      # Queue counting doesn't need per-frame granularity -- BYTE tracking
+      # (tracker: below) sustains identities across skipped frames. Default
+      # 1 (every frame) matches historical CPU/NPU behaviour; raise via
+      # QUEUE_INFERENCE_INTERVAL in .env if GPU contention regresses
+      # ovms-llm/audio-analyzer latency (see queue-config.yaml `model.
+      # inference_interval`).
+      QUEUE_SERVICE__MODEL__INFERENCE_INTERVAL: ${QUEUE_INFERENCE_INTERVAL:-1}
       NO_PROXY: "localhost,127.0.0.1,rtsp-streamer,queue-service"
       no_proxy: "localhost,127.0.0.1,rtsp-streamer,queue-service"
       ZE_ENABLE_ALT_DRIVERS: libze_intel_npu.so
@@ -153,7 +183,13 @@ services:
     # service can go back to pulling the shared image instead of shadowing it
     # with a locally-built one. Override the tag with METRICS_COLLECTOR_TAG in
     # .env if a newer version is published.
-    image: ${REGISTRY:-intel}/hl-ai-metrics-collector:${METRICS_COLLECTOR_TAG:-2026.2.0}
+    # Deliberately NOT ${REGISTRY}: that variable selects where the images we
+    # build locally are tagged/pushed (e.g. REGISTRY=false while iterating), but
+    # this image is only ever pulled from upstream, so following REGISTRY just
+    # produces "pull access denied for false/hl-ai-metrics-collector" and blocks
+    # `docker compose up` for the whole stack. Override the namespace with
+    # METRICS_COLLECTOR_REGISTRY if it is ever mirrored elsewhere.
+    image: ${METRICS_COLLECTOR_REGISTRY:-intel}/hl-ai-metrics-collector:${METRICS_COLLECTOR_TAG:-2026.2.0}
     container_name: metrics-collector
     privileged: true
     pid: host
@@ -168,7 +204,7 @@ services:
       METRICS_HTTP_PORT: "9000"
       NPU_LOG:           /tmp/results/npu_usage.csv
     volumes:
-      - ./metrics:/tmp/results
+      - ${KIOSK_METRICS_HOST_DIR:-./metrics}:/tmp/results
       - /sys/devices:/sys/devices
       - /dev/dri:/dev/dri:rw
       - /sys/kernel/debug:/sys/kernel/debug:ro
@@ -181,8 +217,39 @@ services:
       start_period: 20s
       retries: 3
     restart: unless-stopped
+    # qmassa (run by /scripts/collect_gpu.sh under supervisord) writes one
+    # continuously-appended JSON document and only closes it validly on a
+    # graceful exit. supervisord's default per-program shutdown wait is 10s,
+    # racing Docker's own default 10s container stop timeout -- when several
+    # services are torn down together (`make down`/`docker compose down`),
+    # this can lose the race and Docker SIGKILLs the container before qmassa
+    # finishes flushing/closing the JSON, leaving a truncated file that
+    # parse_qmassa_metrics_to_json.py rejects with "No valid state data
+    # found". Giving this one container extra shutdown slack fixes it
+    # without touching the (pulled, not built) image or its supervisord.conf.
+    stop_grace_period: 30s
 
   audio-analyzer:
+    # Built locally from the sibling edge-ai-libraries checkout, matching the
+    # text-to-speech service above, so local changes to the ASR/diarization
+    # pipeline are picked up. Comment out `build:` and rely on `image:` alone
+    # to go back to pulling the upstream prebuilt image.
+    #
+    # Uses the top-level Dockerfile rather than docker/Dockerfile: the two are
+    # identical except that this one parenthesises the torchcodec uninstall,
+    # so `|| true` applies only to that uninstall instead of swallowing a
+    # failure anywhere in the preceding pip chain (which would silently
+    # produce a broken image).
+    build:
+      context: ../edge-ai-libraries/microservices/audio-analyzer
+      dockerfile: Dockerfile
+      # No HF_TOKEN build arg on purpose. The Dockerfile does
+      # `ENV HF_TOKEN=${HF_TOKEN}`, so passing it at build time bakes the
+      # secret permanently into an image layer (recoverable by anyone who can
+      # inspect or pull the image). It is unnecessary anyway: the token is
+      # already supplied at runtime in the environment block below, and the
+      # service loads pyannote from the pre-cached ./models with
+      # HF_HUB_OFFLINE=1, so nothing gated is fetched during the build.
     image: ${REGISTRY:-intel}/audio-analyzer:${RELEASE_TAG:-latest}
     container_name: audio-analyzer
     # Hardcoded to match the image's baked-in app user and the
@@ -239,6 +306,31 @@ services:
       # where no HF_TOKEN/model-licence acceptance is available) also skip that
       # preload, instead of crashing with an unauthenticated 403 download.
       AUDIO_ANALYZER__MODELS__ASR__DIARIZATION: ${KIOSK_CORE_DIARIZATION_ENABLED:-true}
+      # ASR inference device override — config.yaml now pins "GPU" by default
+      # (see its models.asr.device comment: 2026-09-22 switch to
+      # distil-small.en/GPU for the final-commit pool too). Set ASR_DEVICE=CPU
+      # here to compare against GPU without editing the mounted config file.
+      # Do NOT set ASR_DEVICE=NPU while models.asr.name is distil-small.en —
+      # that combination is confirmed to corrupt output on this stack.
+      AUDIO_ANALYZER__MODELS__ASR__DEVICE: ${ASR_DEVICE:-CPU}
+      # ASR model override — paired with ASR_DEVICE because the two are not
+      # independent: distil-small.en corrupts output on NPU (see above), so a
+      # device-combination benchmark profile that selects ASR_DEVICE=NPU must
+      # also move the model to an NPU-safe one. Defaults to empty so the
+      # mounted config.yaml's own models.asr.name wins when unset (compose
+      # omits an env var entirely when its value resolves to the empty string
+      # only for `KEY:` form, so the default here is the config's own value).
+      AUDIO_ANALYZER__MODELS__ASR__NAME: ${ASR_MODEL:-distil-whisper/distil-small.en}
+      # Preview (partial/streaming) ASR pool device. Distinct from the
+      # final-commit pool above — config.yaml carries models.asr.preview.device
+      # separately. Falls back to ASR_DEVICE so a profile only has to set one
+      # variable unless it deliberately splits the two pools.
+      AUDIO_ANALYZER__MODELS__ASR__PREVIEW__DEVICE: ${ASR_PREVIEW_DEVICE:-${ASR_DEVICE:-CPU}}
+      # Diarization device. Loaded via torch.device(<value>) — PyTorch has no
+      # "gpu" string (Intel GPU would need "xpu", which this component does not
+      # wire), so CPU is the only valid value today. Exposed anyway so a
+      # benchmark profile records it explicitly rather than leaving it implicit.
+      AUDIO_ANALYZER__MODELS__DIARIZATION__DEVICE: ${DIARIZATION_DEVICE:-CPU}
     volumes:
       # Kiosk-pinned config (see ./configs/README.md) — mounted as the
       # service config without modifying edge-ai-libraries.
@@ -264,6 +356,13 @@ services:
     restart: unless-stopped
 
   text-to-speech:
+    # Built locally from a sibling edge-ai-libraries checkout so the Kokoro
+    # TTS engine (added there, not upstream) is available. Comment out
+    # `build:` and rely on `image:` alone to go back to pulling the
+    # upstream prebuilt image (SpeechT5/Qwen only, no Kokoro).
+    build:
+      context: ../edge-ai-libraries/microservices/text-to-speech
+      dockerfile: Dockerfile
     image: ${REGISTRY:-intel}/text-to-speech:${RELEASE_TAG:-latest}
     container_name: text-to-speech
     user: "1000:1000"
@@ -271,6 +370,12 @@ services:
       - "8011:8011"
     devices:
       - /dev/dri:/dev/dri
+      # Intel NPU passthrough — same ACCEL_MOUNT_PATH mechanism as
+      # audio-analyzer/rag-service/identity-service. Required before
+      # TTS_DEVICE=NPU can do anything: without this the container has no
+      # accel node, OpenVINO silently falls back to CPU, and the run is
+      # mislabelled rather than failed. /dev/null is the inert default.
+      - ${ACCEL_MOUNT_PATH:-/dev/null}:/dev/accel/accel0
     group_add:
       - video
       - "${RENDER_GID:-992}"
@@ -278,6 +383,43 @@ services:
       # Point HF cache under ~/.cache so a single ./.cache mount persists
       # every model cache the service uses (HF, torch hub, etc.).
       HF_HOME: /app/text-to-speech/.cache/huggingface
+      # ── TTS engine selection (device-combination benchmarking) ────────────
+      # These four move together and MUST stay consistent — the TTS factory
+      # picks an implementation from (name, runtime) and then hands `device`
+      # to it, so an inconsistent triple fails at model load, not at request
+      # time. See configs/benchmark-profiles/README.md for the valid matrix.
+      #
+      #   Kokoro   : name=kokoro,                    runtime=kokoro,   CPU only
+      #   SpeechT5 : name=microsoft/speecht5_tts,    runtime=openvino, CPU|GPU|NPU
+      #   Qwen     : name=Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice,
+      #                                              runtime=openvino, CPU|GPU
+      #
+      # Defaults reproduce the shipped config.yaml exactly, so an unset
+      # environment behaves precisely as before this block existed.
+      TEXT_TO_SPEECH__MODELS__TTS__NAME:            ${TTS_MODEL:-kokoro}
+      TEXT_TO_SPEECH__MODELS__TTS__RUNTIME:         ${TTS_RUNTIME:-kokoro}
+      TEXT_TO_SPEECH__MODELS__TTS__DEVICE:          ${TTS_DEVICE:-CPU}
+      # dtype is NOT cosmetic on GPU: int8 on this iGPU measured 281s first
+      # call / 8.7s steady-state vs 0.92s on CPU, while fp16 is fine after
+      # warmup. Any GPU profile must set TTS_DTYPE=fp16 — validate_device_
+      # profile.py enforces this so a bad pairing fails in seconds rather
+      # than producing a plausible-but-wrong table 20 minutes later.
+      TEXT_TO_SPEECH__MODELS__TTS__DTYPE:           ${TTS_DTYPE:-int8}
+      # Voice vocabularies are per-implementation and do not overlap: Kokoro
+      # wants am_michael, SpeechT5/Qwen want Ryan. Switching the model without
+      # switching the speaker makes every synthesis request fail validation.
+      TEXT_TO_SPEECH__MODELS__TTS__DEFAULT_SPEAKER: ${TTS_SPEAKER:-am_michael}
+      TEXT_TO_SPEECH__MODELS__TTS__MODEL_VARIANT:   ${TTS_MODEL_VARIANT:-custom_voice}
+      # 2 uvicorn worker PROCESSES so overlapping synth calls (e.g. a
+      # speculative draft's pre-synthesis running alongside the real turn's
+      # TTS) actually run concurrently instead of queueing behind Kokoro's
+      # per-process inference lock — verified serialized on this box before
+      # this change (2 concurrent /v1/audio/speech calls: ~1.77s, barely
+      # faster than 2 sequential calls at ~1.65s). Safe on this host: 16
+      # cores, each Kokoro call caps at 4 intra-op threads, and every service
+      # measured near-idle CPU at rest (see docker stats). Costs one extra
+      # ~1GB model load (2nd worker's cold start on its first request).
+      TEXT_TO_SPEECH_WORKERS: ${TEXT_TO_SPEECH_WORKERS:-2}
     volumes:
       # Kiosk-pinned config (see ./configs/README.md) — mounted as the
       # service config without modifying edge-ai-libraries.
@@ -319,6 +461,14 @@ services:
       - "${RENDER_GID:-992}"
     environment:
       MPLCONFIGDIR: /tmp/matplotlib
+      # Skip LiteLLM's remote model-cost-map fetch (raw.githubusercontent.com)
+      # on first completion() call. This deployment is offline/air-gapped, so
+      # that fetch always times out (~12-15s) before falling back to the
+      # local backup anyway. Our self-hosted OVMS model isn't in either map
+      # (cloud or local), and nothing here reads litellm cost/limit data, so
+      # forcing local removes a one-time dead wait on every rag-service
+      # restart with no functional loss.
+      LITELLM_LOCAL_MODEL_COST_MAP: "true"
       # Agent LLM — points at the OVMS container
       AGENT_LLM_URL:   http://ovms-llm:8000/v3
       AGENT_LLM_MODEL: ${OVMS_MODEL_NAME:-OpenVINO/Qwen3-4B-int4-ov}
@@ -330,10 +480,28 @@ services:
       # flag alone falls back to the buffered /api/v1/agent/chat path.
       # Set AGENT_STREAM_SENTENCES=false to revert with a restart, no rebuild.
       AGENT_STREAM_SENTENCES: ${AGENT_STREAM_SENTENCES:-true}
+      # Inline <act> directive instead of a structured tool call — one
+      # generation carries both the cart mutation and the speech, so TTS can
+      # start before generation finishes. See plugins/kiosk/directive_mode.py.
+      AGENT_DIRECTIVE_MODE: ${AGENT_DIRECTIVE_MODE:-false}
       # Caps generated tokens per LLM round-trip. Decode dominates agent
       # latency, so this bounds the worst case (a turn that free-runs instead
-      # of calling a tool). Tunable from .env without a rebuild.
-      AGENT_MAX_TOKENS: ${AGENT_MAX_TOKENS:-192}
+      # of calling a tool). Generation stops at EOS, so this does NOT shorten a
+      # normal turn — it only bounds the pathological one.
+      #
+      # Sized from measurement with the Qwen3-4B tokenizer: the longest
+      # legitimate outputs are a full category listing (84 tokens) and a
+      # multi-item update_order tool call (56 tokens). 128 leaves ~50% headroom
+      # over both while cutting the free-run ceiling from 192.
+      # Tunable from .env without a rebuild.
+      AGENT_MAX_TOKENS: ${AGENT_MAX_TOKENS:-128}
+      # Send MCP tool docstrings to the LLM without their "Returns:"/"Raises:"
+      # sections. Those describe the payload the model receives *after* the
+      # call, so they never steer tool choice or argument filling, but they were
+      # re-sent as part of the tool schema on every LLM round-trip.
+      # Measured: 1,627 -> 1,199 docstring tokens across the 12 kiosk tools.
+      # Set AGENT_COMPACT_TOOL_DESCRIPTIONS=false to revert with a restart.
+      AGENT_COMPACT_TOOL_DESCRIPTIONS: ${AGENT_COMPACT_TOOL_DESCRIPTIONS:-true}
       # Embedding + reranker models are loaded in-process via OpenVINO at
       # startup. These are intentionally decoupled from TARGET_DEVICE (which
       # only controls the ovms-llm container): both models are exported by
@@ -379,6 +547,11 @@ services:
       # Enable or disable the ordering-agent subsystem. Set to "false" for
       # pure-RAG deployments (healthcare, education) to skip MCP bootstrap.
       ORDERING_AGENT_ENABLED: ${ORDERING_AGENT_ENABLED:-true}
+      # Lab-only ADK vs non-ADK A/B route (/api/v1/agent/chat-no-adk), used
+      # solely by tests/benchmarks/*_no_adk.py. Off by default: it can place
+      # real orders and must never be reachable in a normal deployment. Set
+      # to "true" only when running those specific benchmark scripts.
+      AGENT_BENCHMARK_ENDPOINTS_ENABLED: ${AGENT_BENCHMARK_ENDPOINTS_ENABLED:-false}
     volumes:
       - rag_service_models:/app/rag-service/models
       - rag_service_storage:/app/rag-service/storage
@@ -424,6 +597,10 @@ services:
   #
   # OVMS_TOOL_GUIDED constrains decoding to the tool JSON schema. It is the main
   # mitigation for small models emitting raw tool-result JSON instead of prose.
+  # Tested (Qwen3-4B-int4, this deployment): a controlled A/B at the real agent
+  # endpoint showed no TTFT improvement over unguided decoding (grammar-
+  # constraint overhead offsets any preamble-token savings). Left disabled
+  # (default false); revisit if a future model shows raw-JSON leakage.
   #
   # Speculative decoding (--draft_source_model, a Qwen3-0.6B draft model) was
   # benchmarked and REJECTED — see
@@ -441,9 +618,30 @@ services:
   # stream=true, comparing with and without --draft_source_model. Do not
   # re-add this flag without first confirming OVMS has fixed streamed
   # tool-call + speculative-decoding interaction upstream.
+  # OVMS's named cache volume (ovms_ov_cache below) is created by Docker on
+  # first use, owned by root:root 0755 — but ovms-llm's image runs as a
+  # non-root "ovms" user (uid 5000), which then cannot write into it.
+  # Confirmed live: "Cache directory /tmp/ov_cache is not writable; access()
+  # result: -1" on every ovms-llm startup, silently defeating OV_CACHE_DIR /
+  # --cache_dir and forcing a full model-IR recompile on every restart
+  # instead of a cache hit. This one-shot init chowns the volume to the
+  # container's uid before ovms-llm starts; it runs once per `up` (fast,
+  # no-op on a volume that is already owned correctly) and exits, gating
+  # ovms-llm via depends_on/service_completed_successfully below.
+  ovms-cache-init:
+    image: busybox
+    container_name: ovms-cache-init
+    user: root
+    volumes:
+      - ovms_ov_cache:/tmp/ov_cache
+    command: chown -R 5000:5000 /tmp/ov_cache
+
   ovms-llm:
     image: openvino/model_server:latest-gpu
     container_name: ovms-llm
+    depends_on:
+      ovms-cache-init:
+        condition: service_completed_successfully
     ports:
       - "9001:9000"  # gRPC (host 9001 avoids conflict with metrics-collector:9000)
       - "8000:8000"  # REST / OpenAI-compatible /v3
@@ -466,6 +664,17 @@ services:
       # Required for Level Zero to enumerate the Intel NPU. Harmless when no
       # NPU node is mapped — OpenVINO then reports CPU/GPU only.
       ZE_ENABLE_ALT_DRIVERS: libze_intel_npu.so
+    # --max_num_batched_tokens is the prefill chunk budget. Raising it to 8192
+    # was tried (rationale: with the Qwen3-4B tokenizer the static part of every
+    # agent prompt measured 4,206 tokens — 1,509 agent instruction + ~2,697 MCP
+    # tool schemas — so at 4096 every call was split into multiple chunked
+    # prefill iterations). Measured on an Arc iGPU it produced NO improvement:
+    # isolated agent turn 2,306 ms at 8192 vs 2,277 ms at 4096, and a 6-turn
+    # conversation replay gave an LLM median of 5,869 ms vs 5,951 ms — both
+    # within run-to-run noise. Tool-description compaction
+    # (AGENT_COMPACT_TOOL_DESCRIPTIONS) already pulls the static prefill back
+    # under 4096, which makes the larger budget redundant. Kept at the upstream
+    # default; revisit only if the prompt grows materially again.
     command: >
       --rest_port 8000
       --port 9000
@@ -481,6 +690,7 @@ services:
       --max_num_seqs ${OVMS_MAX_NUM_SEQS:-4}
       --max_num_batched_tokens ${OVMS_MAX_BATCHED_TOKENS:-4096}
       --plugin_config '{"PERFORMANCE_HINT":"LATENCY"}'
+      --metrics_enable
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/v3/models"]
       interval: 20s
@@ -502,14 +712,96 @@ services:
       KIOSK_CORE_ANALYZER_URL: http://audio-analyzer:8010/v1/audio/transcriptions
       KIOSK_CORE_RAG_URL:      http://rag-service:8020/api/v1/query
       KIOSK_CORE_TTS_URL:      http://text-to-speech:8011/v1/audio/speech
-      # Back to Ryan (US English male, bright and projecting) — the
-      # text-to-speech service's own default_speaker, and previously
-      # confirmed the loudest/fastest built-in voice (see
-      # configs/text-to-speech/config.yaml). Kabir was tried and reverted.
-      # This override is left explicit (rather than omitted) so the choice
-      # is visible here and can be swapped without touching config.yaml.
-      # Full supported_speakers list is in configs/text-to-speech/config.yaml.
-      KIOSK_CORE_TTS_VOICE:    Ryan
+      # "Ryan" was the SpeechT5/Qwen-era default (US English male, bright and
+      # projecting). The engine has since moved to Kokoro (see
+      # configs/text-to-speech/config.yaml), which has no "Ryan" voice — this
+      # override was left stale after that migration and made EVERY TTS
+      # request 400 (silent replies) until this fix. am_michael is Kokoro's
+      # closest match to the old Ryan voice and matches config.yaml's own
+      # default_speaker, so this override is now redundant but kept explicit
+      # per the original rationale: visible here, swappable without touching
+      # config.yaml. Full Kokoro voice list is in configs/text-to-speech/config.yaml.
+      KIOSK_CORE_TTS_VOICE:    am_michael
+      # kiosk_core.config.DEFAULT_TTS_MODEL falls back to "qwen-tts" when this
+      # is unset. TtsClient sends whatever this resolves to as the model name
+      # on every request, and the TTS backend now matches by substring on
+      # "kokoro" (components/tts/kokoro/kokoro_tts.py::matches_model_name) —
+      # without this override every request would ask for qwen-tts against a
+      # service now configured for the kokoro runtime.
+      KIOSK_CORE_TTS_MODEL:    kokoro
+      # ── Pre-synthesized opener ────────────────────────────────────────
+      # An ordering turn's reply is templated only after the tool returns, so
+      # the model emits no prose to stream and the customer hears ~2s of
+      # silence while the tool-call JSON is generated. A short, cached phrase
+      # is played immediately to fill that window. Must stay non-committal —
+      # it is spoken before any tool has run. Set ENABLED=false to disable.
+      KIOSK_CORE_OPENER_ENABLED: ${KIOSK_CORE_OPENER_ENABLED:-true}
+      KIOSK_CORE_OPENER_TEXT:    ${KIOSK_CORE_OPENER_TEXT:-One moment.}
+      # Adaptive endpoint: shorten the end-of-turn wait when the transcript
+      # already reads as a finished sentence. Fails closed to
+      # KIOSK_CORE_SILENCE_TIMEOUT_SECONDS when no transcript has arrived.
+      KIOSK_CORE_ENDPOINT_COMPLETE_ENABLED: ${KIOSK_CORE_ENDPOINT_COMPLETE_ENABLED:-true}
+      # 0.15s (kiosk-voice-lab-main parity) — see config.py's
+      # DEFAULT_ENDPOINT_SHORT_SECONDS docstring: inert until continuous ASR
+      # replaces the flush-on-pause design (currently gated by
+      # KIOSK_CORE_ADAPTIVE_FLUSH_PAUSE_SECONDS=0.50).
+      KIOSK_CORE_ENDPOINT_SHORT_SECONDS:    ${KIOSK_CORE_ENDPOINT_SHORT_SECONDS:-0.15}
+      KIOSK_CORE_ENDPOINT_MIN_WORDS:        ${KIOSK_CORE_ENDPOINT_MIN_WORDS:-3}
+      # Same explicit-allowlist gotcha as ADAPTIVE_FLUSH_PAUSE_SECONDS below:
+      # setting this in .env alone does nothing without this line. Trimmed
+      # from the 0.2s code default to 0.15s so short+stable totals ~0.30s
+      # (down from ~0.35s), keeping ~30-50ms of margin above
+      # KIOSK_CORE_ADAPTIVE_FLUSH_PAUSE_SECONDS=0.30 (the real commit must
+      # still win the race -- see that var's comment below).
+      KIOSK_CORE_ENDPOINT_STABLE_SECONDS:  ${KIOSK_CORE_ENDPOINT_STABLE_SECONDS:-0.2}
+      # Was previously never actually wired through from .env to the
+      # container (only referenced in a comment above) — this compose file
+      # uses an explicit environment: allowlist, not a blanket .env
+      # passthrough, so every KIOSK_CORE_* override needs its own line here
+      # regardless of what .env sets. Lowered from the 0.50s code default:
+      # in streaming sessions the endpoint-completeness shortcut fires at
+      # ~0.35-0.40s (ENDPOINT_SHORT_SECONDS + ENDPOINT_STABLE_SECONDS),
+      # before the 0.50s adaptive-pause real commit ever got a chance to
+      # run — so the real, diarized commit never fired mid-utterance and
+      # the mandatory final-chunk flush had to transcribe the WHOLE
+      # utterance from scratch every turn (the dominant cost in
+      # WallTimes.final_flush_wait_ms, observed 250-600ms). Set below the
+      # shortcut's firing point so the real commit wins the race instead.
+      KIOSK_CORE_ADAPTIVE_FLUSH_PAUSE_SECONDS: ${KIOSK_CORE_ADAPTIVE_FLUSH_PAUSE_SECONDS:-0.30}
+      # Tier 2 roadmap item #4 (cumulative-snapshot ASR), adapted: skip the
+      # final tail-chunk ASR call when it holds no unflushed speech (pure
+      # trailing silence — the adaptive-pause flush already sent every real
+      # word). Default off pending live A/B measurement; see config.py for
+      # the full rationale (DEFAULT_SKIP_EMPTY_FINAL_FLUSH_ENABLED).
+      KIOSK_CORE_SKIP_EMPTY_FINAL_FLUSH_ENABLED: ${KIOSK_CORE_SKIP_EMPTY_FINAL_FLUSH_ENABLED:-false}
+      # ASR trailing-silence trim (kiosk-voice-lab-main parity): trims the
+      # audio actually SENT TO ASR down to "last speech + a short decay tail"
+      # before every adaptive-pause/final flush, to stop Whisper hallucinating
+      # a completion word from dangling speech + silence (measured artifact:
+      # a spurious trailing "Good."). Does not touch endpoint/silence-timeout
+      # timing. Default off pending live A/B; see config.py for the full
+      # rationale (DEFAULT_ASR_TRIM_TRAILING_SILENCE_ENABLED).
+      KIOSK_CORE_ASR_TRIM_TRAILING_SILENCE_ENABLED: ${KIOSK_CORE_ASR_TRIM_TRAILING_SILENCE_ENABLED:-false}
+      KIOSK_CORE_ASR_TRIM_DECAY_SECONDS:             ${KIOSK_CORE_ASR_TRIM_DECAY_SECONDS:-0.15}
+      # Speculative drafting (see DEFAULT_SPECULATIVE_DRAFT_ENABLED in
+      # config.py for the full rationale/safety notes — dry_run-guarded,
+      # newest-wins). Was defaulted OFF after a 2026-09-08 live-replay
+      # regression (5.8s -> 38.2s) traced to the TTS backend serializing
+      # requests. Re-tested 2026-09-09 AFTER fixing that (text-to-speech now
+      # runs TEXT_TO_SPEECH_WORKERS=2, verified concurrent — 2 parallel synth
+      # calls dropped from ~1.77s to ~1.18s — and OVMS/rag-service confirmed
+      # to already serve concurrent agent/chat calls). Still net NEGATIVE on
+      # this fixture: 3-run mean rose from 3839ms to 4061ms (+222ms). Root
+      # cause: exact-string draft-cache matching almost never hits — ASR
+      # trailing noise (e.g. a spurious "Good." segment appended after the
+      # real sentence) means the final transcript rarely matches any single
+      # earlier preview snapshot the draft ran against, so every draft/TTS
+      # presynth call in this test was 100% wasted work that still competed
+      # with the real turn's own LLM/TTS calls for the same backends. Keep
+      # OFF until draft-cache matching is made fuzzy/prefix-tolerant instead
+      # of exact-string, then re-benchmark before flipping to true.
+      KIOSK_CORE_SPECULATIVE_DRAFT_ENABLED: ${KIOSK_CORE_SPECULATIVE_DRAFT_ENABLED:-false}
+      KIOSK_CORE_SPECULATIVE_TTS_PRESYNTH_ENABLED: ${KIOSK_CORE_SPECULATIVE_TTS_PRESYNTH_ENABLED:-false}
       KIOSK_CORE_METRICS_URL:  http://metrics-collector:9000
       # Diarization — re-enable once HF terms are accepted for pyannote models.
       # Accept terms at: https://huggingface.co/pyannote/speaker-diarization-community-1
@@ -527,6 +819,24 @@ services:
       # vars on audio-analyzer above, which are the actual fix for pyannote
       # loading fully offline from its already-complete local cache.
       KIOSK_CORE_DIARIZATION_ENABLED: ${KIOSK_CORE_DIARIZATION_ENABLED:-true}
+      # Silero VAD (v5, onnxruntime): model-based replacement for the adaptive
+      # RMS VAD's speech/silence decision. Default ON — every turn timer (the
+      # 0.50s adaptive flush, the sentence-completeness shortcut and the 1.1s
+      # silence endpoint) starts from the frame the VAD first calls silence, so
+      # a loudness gate that declares silence late in a noisy room delays the
+      # whole turn. See DEFAULT_SILERO_VAD_* in kiosk_core/config.py for the
+      # full writeup and kiosk_core/silero_vad.py for the wrapper. Fails open to
+      # the RMS VAD. Set to false to restore the RMS-only path.
+      KIOSK_CORE_SILERO_VAD_ENABLED: ${KIOSK_CORE_SILERO_VAD_ENABLED:-true}
+      # Continuous ASR streaming: PCM frames sent over a persistent WebSocket
+      # to audio-analyzer's /v1/realtime instead of POSTing a WAV file per
+      # flush, so a fresh transcript is available throughout speech (not
+      # just after a pause begins). This is what lets the sentence-
+      # completeness shortcut (KIOSK_CORE_ENDPOINT_SHORT_SECONDS) actually
+      # fire early instead of falling through to the full silence-timeout
+      # wait most turns. Falls back to the file-POST path per-session if the
+      # socket fails to connect — never fails the turn. Default OFF.
+      KIOSK_CORE_ANALYZER_STREAMING_ENABLED: ${KIOSK_CORE_ANALYZER_STREAMING_ENABLED:-false}
       # Consecutive rejected turns (speaker filter dropped every segment as
       # non-primary) required before the kiosk speaks
       # KIOSK_CORE_UNRECOGNIZED_SPEAKER_PROMPT instead of staying silent.
@@ -565,6 +875,18 @@ services:
       # below, so files are inspectable without entering the container).
       KIOSK_CORE_CONVERSATION_LOGGING_ENABLED: "${KIOSK_CORE_CONVERSATION_LOGGING_ENABLED:-false}"
       KIOSK_CORE_CONVERSATION_LOG_DIR:          /app/conversations
+      # VLM metrics logging (kiosk_core.vlm_metrics_logger, vendored from
+      # performance-tools). On by default -- pure side-channel append-only
+      # log write, guarded by its own try/except (see
+      # audio_session._emit_vlm_metrics), so it can never break a live turn.
+      # CONTAINER_RESULTS_PATH and USECASE_V2V are upstream-fixed env var
+      # names the vendored logger itself reads (see config.py's
+      # VLM_METRICS_RESULTS_DIR/VLM_METRICS_USECASE_ENV_VAR comments) -- kept
+      # as-is so files land in the same ./results the benchmark flow's
+      # consolidate-metrics/plot-metrics targets already scan.
+      KIOSK_CORE_VLM_METRICS_ENABLED: "${KIOSK_CORE_VLM_METRICS_ENABLED:-true}"
+      CONTAINER_RESULTS_PATH: /app/results
+      USECASE_V2V: smart-kiosk-v2v
       # Bypass corporate proxy for intra-cluster traffic
       NO_PROXY: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,queue-service,172.16.0.0/12,10.0.0.0/8"
       no_proxy: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,queue-service,172.16.0.0/12,10.0.0.0/8"
@@ -573,6 +895,7 @@ services:
       - kiosk_db:/app/data
       - ./configs/ordering:/app/configs/ordering:ro
       - ./conversations:/app/conversations
+      - ${KIOSK_RESULTS_HOST_DIR:-./results}:/app/results
     depends_on:
       audio-analyzer:
         condition: service_healthy

@@ -117,6 +117,61 @@ jobs:
             smart-kiosk-assistant/tests/functional/test_results.csv
           retention-days: 30
 
+      # tests/unit/test_silero_vad.py exercises the real ONNX model, not a
+      # mock — and setup_models.sh (commit 82ec327) stopped git-tracking
+      # kiosk_core/models/silero_vad.onnx in favour of downloading it on
+      # demand. This job never ran setup_models.sh (it's Tier 2's job, and
+      # pulls in far more than this ~2.2 MB file), so those tests started
+      # failing with NoSuchFile as soon as the model left git. Fetch just
+      # this one file directly, with the same pinned checksum
+      # setup_models.sh verifies, cached by SHA so PRs don't re-download it.
+      - name: Cache Silero VAD model
+        id: cache-silero-vad
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: smart-kiosk-assistant/kiosk_core/models/silero_vad.onnx
+          key: silero-vad-v5-1a153a22
+
+      - name: Download Silero VAD model (if cache miss)
+        if: steps.cache-silero-vad.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          mkdir -p kiosk_core/models
+          curl -fSL \
+            https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx \
+            -o kiosk_core/models/silero_vad.onnx
+          expected="1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"
+          actual="$(sha256sum kiosk_core/models/silero_vad.onnx | cut -d' ' -f1)"
+          if [ "${actual}" != "${expected}" ]; then
+            echo "Checksum mismatch: expected ${expected}, got ${actual}"
+            exit 1
+          fi
+
+      # tests/unit/ is deliberately excluded from pytest.ini's default
+      # testpaths (tests/functional only) so functional's tier1/tier2/tier3
+      # marker selection stays unambiguous. That means these regression tests
+      # — ASR endpoint/flush/VAD/speaker-filter behavior — must be invoked
+      # explicitly or they silently never run in CI. No Docker build/hardware
+      # required, same as Tier 1 functional above — just the small Silero
+      # VAD model fetched above.
+      - name: Run unit tests
+        env:
+          PYTHONPATH: .
+        run: |
+          python -m pytest tests/unit/ \
+            --tb=short \
+            -v \
+            --timeout=60 \
+            --junitxml=test-results/unit-results.xml
+
+      - name: Upload unit test results
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v4
+        with:
+          name: unit-test-results
+          path: smart-kiosk-assistant/test-results/unit-results.xml
+          retention-days: 30
+
   # ---------------------------------------------------------------------------
   # TIER 2 — Build, deploy & full-stack integration tests
   # Covers TC #5 and TC #8–#13 from functional-test-cases-sheet.md:

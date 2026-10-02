@@ -8,13 +8,62 @@
 .PHONY: help init-env setup-dirs setup-models download-sample-video check-env show-config \
 		build up down restart status logs \
 		logs-ovms logs-rag logs-core logs-ui logs-audio logs-tts logs-metrics \
-		test clean clean-metrics dev-build
+		test clean clean-metrics dev-build update-submodule update-submodules \
+		benchmark-v2v list-profiles validate-profile _write-provenance \
+		benchmark-matrix compare-profiles
 
 # =============================================================================
 # Load .env (silent if missing — check-env will warn)
 # =============================================================================
 -include .env
 export
+
+# =============================================================================
+# Benchmark device profile (optional)
+# =============================================================================
+# A "profile" is a plain env file under configs/benchmark-profiles/ describing
+# ONE device combination (e.g. ASR=NPU, TTS=CPU, LLM=GPU). It is the only thing
+# a benchmarker has to edit. See that directory's README.md for the valid
+# engine/device matrix and why the matrix pins non-default models.
+#
+#   make benchmark PROFILE=asr-npu_tts-cpu
+#
+# Layering is base .env -> profile -> make/CLI override. The profile is
+# included AFTER .env above (so it wins over .env) but make command-line
+# variables still beat both, which is what `make benchmark PROFILE=x QUEUE=true`
+# relies on.
+#
+# Every value here is empty/neutral when PROFILE is unset, so an ordinary
+# `make up` resolves byte-identically to the pre-profile behaviour.
+PROFILE ?=
+ifneq ($(PROFILE),)
+_PROFILE_FILE := configs/benchmark-profiles/$(PROFILE).env
+ifeq ($(wildcard $(_PROFILE_FILE)),)
+$(error Unknown PROFILE '$(PROFILE)' — no $(_PROFILE_FILE). Run 'make list-profiles')
+endif
+include $(_PROFILE_FILE)
+export
+endif
+
+# Per-profile output directories. With PROFILE unset these collapse to the
+# historical "results"/"metrics", so nothing downstream changes.
+#
+# Why separate directories per profile rather than one shared results/:
+# consolidate_multiple_run_of_metrics.py matches its KPI extractors by filename
+# SUBSTRING, so two profiles' cpu_usage.log/qmassa*.json sitting side by side
+# would be averaged into a single meaningless row. One leaf directory per
+# profile keeps every run independently consolidatable.
+RESULTS_ROOT ?= results
+METRICS_ROOT ?= metrics
+_PROFILE_SUB  = $(if $(PROFILE),/$(PROFILE),)
+RESULTS_DIR   = $(RESULTS_ROOT)$(_PROFILE_SUB)
+METRICS_DIR   = $(METRICS_ROOT)$(_PROFILE_SUB)
+
+# Consumed by docker-compose.yml's bind mounts (kiosk-core /app/results and
+# metrics-collector /tmp/results). Defaults there are ./results and ./metrics,
+# so these only ever redirect when PROFILE is set.
+export KIOSK_RESULTS_HOST_DIR := ./$(RESULTS_DIR)
+export KIOSK_METRICS_HOST_DIR := ./$(METRICS_DIR)
 
 # =============================================================================
 # Configuration variables (defaults match .env)
@@ -98,8 +147,30 @@ _IDENTITY_PROFILE  = $(if $(_IDENTITY_ON),--profile identity,)
 _IDENTITY_SVC      = $(if $(_IDENTITY_ON),identity-service,)
 export KIOSK_CORE_IDENTITY_ENABLED = $(if $(_IDENTITY_ON),true,false)
 
+# Queue/RTSP feature (profile-gated, ON by default — unlike identity above).
+# rtsp-streamer + queue-service (YOLOv8 person-counting) are CPU-hungry
+# (measured ~650-750% + ~350-500% CPU continuously, whether or not a voice
+# session is active) and share the host's CPU with the voice pipeline's
+# only CPU-bound stage, TTS. QUEUE=false frees those cores for a run,
+# useful for isolating/benchmarking voice-pipeline latency without them.
+# Reuses KIOSK_CORE_QUEUE_SERVICE_ENABLED (.env) — the same flag kiosk-core
+# already uses at the app layer to decide whether to call queue-service —
+# so one flag now controls both "is the container even running" (this
+# Makefile / compose profile) and "does kiosk-core call it" (config.py).
+# `QUEUE=true|false` on the make command line overrides it for one-off runs.
+_ENV_QUEUE_ENABLED := $(KIOSK_CORE_QUEUE_SERVICE_ENABLED)
+QUEUE          ?= $(if $(_ENV_QUEUE_ENABLED),$(_ENV_QUEUE_ENABLED),true)
+_QUEUE_ON       = $(filter true TRUE,$(QUEUE))
+_QUEUE_PROFILE  = $(if $(_QUEUE_ON),--profile queue,)
+export KIOSK_CORE_QUEUE_SERVICE_ENABLED = $(if $(_QUEUE_ON),true,false)
+
 # audio-analyzer and text-to-speech are published to Docker Hub by the
-# edge-ai-libraries CI pipeline and are always pulled — never built here.
+# edge-ai-libraries CI pipeline and are pulled by default. With
+# REGISTRY=false they are instead built locally from the sibling
+# ../edge-ai-libraries/microservices/{audio-analyzer,text-to-speech}
+# checkout (see their build.context in docker-compose.yml). In pull mode,
+# text-to-speech is still always built locally because the registry image
+# lacks Kokoro TTS support (see docker-compose.yml text-to-speech comment).
 
 # Colors
 RED    := \033[0;31m
@@ -142,6 +213,17 @@ help: ## Show this help message
 	@echo "  make logs-tts          Tail text-to-speech logs"
 	@echo "  make logs-metrics      Tail metrics-collector logs"
 	@echo ""
+	@echo "$(YELLOW)Benchmark:$(NC)"
+	@echo "  make benchmark            Run the voice-to-voice latency benchmark (brings stack up/down itself)"
+	@echo "  make consolidate-metrics  Consolidate ./metrics + ./results into results/consolidated_metrics.csv"
+	@echo "  make plot-metrics         Generate results/plot_metrics.png (CPU/GPU/NPU/memory usage)"
+	@echo ""
+	@echo "$(YELLOW)Device-combination benchmarking:$(NC)"
+	@echo "  make list-profiles        List available device profiles (ASR/TTS/LLM combinations)"
+	@echo "  make validate-profile     Pre-flight check a profile (PROFILE=<name>), no bring-up"
+	@echo "  make benchmark-matrix     Run every profile sequentially, then compare"
+	@echo "  make compare-profiles     Rebuild results/matrix_summary.csv from existing runs"
+	@echo ""
 	@echo "$(YELLOW)Development:$(NC)"
 	@echo "  make dev-build         Build a single service: make dev-build SVC=rag-service"
 	@echo "  make clean             Stop containers and remove named volumes"
@@ -153,10 +235,15 @@ help: ## Show this help message
 	@echo "  make up                           # start the stack"
 	@echo "  make build SVC=kiosk-ui           # rebuild a single service"
 	@echo "  make setup-models TARGET_DEVICE=CPU  # CPU-only setup"
+	@echo "  make benchmark && make consolidate-metrics && make plot-metrics  # full benchmark + report flow"
+	@echo "  make benchmark PROFILE=asr-npu_tts-cpu  # benchmark one device combination"
+	@echo "  make benchmark-matrix                   # benchmark every combination, then compare"
 	@echo ""
 	@echo "$(YELLOW)Current settings:$(NC)"
 	@echo "  REGISTRY=$(REGISTRY)  TARGET_DEVICE=$(TARGET_DEVICE)  OVMS_MODEL_NAME=$(OVMS_MODEL_NAME)"
+	@echo "  PROFILE=$(if $(PROFILE),$(PROFILE),(none))  RESULTS_DIR=$(RESULTS_DIR)  METRICS_DIR=$(METRICS_DIR)"
 	@echo ""
+
 
 # =============================================================================
 # Setup
@@ -182,7 +269,11 @@ init-env: ## Create .env from .env.example (backs up existing .env)
 
 setup-dirs: ## Create required runtime directories
 	@echo "$(BLUE)Creating required directories...$(NC)"
-	@mkdir -p models storage conversations metrics
+	@# results/ is bind-mounted into kiosk-core (CONTAINER_RESULTS_PATH, see
+	@# docker-compose.yml) for kiosk_core.vlm_metrics_logger's output -- must
+	@# exist with the host user's ownership before `up`, otherwise Docker
+	@# auto-creates it as root and kiosk-core's user:"1000:1000" can't write.
+	@mkdir -p models storage conversations $(METRICS_DIR) $(RESULTS_DIR)
 	@echo "$(GREEN)✓ Directories ready$(NC)"
 
 setup-models: ## Download the OVMS LLM model (Qwen3-4B) via setup_models.sh
@@ -335,6 +426,18 @@ show-config: ## Print resolved configuration
 	@echo "  TARGET_DEVICE     = $(TARGET_DEVICE)"
 	@echo "  OVMS_MODEL_NAME   = $(OVMS_MODEL_NAME)"
 	@echo "  RENDER_GID        = $(RENDER_GID)"
+	@echo "  ACCEL_MOUNT_PATH  = $$([ -n '$(ACCEL_MOUNT_PATH)' ] && echo '$(ACCEL_MOUNT_PATH)' || echo '(unset -> NPU disabled)')"
+	@echo ""
+	@echo "$(YELLOW)Benchmark profile:$(NC)"
+	@echo "  PROFILE           = $(if $(PROFILE),$(PROFILE),(none))"
+	@echo "  RESULTS_DIR       = $(RESULTS_DIR)"
+	@echo "  METRICS_DIR       = $(METRICS_DIR)"
+	@echo "  ASR_DEVICE        = $(if $(ASR_DEVICE),$(ASR_DEVICE),(config default))"
+	@echo "  ASR_PREVIEW_DEVICE= $(if $(ASR_PREVIEW_DEVICE),$(ASR_PREVIEW_DEVICE),(= ASR_DEVICE))"
+	@echo "  ASR_MODEL         = $(if $(ASR_MODEL),$(ASR_MODEL),(config default))"
+	@echo "  TTS_DEVICE        = $(if $(TTS_DEVICE),$(TTS_DEVICE),(config default))"
+	@echo "  TTS_MODEL/RUNTIME = $(if $(TTS_MODEL),$(TTS_MODEL),(config default))/$(if $(TTS_RUNTIME),$(TTS_RUNTIME),(config default))"
+	@echo "  TTS_DTYPE         = $(if $(TTS_DTYPE),$(TTS_DTYPE),(config default))"
 	@echo ""
 	@echo "$(YELLOW)Authentication:$(NC)"
 	@echo "  HF_TOKEN          = $$([ -n '$(HF_TOKEN)' ] && echo '***set***' || echo 'NOT SET')"
@@ -348,6 +451,10 @@ show-config: ## Print resolved configuration
 	@echo "  IDENTITY          = $(IDENTITY)  (from .env KIOSK_CORE_IDENTITY_ENABLED, override with IDENTITY=true|false)"
 	@echo "  identity-service  = $$([ -n '$(_IDENTITY_SVC)' ] && echo 'enabled — will start with --profile identity' || echo 'disabled')"
 	@echo ""
+	@echo "$(YELLOW)Queue/RTSP feature:$(NC)"
+	@echo "  QUEUE             = $(QUEUE)  (from .env KIOSK_CORE_QUEUE_SERVICE_ENABLED, override with QUEUE=true|false)"
+	@echo "  rtsp-streamer/queue-service = $$([ -n '$(_QUEUE_PROFILE)' ] && echo 'enabled — will start with --profile queue' || echo 'disabled (frees ~10-12 CPU cores for voice-pipeline benchmarking)')"
+	@echo ""
 
 # =============================================================================
 # Build
@@ -357,7 +464,11 @@ build: check-env ## Pull images (default with .env); REGISTRY=false builds local
 	@echo "$(BLUE)Preparing Docker images...$(NC)"
 	@if [ "$(REGISTRY)" = "false" ] || [ "$(REGISTRY)" = "FALSE" ]; then \
 		echo "$(YELLOW)  REGISTRY=false → Building local services from source$(NC)"; \
-		REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) build $(LOCAL_ONLY_SERVICES) $(_IDENTITY_SVC); \
+		REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) $(_QUEUE_PROFILE) build $(LOCAL_ONLY_SERVICES) $(_IDENTITY_SVC); \
+		echo "$(YELLOW)  Building audio-analyzer locally from ../edge-ai-libraries/microservices/audio-analyzer...$(NC)"; \
+		REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) build audio-analyzer; \
+		echo "$(YELLOW)  Building text-to-speech locally from ../edge-ai-libraries/microservices/text-to-speech...$(NC)"; \
+		REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) build text-to-speech; \
 	else \
 		echo "$(YELLOW)  REGISTRY=$(REGISTRY) → Pulling images from registry '$(_DOCKER_REGISTRY)'$(NC)"; \
 		REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull $(LOCAL_ONLY_SERVICES); \
@@ -365,9 +476,11 @@ build: check-env ## Pull images (default with .env); REGISTRY=false builds local
 			echo "$(YELLOW)  Building identity-service locally (no registry image)...$(NC)"; \
 			REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) build identity-service; \
 		fi; \
+		echo "$(YELLOW)  Pulling audio-analyzer from registry...$(NC)"; \
+		REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull audio-analyzer; \
+		echo "$(YELLOW)  Building text-to-speech locally (registry image lacks Kokoro TTS support - see docker-compose.yml text-to-speech comment)...$(NC)"; \
+		REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) build text-to-speech; \
 	fi; \
-	echo "$(YELLOW)  Pulling audio-analyzer, text-to-speech, and metrics-collector from registry...$(NC)"; \
-	REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull audio-analyzer text-to-speech; \
 	REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull metrics-collector || \
 		echo "$(YELLOW)  ⚠ Could not pull metrics-collector (intel/hl-ai-metrics-collector) from registry -- using locally cached image if present. Build it from edge-ai-suites/health-and-life-sciences-ai-suite/multi_modal_patient_monitoring/services/metrics-collector if missing.$(NC)"
 	@echo "$(GREEN)✓ Images ready$(NC)"
@@ -378,7 +491,7 @@ build: check-env ## Pull images (default with .env); REGISTRY=false builds local
 
 up: check-env setup-dirs clean-metrics ## Start all services
 	@echo "$(BLUE)Starting Smart Kiosk Assistant...$(NC)"
-	REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) up -d
+	REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) $(_QUEUE_PROFILE) up -d
 	@echo ""
 	@echo "$(GREEN)✓ Stack started$(NC)"
 	@echo "  Kiosk UI        → http://localhost:7860"
@@ -392,18 +505,27 @@ up: check-env setup-dirs clean-metrics ## Start all services
 
 down: ## Stop all services
 	@echo "$(BLUE)Stopping Smart Kiosk Assistant...$(NC)"
-	@# Always tear down with --profile identity enabled, regardless of the
-	@# IDENTITY/.env value at the time `down` is invoked. Compose scopes
-	@# `down` to the same profile-filtered service set as `up`; if identity
-	@# was started with `make up IDENTITY=true` and the stack is later
-	@# stopped with a plain `make down` (IDENTITY unset/false), compose
-	@# never considers identity-service part of the project and leaves it
-	@# (and the network it's attached to) running — this is what caused
-	@# "Network ... Resource is still in use" and an orphaned
-	@# identity-service container. Including the profile unconditionally on
-	@# `down` is a no-op when identity-service was never started.
-	$(COMPOSE_BASE) --profile identity down
-	@$(MAKE) --no-print-directory clean-metrics
+	@# Always tear down with --profile identity/queue enabled, regardless of
+	@# the IDENTITY/QUEUE/.env value at the time `down` is invoked. Compose
+	@# scopes `down` to the same profile-filtered service set as `up`; if a
+	@# profile was active when the stack was started and is no longer active
+	@# at teardown time, compose never considers those containers part of
+	@# the project and leaves them (and the network) running — this is what
+	@# caused "Network ... Resource is still in use" and orphaned containers
+	@# in the past. Including both profiles unconditionally on `down` is a
+	@# no-op for any profile that was never started.
+	$(COMPOSE_BASE) --profile identity --profile queue down
+	@# Deliberately NOT clean-metrics here (only `up` clears it, as a
+	@# prerequisite before the next run starts). `make benchmark`'s
+	@# orchestrator calls `make down` internally right after the measured
+	@# run, in a `finally:` block, before this Makefile's
+	@# consolidate-metrics/plot-metrics targets ever run -- clearing
+	@# ./metrics/ here deleted the just-collected qmassa/cpu/memory data
+	@# (including the qmassa*-tool-generated.json file) before anyone could
+	@# read it. Bind-mounted files surviving `docker compose down` is exactly
+	@# how order-accuracy/take-away's flow works too: nothing removes
+	@# collected metrics between stack teardown and the human/consolidate
+	@# step, only between one run's teardown and the next run's startup.
 	@echo "$(GREEN)✓ All services stopped$(NC)"
 
 restart: down up ## Stop then restart all services
@@ -524,19 +646,292 @@ clean-metrics: ## Delete collected OS metrics dumps (metrics/)
 	@# directory, not on the file, so the fallback empties the directory from
 	@# inside a root container and the host then recreates it owned by the
 	@# invoking user -- which is what stops the permission problem recurring.
-	@if [ -d metrics ]; then \
-		sz=$$(du -sh metrics 2>/dev/null | cut -f1); \
-		if ! rm -rf metrics 2>/dev/null; then \
-			echo "  metrics/ is root-owned; clearing it via a container..."; \
+	@if [ -d $(METRICS_DIR) ]; then \
+		sz=$$(du -sh $(METRICS_DIR) 2>/dev/null | cut -f1); \
+		if ! rm -rf $(METRICS_DIR) 2>/dev/null; then \
+			echo "  $(METRICS_DIR)/ is root-owned; clearing it via a container..."; \
 			$(COMPOSE_BASE) run --rm --no-deps --user root --entrypoint sh \
 				metrics-collector -c 'rm -rf /tmp/results/* /tmp/results/.[!.]*' \
 				>/dev/null 2>&1 || true; \
-			rm -rf metrics 2>/dev/null || true; \
+			rm -rf $(METRICS_DIR) 2>/dev/null || true; \
 		fi; \
-		if [ -d metrics ]; then \
-			echo "$(YELLOW)⚠ Could not fully remove metrics/ (needs root: sudo rm -rf metrics)$(NC)"; \
+		if [ -d $(METRICS_DIR) ]; then \
+			echo "$(YELLOW)⚠ Could not fully remove $(METRICS_DIR)/ (needs root: sudo rm -rf $(METRICS_DIR))$(NC)"; \
 		else \
-			echo "$(GREEN)✓ Cleared metrics/ (freed $$sz)$(NC)"; \
+			echo "$(GREEN)✓ Cleared $(METRICS_DIR)/ (freed $$sz)$(NC)"; \
 		fi; \
 	fi
-	@mkdir -p metrics
+	@mkdir -p $(METRICS_DIR)
+
+
+update-submodule update-submodules: ## Initialize and update the performance-tools submodule
+	@echo "$(BLUE)Cloning/updating performance tool repositories...$(NC)"
+	@if ! git -C .. ls-files --error-unmatch performance-tools >/dev/null 2>&1; then \
+		echo "$(RED)performance-tools is not registered as a submodule in the Git root.$(NC)"; \
+		echo "  Register it once with: git -C .. submodule add --branch main https://github.com/intel-retail/performance-tools.git performance-tools"; \
+		exit 1; \
+	fi
+	@git -C .. submodule update --init --recursive --remote performance-tools
+	@echo "$(GREEN)Submodules updated successfully.$(NC)"
+
+fetch-benchmark:
+	@echo "$(BLUE)Fetching benchmark image from registry...$(NC)"
+	docker pull $(REGISTRY_BENCHMARK)
+	@echo "$(GREEN)Benchmark image ready$(NC)"
+
+build-benchmark:
+	@echo "$(BLUE)Building benchmark Docker image...$(NC)"
+	@if [ "$(REGISTRY)" = "true" ]; then \
+		$(MAKE) fetch-benchmark; \
+	else \
+		cd ../performance-tools && $(MAKE) build-benchmark-docker; \
+	fi
+
+# =============================================================================
+# Voice-to-voice latency benchmark (performance-tools orchestrated)
+# =============================================================================
+# Runs the shared performance-tools orchestrator, which brings this stack up
+# with the CPU-hungry vision services and diarization OFF, replays a scripted
+# conversation through the real start-stream pipeline, and writes both the
+# benchmark's own JSON report and vlm_application_metrics_*.txt files that the
+# performance-tools collectors understand.
+#
+# The orchestrator owns the stack lifecycle (it calls `make up`/`make down`
+# itself), so do NOT run this against an already-running stack unless you also
+# pass V2V_ARGS="--skip_stack".
+#
+# V2V_SCRIPT is empty by default: with no --script, the orchestrator's child
+# script (tests/benchmarks/v2v_scripted_conversation_benchmark.py) reads its
+# own Sample_data/conversation.jsonl -- edit that one file to change the
+# scripted conversation without touching this Makefile or the submodule. Set
+# V2V_SCRIPT=order-simple (or order-multi/order-drift/order-upsell) to opt
+# back into one of the legacy hardcoded named conversations instead.
+V2V_SCRIPT      ?=
+V2V_RUNS        ?= 1
+V2V_WARMUP_RUNS ?= 1
+V2V_LABEL       ?= v2v-perf-tools
+V2V_ARGS        ?=
+# Lives inside the performance-tools submodule (benchmark-scripts/), next to
+# benchmark_order_accuracy.py, so it can bring the stack up the same way that
+# script does and chain straight into consolidate-metrics/plot-metrics below
+# without crossing repos. Now committed there (see performance-tools'
+# benchmark_smart_kiosk_v2v.py history) and kept in sync via
+# `make update-submodules`.
+_PERF_TOOLS_DIR  = ../performance-tools/benchmark-scripts
+_V2V_PERF_TOOLS  = $(_PERF_TOOLS_DIR)
+
+benchmark: check-env validate-profile ## Run the voice-to-voice latency benchmark via performance-tools
+	@if [ ! -f "$(_V2V_PERF_TOOLS)/benchmark_smart_kiosk_v2v.py" ]; then \
+		echo "$(RED)benchmark orchestrator not found at $(_V2V_PERF_TOOLS) -- run 'make update-submodules'.$(NC)"; \
+		exit 1; \
+	fi
+	@$(MAKE) --no-print-directory _write-provenance
+	@echo "$(BLUE)Running voice-to-voice benchmark (profile=$(if $(PROFILE),$(PROFILE),none), script=$(if $(V2V_SCRIPT),$(V2V_SCRIPT),Sample_data/conversation.jsonl), runs=$(V2V_RUNS))...$(NC)"
+	@# Warm-up runs are discarded. Changing an inference device forces an
+	@# OpenVINO recompile/export on first use -- TTS on GPU measured 281s for
+	@# the very first call -- so folding that cold start into the measured
+	@# runs would swamp the steady-state number the profile exists to compare.
+	@if [ "$(V2V_WARMUP_RUNS)" != "0" ]; then \
+		echo "$(BLUE)  Warm-up ($(V2V_WARMUP_RUNS) discarded run(s))...$(NC)"; \
+		cd $(_V2V_PERF_TOOLS) && python3 benchmark_smart_kiosk_v2v.py \
+			--app_dir $(CURDIR) \
+			--results_dir $(CURDIR)/$(RESULTS_DIR)/warmup \
+			$(if $(V2V_SCRIPT),--script $(V2V_SCRIPT),) \
+			--runs $(V2V_WARMUP_RUNS) \
+			--label warmup \
+			$(V2V_ARGS) >/dev/null 2>&1 || true; \
+	fi
+	cd $(_V2V_PERF_TOOLS) && python3 benchmark_smart_kiosk_v2v.py \
+		--app_dir $(CURDIR) \
+		--results_dir $(CURDIR)/$(RESULTS_DIR) \
+		$(if $(V2V_SCRIPT),--script $(V2V_SCRIPT),) \
+		--runs $(V2V_RUNS) \
+		--label $(V2V_LABEL) \
+		$(V2V_ARGS)
+	@# The orchestrator's `make down` (called internally, in a `finally:`
+	@# block) leaves the OS-level hardware counters sitting in ./metrics/
+	@# (bind-mounted from the now-stopped metrics-collector container) --
+	@# they are never copied into ./results/ on their own. Without this,
+	@# `make benchmark` looks like it "doesn't generate" the qmassa/cpu/
+	@# memory/npu files: they exist, just in the wrong directory. Chain the
+	@# consolidation here so a single `make benchmark` always leaves
+	@# ./results/ with the hardware counters *and* consolidated_metrics.csv.
+	@$(MAKE) --no-print-directory consolidate-metrics
+
+# =============================================================================
+# Metrics processing (performance-tools orchestrated)
+# =============================================================================
+# Chains straight off `make benchmark`'s output. Two directories exist:
+#   ./metrics/  -- continuous OS-level counters from the always-on
+#                  metrics-collector container (cpu_usage.log, memory_usage.log,
+#                  npu_usage.csv, qmassa<card>-<device>-<driver>-tool-generated.json)
+#   ./results/  -- per-run application-level metrics from the v2v orchestrator
+#                  (vlm_application_metrics_*.txt and its own JSON/CSV reports)
+#
+# consolidate_multiple_run_of_metrics.py matches KPI extractors by filename
+# SUBSTRING across every file under --root_directory (e.g. its "camera"
+# extractor matches any file merely named *camera*, like kiosk-ui's
+# useCamera.ts) -- pointing it at the whole app repo silently misparses
+# unrelated source files and crashes. So sync-metrics-into-results copies the
+# known hardware-counter filenames from ./metrics/ into ./results/ first,
+# and both targets below only ever point at ./results -- which, unlike the
+# repo root, contains nothing but benchmark output.
+#
+# Both targets use a throwaway venv inside performance-tools (same pattern as
+# `make benchmark`/order-accuracy's Makefile) since these scripts need
+# pandas/natsort/matplotlib, which this app's own requirements.txt does not
+# carry.
+_PERF_TOOLS_VENV = . venv/bin/activate
+
+sync-metrics-into-results: setup-dirs ## Copy OS-level hardware counters from ./metrics into ./results
+	@cp -f $(METRICS_DIR)/cpu_usage.log $(METRICS_DIR)/memory_usage.log $(METRICS_DIR)/npu_usage.csv \
+		$(RESULTS_DIR)/ 2>/dev/null || true
+	@cp -f $(METRICS_DIR)/qmassa*-tool-generated.json $(RESULTS_DIR)/ 2>/dev/null || true
+	@# qmassa rewrites its whole JSON document from scratch on every sample
+	@# rather than appending; a container killed mid-write (or -- observed in
+	@# practice -- CPU/IO contention while `docker compose down` tears down
+	@# the whole stack in parallel, even with metrics-collector's own
+	@# stop_grace_period) can leave this file truncated mid-object, which
+	@# parse_qmassa_metrics_to_json.py then rejects outright. Repair any
+	@# truncation in place before that parser ever sees the file -- see
+	@# tests/benchmarks/repair_qmassa_json.py's docstring for the approach.
+	@python3 tests/benchmarks/repair_qmassa_json.py --dir $(RESULTS_DIR) --keyword qmassa
+
+parse-qmassa-metrics: sync-metrics-into-results ## Parse raw qmassa*-tool-generated.json into qmassa*-parsed.json
+	@# consolidate-metrics and plot-metrics only match *parsed*.json, not the
+	@# raw tool-generated file collect_gpu.sh writes -- this must run first.
+	cd $(_PERF_TOOLS_DIR) && \
+	( \
+		python3 -m venv venv && \
+		$(_PERF_TOOLS_VENV) && \
+		pip3 install -q -r requirements.txt && \
+		python3 parse_qmassa_metrics_to_json.py -d $(CURDIR)/$(RESULTS_DIR) -k qmassa; \
+		deactivate \
+	)
+
+consolidate-metrics: parse-qmassa-metrics ## Consolidate hardware + benchmark metrics into one CSV
+	@echo "$(BLUE)Consolidating metrics from ./results...$(NC)"
+	cd $(_PERF_TOOLS_DIR) && \
+	( \
+		$(_PERF_TOOLS_VENV) && \
+		python3 consolidate_multiple_run_of_metrics.py \
+			--root_directory $(CURDIR)/$(RESULTS_DIR) \
+			--output $(CURDIR)/$(RESULTS_DIR)/consolidated_metrics.csv; \
+		deactivate \
+	)
+	@echo "$(GREEN)✓ Wrote results/consolidated_metrics.csv$(NC)"
+
+plot-metrics: parse-qmassa-metrics ## Generate a CPU/GPU/NPU/memory usage graph from ./results
+	@echo "$(BLUE)Generating metrics plot from ./results...$(NC)"
+	cd $(_PERF_TOOLS_DIR) && \
+	( \
+		$(_PERF_TOOLS_VENV) && \
+		timeout 60s python3 usage_graph_plot.py --dir $(CURDIR)/$(RESULTS_DIR) || true; \
+		deactivate \
+	)
+	@echo "$(GREEN)✓ Wrote results/plot_metrics.png$(NC)"
+
+# =============================================================================
+# Device-combination benchmarking (profiles)
+# =============================================================================
+# A profile is an env file under configs/benchmark-profiles/ describing ONE
+# device combination. See that directory's README.md for the engine/device
+# compatibility matrix and the methodology behind the pinned models.
+#
+#   make list-profiles
+#   make validate-profile PROFILE=asr-npu_tts-cpu
+#   make benchmark        PROFILE=asr-npu_tts-cpu
+#   make benchmark-matrix
+#   make compare-profiles
+
+_PROFILE_DIR  = configs/benchmark-profiles
+_ALL_PROFILES = $(sort $(basename $(notdir $(wildcard $(_PROFILE_DIR)/*.env))))
+
+# Profiles benchmark-matrix will run, in order. Override to run a subset:
+#   make benchmark-matrix PROFILES="asr-cpu_tts-cpu asr-npu_tts-cpu"
+PROFILES ?= $(_ALL_PROFILES)
+
+list-profiles: ## List available benchmark device profiles
+	@echo "$(BLUE)Available benchmark profiles ($(_PROFILE_DIR)/):$(NC)"
+	@for p in $(_ALL_PROFILES); do \
+		asr=$$(grep -E '^ASR_DEVICE=' $(_PROFILE_DIR)/$$p.env | cut -d= -f2); \
+		tts=$$(grep -E '^TTS_DEVICE=' $(_PROFILE_DIR)/$$p.env | cut -d= -f2); \
+		llm=$$(grep -E '^TARGET_DEVICE=' $(_PROFILE_DIR)/$$p.env | cut -d= -f2); \
+		printf "  %-24s ASR=%-4s TTS=%-4s LLM=%-4s\n" "$$p" "$$asr" "$$tts" "$$llm"; \
+	done
+	@echo ""
+	@echo "  Run one:  make benchmark PROFILE=<name>"
+	@echo "  Run all:  make benchmark-matrix"
+
+# Pre-flight gate for `benchmark`. Catches impossible combinations (Kokoro on
+# GPU, distil-small.en on NPU) and -- more importantly -- silently mislabelled
+# ones: with ACCEL_MOUNT_PATH unset or /dev/null, an "NPU" profile would
+# quietly run on CPU and produce plausible but wrong numbers. Fails in seconds
+# instead of 20+ minutes. No-op when PROFILE is unset.
+validate-profile: ## Validate a device profile without starting anything
+	@if [ -n "$(PROFILE)" ]; then \
+		python3 scripts/validate_device_profile.py --profile $(PROFILE) || exit 1; \
+	else \
+		echo "$(YELLOW)No PROFILE set — validating current .env$(NC)"; \
+		python3 scripts/validate_device_profile.py || exit 1; \
+	fi
+
+# Records exactly what produced a result set, so a number found months later
+# can still be traced to its configuration. Written before the measured runs.
+_write-provenance: setup-dirs
+	@if [ -n "$(PROFILE)" ]; then \
+		cp -f $(_PROFILE_FILE) $(RESULTS_DIR)/profile.env 2>/dev/null || true; \
+	fi
+	@python3 scripts/write_run_manifest.py \
+		--results-dir $(RESULTS_DIR) \
+		--metrics-dir $(METRICS_DIR) \
+		--profile "$(PROFILE)" \
+		--release-tag "$(RELEASE_TAG)" \
+		--v2v-runs "$(V2V_RUNS)" \
+		--v2v-warmup-runs "$(V2V_WARMUP_RUNS)" \
+		--queue-enabled "$(QUEUE)"
+
+benchmark-matrix: ## Run every profile sequentially, then build the comparison CSV
+	@echo "$(BLUE)Validating all profiles before starting...$(NC)"
+	@fail=0; for p in $(PROFILES); do \
+		python3 scripts/validate_device_profile.py --profile $$p >/dev/null 2>&1 \
+			|| { echo "$(RED)  ✗ $$p is invalid$(NC)"; \
+			     python3 scripts/validate_device_profile.py --profile $$p 2>&1 | grep ERROR | head -2; \
+			     fail=1; }; \
+	done; \
+	if [ $$fail -ne 0 ]; then \
+		echo "$(RED)Aborting: fix the invalid profile(s) above, or narrow the run with PROFILES=\"...\".$(NC)"; \
+		exit 1; \
+	fi
+	@echo "$(GREEN)✓ All profiles valid$(NC)"
+	@# Sequential by design -- profiles contend for the same CPU/GPU/NPU, so
+	@# running them concurrently would measure contention, not the device.
+	@# Continue on failure so one bad profile does not lose the whole matrix.
+	@rm -f $(RESULTS_ROOT)/matrix_status.txt
+	@mkdir -p $(RESULTS_ROOT)
+	@for p in $(PROFILES); do \
+		echo ""; \
+		echo "$(BLUE)═══ $$p ═══$(NC)"; \
+		if $(MAKE) --no-print-directory benchmark PROFILE=$$p; then \
+			echo "$$p PASS" >> $(RESULTS_ROOT)/matrix_status.txt; \
+		else \
+			echo "$(RED)✗ $$p failed — continuing with the rest$(NC)"; \
+			echo "$$p FAIL" >> $(RESULTS_ROOT)/matrix_status.txt; \
+		fi; \
+	done
+	@echo ""
+	@echo "$(BLUE)Matrix results:$(NC)"
+	@while read -r name status; do \
+		if [ "$$status" = "PASS" ]; then \
+			printf "  $(GREEN)✓$(NC) %-24s %s\n" "$$name" "$$status"; \
+		else \
+			printf "  $(RED)✗$(NC) %-24s %s\n" "$$name" "$$status"; \
+		fi; \
+	done < $(RESULTS_ROOT)/matrix_status.txt
+	@$(MAKE) --no-print-directory compare-profiles
+
+compare-profiles: ## Build results/matrix_summary.csv from every profile's results
+	@echo "$(BLUE)Comparing profiles under $(RESULTS_ROOT)/...$(NC)"
+	@python3 tests/benchmarks/compare_profiles.py \
+		--results-root $(RESULTS_ROOT) \
+		--output $(RESULTS_ROOT)/matrix_summary.csv

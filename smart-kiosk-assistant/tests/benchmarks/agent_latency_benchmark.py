@@ -512,6 +512,34 @@ def synthesize_prompt_wav(prompt: str, tts_model: str, tts_language: str) -> tup
     return body, elapsed_ms
 
 
+def resample_wav_to_16k_mono(wav_bytes: bytes) -> bytes:
+    """Convert a WAV payload to 16kHz mono 16-bit PCM.
+
+    The TTS service's sample rate is a property of whichever backend is
+    configured (Kokoro renders at 24kHz), but the voice pipeline this benchmark
+    exercises is fed 16kHz mono by every real client. Normalising here keeps
+    tier B representative of production instead of failing — or silently
+    measuring a different sample rate — whenever the TTS backend changes.
+    """
+    result = subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", "pipe:0",
+            "-ar", "16000", "-ac", "1", "-sample_fmt", "s16",
+            "-f", "wav", "pipe:1",
+        ],
+        input=wav_bytes,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.startswith(b"RIFF"):
+        raise RuntimeError(
+            f"ffmpeg resample to 16kHz mono failed: {result.stderr.decode(errors='replace')[:300]}"
+        )
+    return result.stdout
+
+
 def poll_session(session_id: str, timeout: float, poll_interval: float = 0.25) -> dict[str, Any]:
     """Poll a kiosk-core session until it leaves the running/stopping state."""
     deadline = time.monotonic() + timeout
@@ -554,6 +582,7 @@ def run_voice_tier(
 
     try:
         wav_bytes, synth_ms = synthesize_prompt_wav(prompt, tts_model, tts_language)
+        wav_bytes = resample_wav_to_16k_mono(wav_bytes)
         print(f"[tier-B]   prompt synthesised: {len(wav_bytes)} bytes in {synth_ms:.0f} ms")
     except Exception as exc:
         print(f"[tier-B]   FAILED to synthesise prompt: {exc}")

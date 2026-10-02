@@ -42,6 +42,21 @@ class AgentClient:
     def __init__(self, agent_url: str, timeout_seconds: float | None = None):
         self.agent_url = agent_url
         self.timeout_seconds = timeout_seconds or config.DEFAULT_HTTP_TIMEOUT_SECONDS
+        # A turn issues at least one buffered/streaming call to /chat, plus
+        # any number of speculative-draft calls during speech. A fresh
+        # httpx.Client per call paid a new TCP connection setup every time
+        # instead of reusing one keep-alive connection for the session's
+        # lifetime — same fix as AnalyzerClient/TtsClient. Each AgentClient
+        # instance is scoped to a single audio session (see
+        # BaseAudioSession.__init__); call close() once the owning session
+        # finishes (BaseAudioSession does this in _finalize_run). httpx.Client
+        # is safe to share across threads for concurrent requests, which
+        # matters here since a speculative draft can run on a background
+        # thread while the real turn's own call is in flight.
+        self._client = httpx.Client(timeout=self.timeout_seconds, trust_env=False)
+
+    def close(self) -> None:
+        self._client.close()
 
     def get_reply(
         self,
@@ -93,10 +108,9 @@ class AgentClient:
             yield from self._get_reply_streaming(payload, session_id)
             return
 
-        with httpx.Client(timeout=self.timeout_seconds, trust_env=False) as client:
-            response = client.post(self.agent_url, json=payload)
-            response.raise_for_status()
-            data = response.json()
+        response = self._client.post(self.agent_url, json=payload)
+        response.raise_for_status()
+        data = response.json()
 
         reply = data.get("reply", "")
         tool_calls = data.get("tool_calls", [])
@@ -138,7 +152,78 @@ class AgentClient:
             "_llm_ttft_ms": llm_ttft_ms,
             "_llm_calls": llm_calls,
             "_retrieval_ms": retrieval_ms,
+            "_mcp_ms": data.get("mcp_ms"),
+            "_mcp_calls": data.get("mcp_calls", 0),
+            "_guard_ms": data.get("guard_ms"),
+            "_template_ms": data.get("template_ms"),
         }
+
+    def get_speculative_draft(
+        self,
+        transcription: str,
+        session_id: str,
+        user_id: str = "anonymous",
+        history: list[dict[str, str]] | None = None,
+    ) -> dict | None:
+        """Run a speculative draft turn ahead of the customer's final utterance.
+
+        Used by the preview-ASR/endpointing pipeline in ``audio_session.py``
+        to warm the LLM's prefix cache (Phase 1) and, when the draft's tool
+        calls later turn out to match the finalised transcript, to let the
+        real turn replay them without a second LLM round-trip (Phase 2).
+
+        The server forces every mutating ordering tool this turn into
+        dry_run mode regardless of what the agent decides to call — see
+        ``_MUTATING_TOOLS``/``_speculative_ctx`` in
+        ``plugins/kiosk/ordering_agent.py`` — so this can never write a real
+        order row, no matter how the (possibly incomplete/incorrect) draft
+        transcript is interpreted.
+
+        Args:
+            transcription: The (possibly incomplete) preview transcript.
+            session_id:    Conversation session identifier — same session as
+                           the eventual real turn, so the ADK/LLM prefix
+                           cache actually warms for it.
+            user_id:       Customer identifier.
+            history:       Prior turns, same as ``get_reply``.
+
+        Returns:
+            The raw agent response dict (``reply``, ``tool_calls``,
+            ``tool_call_detail``, timings, ...), or ``None`` on any request
+            failure — speculative drafts are always best-effort and must
+            never raise into the caller's hot path.
+        """
+        payload: dict[str, object] = {
+            "transcription": transcription,
+            "session_id": session_id,
+            "user_id": user_id,
+            "speculative": True,
+        }
+        if history:
+            cleaned = [
+                {"role": str(t.get("role", "")), "content": str(t.get("content", ""))}
+                for t in history
+                if t.get("content")
+            ]
+            if cleaned:
+                payload["history"] = cleaned
+
+        try:
+            response = self._client.post(self.agent_url, json=payload)
+            response.raise_for_status()
+            data = response.json()
+        except Exception:  # noqa: BLE001 — best-effort, never break the real path
+            logger.warning(
+                "[AGENT-CLIENT] session=%s speculative draft request failed — discarding",
+                session_id, exc_info=True,
+            )
+            return None
+
+        logger.info(
+            "[AGENT-CLIENT] session=%s speculative draft reply_len=%d tool_calls=%s",
+            session_id, len(data.get("reply", "")), data.get("tool_calls", []),
+        )
+        return data
 
     def _get_reply_streaming(
         self,
@@ -163,29 +248,28 @@ class AgentClient:
         spoken: list[str] = []
         final: dict = {}
 
-        with httpx.Client(timeout=self.timeout_seconds, trust_env=False) as client:
-            with client.stream(
-                "POST", config.DEFAULT_AGENT_STREAM_URL, json=payload
-            ) as response:
-                response.raise_for_status()
-                for line in response.iter_lines():
-                    if not line:
-                        continue
-                    event = json.loads(line)
-                    delta = event.get("delta")
-                    if delta:
-                        logger.info(
-                            "[AGENT-CLIENT] session=%s streamed sentence (%d chars)",
-                            session_id, len(delta),
-                        )
-                        # Sentences arrive stripped, but the session joins
-                        # response parts with "". Re-insert the separator the
-                        # model's own spacing would have provided.
-                        yield delta if not spoken else " " + delta
-                        spoken.append(delta)
-                        continue
-                    if "final" in event:
-                        final = event["final"]
+        with self._client.stream(
+            "POST", config.DEFAULT_AGENT_STREAM_URL, json=payload
+        ) as response:
+            response.raise_for_status()
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                event = json.loads(line)
+                delta = event.get("delta")
+                if delta:
+                    logger.info(
+                        "[AGENT-CLIENT] session=%s streamed sentence (%d chars)",
+                        session_id, len(delta),
+                    )
+                    # Sentences arrive stripped, but the session joins
+                    # response parts with "". Re-insert the separator the
+                    # model's own spacing would have provided.
+                    yield delta if not spoken else " " + delta
+                    spoken.append(delta)
+                    continue
+                if "final" in event:
+                    final = event["final"]
 
         reply = final.get("reply", "")
         tool_calls = final.get("tool_calls", [])
@@ -227,6 +311,10 @@ class AgentClient:
             "_llm_ttft_ms": final.get("llm_ttft_ms"),
             "_llm_calls": final.get("llm_calls", 0),
             "_retrieval_ms": final.get("retrieval_ms"),
+            "_mcp_ms": final.get("mcp_ms"),
+            "_mcp_calls": final.get("mcp_calls", 0),
+            "_guard_ms": final.get("guard_ms"),
+            "_template_ms": final.get("template_ms"),
         }
 
 

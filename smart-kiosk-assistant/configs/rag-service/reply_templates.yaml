@@ -24,7 +24,20 @@ not_found: "Sorry, we don't have {requested} on the menu. We do serve {categorie
 # Spoken after a single-item add (place_order / update_order templated path)
 # Placeholders: {items} — Oxford-comma joined item names just added
 #               {total} — numeric total (currency_symbol prepended automatically)
-item_added: "I've added {items} to your order. Your total is now {currency}{total}."
+#
+# The leading "Done." is a deliberate latency optimisation, not filler.
+# Kokoro TTS costs ~208ms fixed + ~9ms per character, and the kiosk only
+# starts playing audio once the FIRST segment is synthesised. Segments are
+# split on sentence punctuation, so a short leading sentence becomes a ~5
+# character first segment (~250ms) instead of a 33-48 character one
+# (~500-640ms) — the customer hears a response ~370ms sooner. Everything
+# after it is synthesised in parallel while "Done." is already playing, so
+# the extra segment costs nothing on the critical path.
+#
+# It is also truthful by construction: this template is only ever used after
+# the order tool has already returned success (see reply_templates.speak()
+# and order_claim_guard), so the action really is done before it is claimed.
+item_added: "Done. I've added {items} to your order. Your total is now {currency}{total}."
 
 # Spoken when confirm_order succeeds
 # Placeholders: {order_id} — order identifier
@@ -35,3 +48,12 @@ order_confirmed: "Your order is confirmed! Order number {order_id}, total {curre
 # Placeholders: {items} — Oxford-comma joined item names removed
 #               {total} — numeric remaining total (currency_symbol prepended automatically)
 item_removed: "I've removed {items}. Your new total is {currency}{total}."
+
+# Spoken when get_current_order returns a cart with items in it
+# Placeholders: {items} — Oxford-comma joined "2 Classic Chicken Burger" strings
+#               {total} — numeric cart total (currency_symbol prepended automatically)
+# Leads with a short sentence for the same TTS-latency reason as item_added.
+cart_summary: "Sure. You have {items}. Your total is {currency}{total}."
+
+# Spoken when get_current_order finds no open order, or an order with no items
+cart_empty: "Your cart is empty at the moment. What would you like to order?"

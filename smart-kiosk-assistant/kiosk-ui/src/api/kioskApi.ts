@@ -19,12 +19,15 @@ export async function startStreamSession(
   conversationId?: string,
   singleChunk = false,
 ): Promise<StartStreamResponse> {
-  // Push-to-talk sends the whole recording as one chunk on Stop, so the
-  // backend must not re-split it. Its chunk cap and silence endpoint are
-  // pushed beyond any realistic utterance, leaving the explicit end-of-stream
-  // signal as the only thing that ends the turn — which is exactly what the
-  // Stop button is. Hands-free conversation mode keeps the tuned values: it
-  // has no Stop button and relies on silence endpointing to end a turn.
+  // Push-to-talk uploads audio to the backend continuously in small slices
+  // (see flushChunk in useVoiceSession.ts) so the server's VAD/frame pipeline
+  // never backlogs, but it must still be transcribed as ONE uncut Whisper
+  // call over the whole utterance, not re-split at upload boundaries. So the
+  // backend's own chunk cap and silence endpoint are pushed beyond any
+  // realistic utterance, leaving the explicit end-of-stream signal (Stop) as
+  // the only thing that triggers ASR and ends the turn. Hands-free
+  // conversation mode keeps the tuned values: it has no Stop button and
+  // relies on silence endpointing to end a turn.
   const chunkSeconds = singleChunk
     ? tuning.singleChunkMaxSeconds
     : tuning.asrChunkSeconds;
@@ -51,7 +54,12 @@ export async function startStreamSession(
       silence_threshold: 900,
       language: 'en',
       temperature: 0.0,
-      tts_model: 'speecht5',
+      // tts_model intentionally omitted: kiosk-core's SessionStartRequest
+      // defaults it to config.DEFAULT_TTS_MODEL (server-side, currently
+      // "kokoro" via KIOSK_CORE_TTS_MODEL in docker-compose.yml). This used
+      // to hardcode 'speecht5', which silently overrode that default and
+      // kept every browser session on the old backend even after the TTS
+      // service switched to Kokoro.
       tts_language: 'English',
       history,
       // Persistent conversation ID — reused across all voice turns so the

@@ -123,8 +123,8 @@ export function CustomerApp() {
     statusText,
     playbackState,
     conversationMode,
-    startConversation,
-    endConversation,
+    start,
+    stop,
     interruptSpeaking,
   } = useVoiceSession({ deviceId: '', enabled: true, onTurnComplete });
 
@@ -164,8 +164,8 @@ export function CustomerApp() {
         partialAssistant={partialAssistant}
         messages={messages}
         conversationMode={conversationMode}
-        onStart={startConversation}
-        onStop={endConversation}
+        onStart={start}
+        onStop={stop}
         onInterrupt={interruptSpeaking}
       />
     </div>

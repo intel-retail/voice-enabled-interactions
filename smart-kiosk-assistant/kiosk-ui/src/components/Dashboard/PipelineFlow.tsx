@@ -5,8 +5,18 @@
  *  🎤 → [ASR] → [Agent/LLM] → [TTS] → 🔊
  *
  * Latency data comes from the turn trace at kiosk-core /api/v1/pipeline/latest.
- * Wall-clock E2E is measured (not summed), so TTS overlap is handled correctly.
  * Retrieval stage shows "—" when not invoked this turn (ordering turns skip it).
+ * The E2E (wall-clock, capture → last audio) chip is retired as a headline
+ * metric — V2V / V2V p95 / Processing are the surfaced customer-facing clocks.
+ *
+ * Per-stage chip values reflect the v2v-latency-optimisation work's own
+ * vocabulary (see benchmark-vocabolary.txt / v2v_scripted_conversation_benchmark.py):
+ *   ASR = real compute latency, last spoken word → transcript ready
+ *         (asr.last_word_to_transcript_ms), NOT the "all chunks summed" total.
+ *   LLM = time to first token (TTFT), agent-start → first reply token/sentence
+ *         (agent.ttft_ms), NOT cumulative model time across every round-trip.
+ *   TTS = time to first audio, i.e. the TTS-only slice of
+ *         wall.time_to_first_audio_ms remaining after the LLM TTFT above.
  *
  * Color coding  CPU=Blue  GPU=Green  NPU=Purple
  * Stage colors: ASR=Orange  Retrieval=Yellow  LLM=Cyan  TTS=Pink
@@ -14,6 +24,7 @@
 
 import type { KpiBundle, PipelineTurnTrace } from '../../types';
 import type { VoicePhase } from '../../types';
+import { extractLatencies, formatLatency as latencyLabel, percentile } from '../../utils/turnLatency';
 
 interface StageConfig {
   id: string;
@@ -64,60 +75,6 @@ const STAGES: StageConfig[] = [
   },
 ];
 
-interface LatencyMap {
-  asr: number | null;
-  retrieval: number | null;         // null when not invoked this turn
-  llm: number | null;               // genuine cumulative LLM time this turn
-  llmCalls: number;                 // number of LLM round-trips this turn
-  agentOverhead: number | null;     // agent round-trip minus LLM time (tools + framework)
-  tts: number | null;
-  retrievalInvoked: boolean;
-}
-
-function extractLatencies(kpis: KpiBundle): LatencyMap {
-  const trace = kpis.pipeline as PipelineTurnTrace | null | undefined;
-
-  if (trace) {
-    return {
-      asr:              trace.asr?.ms ?? null,
-      retrieval:        trace.agent?.retrieval?.invoked ? (trace.agent.retrieval.ms ?? null) : null,
-      // Prefer genuine LLM time. Fall back to the agent round-trip only when
-      // the service did not report it (older rag-service builds).
-      llm:              trace.agent?.llm?.ms ?? trace.agent?.ttft_ms ?? null,
-      llmCalls:         trace.agent?.llm?.calls ?? 0,
-      agentOverhead:    (trace.agent?.llm?.ms != null && trace.agent?.ttft_ms != null)
-                          ? Math.max(0, trace.agent.ttft_ms - trace.agent.llm.ms)
-                          : null,
-      tts:              trace.tts?.ms ?? null,
-      retrievalInvoked: trace.agent?.retrieval?.invoked ?? false,
-    };
-  }
-
-  // Fallback to legacy last_ms registers when no turn trace is available yet
-  const ap = (kpis.asr?.perf ?? {}) as Record<string, unknown>;
-  const rp = (kpis.rag?.perf ?? {}) as Record<string, unknown>;
-  const retr = (rp.retrieval ?? {}) as Record<string, unknown>;
-  const llm  = (rp.llm ?? {}) as Record<string, unknown>;
-  const tp = (kpis.tts?.perf ?? {}) as Record<string, unknown>;
-  const n = (v: unknown) => (typeof v === 'number' ? v : null);
-  return {
-    asr:              n(ap.last_ms),
-    retrieval:        n(retr.last_ms),
-    llm:              n(llm.last_ms),
-    llmCalls:         0,
-    agentOverhead:    null,
-    tts:              n(tp.last_ms),
-    retrievalInvoked: true,   // legacy: always show when present
-  };
-}
-
-function latencyLabel(ms: number | null, invoked = true): string {
-  if (!invoked) return '—';
-  if (ms === null) return '—';
-  if (ms < 1000) return `${Math.round(ms)} ms`;
-  return `${(ms / 1000).toFixed(1)} s`;
-}
-
 function deviceBadge(device: unknown): { label: string; cls: string } | null {
   const d = String(device ?? '').toUpperCase();
   if (d.includes('GPU'))  return { label: 'GPU', cls: 'bg-gpu-light text-gpu-dark border-gpu-muted' };
@@ -165,9 +122,46 @@ export function PipelineFlow({ kpis, phase }: PipelineFlowProps) {
 
   const activeStage = activeStageFromPhase(phase);
 
-  // Use measured wall E2E from turn trace; never sum stages (avoids TTS overlap error)
-  const e2eMs = trace?.wall?.turn_total_ms ?? null;
-  const ttfaMs = trace?.wall?.time_to_first_audio_ms ?? null;
+  // Shared-vocabulary "Processing latency" (turn-end decision -> first sound
+  // out of the speaker). Deliberately NOT time_to_first_audio_ms: the two
+  // differ whenever work starts speculatively during the endpoint's
+  // trailing-silence wait (e.g. shortcut turns: ttfa ~195ms vs processing
+  // latency ~3ms, because audio was already rendered before the turn-end
+  // decision fired) -- see kiosk_core/pipeline_latency.py WallTimes docstring
+  // and benchmark-vocabolary.txt. "Time to first audio" is retired as a
+  // headline KPI name; it's still available in the per-turn table below for
+  // diagnostics, just not surfaced here as a top-level chip.
+  const processingMs = trace?.wall?.voice_to_voice_post_endpoint_ms ?? null;
+  // Voice-to-voice is the customer-felt clock: last word spoken -> first sound
+  // out of the speaker. It is NOT derivable from turn_total_ms (E2E, retired
+  // as a headline chip), because turn_total_ms starts at the endpoint
+  // decision and so excludes the trailing-silence wait.
+  const v2vMs = trace?.wall?.voice_to_voice_ms ?? null;
+  const v2vInformativeMs = trace?.wall?.voice_to_voice_informative_ms ?? null;
+  // The non-compute chunk of v2v that Processing (above) deliberately
+  // excludes: endpoint_wait_ms (trailing-silence dwell) + post_speech_gap_ms
+  // (mic-release reaction time / trailing buffered audio) + final_flush_wait_ms
+  // (draining the ASR flush queue). This is real, customer-felt wait time —
+  // without a chip for it, ASR+LLM+TTS's stage numbers never add up to V2V
+  // and look like a bug. Derived as v2v - processing rather than summed
+  // directly so it's never inconsistent with the two chips either side of it.
+  const endpointWaitMs =
+    v2vMs !== null && processingMs !== null ? Math.max(0, v2vMs - processingMs) : null;
+
+  // One row per request/response, newest first.
+  const recentTurns = (kpis.pipelineRecent ?? [])
+    .filter((t) => t?.wall?.voice_to_voice_ms != null)
+    .slice()
+    .reverse();
+
+  // Rolling p95 over the recent-turns window -- the customer-facing target
+  // metric (a single bad tail turn is what damages a real interaction;
+  // showing only the latest turn's V2V, or a mean/median across the window,
+  // would hide it).
+  const v2vP95Ms = percentile(
+    recentTurns.map((t) => t?.wall?.voice_to_voice_ms as number).filter((v) => v != null),
+    0.95,
+  );
 
   return (
     <div className="space-y-3">
@@ -177,16 +171,33 @@ export function PipelineFlow({ kpis, phase }: PipelineFlowProps) {
           AI Inference Pipeline
         </h2>
         <div className="flex items-center gap-2">
-          {ttfaMs !== null && (
-            <span className="rounded-full bg-green-50 px-2 py-0.5 text-[10px] font-semibold text-green-700 border border-green-200"
-              title="Time to first audio — perceived response latency">
-              TTFA {latencyLabel(ttfaMs)}
+          {v2vMs !== null && (
+            <span className="rounded-full bg-purple-50 px-2.5 py-0.5 text-[11px] font-semibold text-purple-700 border border-purple-200"
+              title={
+                'Voice to voice — customer\u2019s last word to first sound out of the speaker' +
+                (v2vInformativeMs !== null
+                  ? ` (to first informative audio: ${latencyLabel(v2vInformativeMs)})`
+                  : '')
+              }>
+              V2V {latencyLabel(v2vMs)}
             </span>
           )}
-          {e2eMs !== null && (
-            <span className="rounded-full bg-intel-blue/10 px-2.5 py-0.5 text-[11px] font-semibold text-intel-blue"
-              title="Measured wall-clock E2E (not summed)">
-              E2E {latencyLabel(e2eMs)}
+          {v2vP95Ms !== null && (
+            <span className="rounded-full bg-purple-100 px-2 py-0.5 text-[10px] font-semibold text-purple-800 border border-purple-300"
+              title={`V2V p95 over the last ${recentTurns.length} turns — the customer-facing target metric (median hides the bad tail)`}>
+              V2V p95 {latencyLabel(v2vP95Ms)}
+            </span>
+          )}
+          {processingMs !== null && (
+            <span className="rounded-full bg-green-50 px-2 py-0.5 text-[10px] font-semibold text-green-700 border border-green-200"
+              title="Processing latency — turn-end decision to first sound out of the speaker (shared cross-team vocabulary term; voice_to_voice = endpointing delay + processing latency)">
+              Processing {latencyLabel(processingMs)}
+            </span>
+          )}
+          {endpointWaitMs !== null && (
+            <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700 border border-amber-200"
+              title="Endpoint/mic wait — trailing-silence dwell + mic-release reaction time + ASR flush-queue drain, all BEFORE processing starts. Real customer-felt wait, not pipeline compute; V2V = this + Processing.">
+              Endpoint wait {latencyLabel(endpointWaitMs)}
             </span>
           )}
         </div>
@@ -243,13 +254,18 @@ export function PipelineFlow({ kpis, phase }: PipelineFlowProps) {
                 `}
                 style={isActive ? { boxShadow: `0 0 16px 2px ${stage.glowColor}` } : undefined}
                 title={stage.id === 'retrieval' && !invoked ? 'Not invoked this turn (ordering path)' :
-                       stage.id === 'llm'
-                         ? (lats.llmCalls > 0
-                             ? `Cumulative LLM time across ${lats.llmCalls} round-trip(s)`
-                               + (lats.agentOverhead != null
-                                   ? ` · +${Math.round(lats.agentOverhead)} ms agent/tool overhead`
-                                   : '')
-                             : 'Agent round-trip (LLM time not reported)')
+                       stage.id === 'asr'
+                         ? 'ASR latency — last spoken word to transcript ready (excludes the endpoint silence wait)'
+                       : stage.id === 'llm'
+                         ? 'LLM time to first token (TTFT) — agent-start to first reply token/sentence'
+                           + (lats.llmCalls > 0
+                               ? ` · cumulative model time across ${lats.llmCalls} round-trip(s)`
+                                 + (lats.agentOverhead != null
+                                     ? ` · +${Math.round(lats.agentOverhead)} ms agent/tool overhead`
+                                     : '')
+                               : '')
+                       : stage.id === 'tts'
+                         ? 'TTS time to first audio — first segment synth + WAV write, after the LLM TTFT'
                          : undefined}
               >
                 {/* Device badge top-right */}
@@ -312,18 +328,19 @@ export function PipelineFlow({ kpis, phase }: PipelineFlowProps) {
         </div>
       </div>
 
-      {/* LLM label clarification when turn trace is available */}
+      {/* Stage-metric clarification when turn trace is available */}
       {trace && (
         <p className="text-[9px] text-gray-400 text-right">
+          ASR = last word → transcript ready · LLM = time to first token (TTFT)
           {lats.llmCalls > 0
-            ? `LLM = cumulative model time (${lats.llmCalls} call${lats.llmCalls > 1 ? 's' : ''})`
-            : 'LLM = agent round-trip'}
-          {lats.agentOverhead != null
-            ? ` · agent/tool overhead ${Math.round(lats.agentOverhead)} ms`
+            ? ` (${lats.llmCalls} model call${lats.llmCalls > 1 ? 's' : ''}`
+              + (lats.agentOverhead != null ? `, +${Math.round(lats.agentOverhead)} ms agent/tool overhead)` : ')')
             : ''}
-          {' · E2E = measured wall-clock, capture → last audio (TTS overlaps LLM)'}
+          {' · TTS = time to first audio (TTS overlaps LLM)'}
+          {' · V2V = Endpoint wait + Processing (ASR/LLM/TTS chips are compute-only sub-components of Processing)'}
         </p>
       )}
+
     </div>
   );
 }
