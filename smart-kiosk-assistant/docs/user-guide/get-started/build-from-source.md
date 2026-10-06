@@ -31,7 +31,7 @@ branch yet.
 
 | Repository | Pinned commit | Why |
 | --- | --- | --- |
-| [`intel-retail/performance-tools`](https://github.com/intel-retail/performance-tools) | `9dd59dc` | Provides `benchmark_smart_kiosk_v2v.py`, the voice-to-voice benchmark orchestrator, and the natural-endpointing measurement mode. Tracked as a Git **submodule**, so the commit is recorded in this repository — you do not pick it manually. |
+| [`intel-retail/performance-tools`](https://github.com/intel-retail/performance-tools) | `c561c9e` | Provides `benchmark_smart_kiosk_v2v.py`, the voice-to-voice benchmark orchestrator, and the natural-endpointing measurement mode. Tracked as a Git **submodule**, so the commit is recorded in this repository — you do not pick it manually. |
 | [`open-edge-platform/edge-ai-libraries`](https://github.com/open-edge-platform/edge-ai-libraries) | see below | Supplies `audio-analyzer` and `text-to-speech`. The settings this release relies on (`TEXT_TO_SPEECH_WORKERS`, the ASR preview pool, and forwarding an empty ASR language to English-only checkpoints) are not yet on upstream `main`. |
 
 Building `edge-ai-libraries` from upstream `main` **will fail**:
@@ -92,7 +92,7 @@ arbitrary commit.
 Confirm both pins before building:
 
 ```bash
-git -C ../performance-tools rev-parse --short HEAD   # expect 9dd59dc
+git -C ../performance-tools rev-parse --short HEAD   # expect c561c9e
 git -C ../edge-ai-libraries rev-parse --short HEAD   # expect fc89569
 ```
 
