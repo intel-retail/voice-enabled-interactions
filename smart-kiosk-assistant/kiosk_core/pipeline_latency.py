@@ -155,6 +155,13 @@ class WallTimes:
     # near-zero processing_latency_ms self-explanatory in the trace instead
     # of looking like a pipeline result.
     first_audio_was_opener: bool = False
+    # True when the opener was enabled for this turn but could not be
+    # rendered, so the customer heard nothing until the answer itself. A
+    # failed synthesis is remembered for a cooldown rather than for the life
+    # of the process, so this can appear on some turns of a run and not
+    # others; without it, an opener that had silently switched itself off was
+    # indistinguishable from one that was never configured.
+    opener_failed: bool = False
     # ── Sub-components of the two spans above (diagnostics) ──────────────
     # The endpoint's trailing-silence run at the instant it committed, in
     # AUDIO-domain seconds (counted from samples, not the wall clock). Kept

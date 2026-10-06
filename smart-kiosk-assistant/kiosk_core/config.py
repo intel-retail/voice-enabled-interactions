@@ -226,6 +226,27 @@ DEFAULT_OPENER_TEXT = os.getenv("KIOSK_CORE_OPENER_TEXT", "One moment.")
 # Rendered opener cache. Synthesised once per (text, voice, language) and
 # reused for every turn and every session, so TTS never sits on the hot path.
 DEFAULT_OPENER_CACHE_DIR = os.getenv("KIOSK_CORE_OPENER_CACHE_DIR", "./storage/openers")
+# How long a failed opener synthesis is remembered before it is retried.
+#
+# A failure used to be cached permanently: one bad TTS round trip at startup
+# disabled the opener for the lifetime of the process, so every later turn
+# silently lost the latency optimisation with nothing to indicate why. A
+# cooldown keeps the original intent (a broken TTS service must not make every
+# turn pay a failed round trip) without making a transient failure permanent.
+DEFAULT_OPENER_RETRY_SECONDS = float(
+    os.getenv("KIOSK_CORE_OPENER_RETRY_SECONDS", "60")
+)
+# Spoken when the agent call fails after the opener has already played.
+#
+# The opener is emitted before the agent call so the customer hears something
+# immediately. If that call then fails there is no reply to speak, so the
+# customer heard "One moment." followed by silence. This is the closing half
+# of that exchange. Like the opener it must stay non-committal: no tool has
+# necessarily run, so it must never imply an order was or was not changed.
+DEFAULT_AGENT_FAILURE_TEXT = os.getenv(
+    "KIOSK_CORE_AGENT_FAILURE_TEXT",
+    "Sorry, I'm having trouble right now. Could you say that again?",
+)
 
 # When list_products is called with no category, return a per-category summary
 # instead of every product. The catalogue is 26 items: reciting it costs ~19 s

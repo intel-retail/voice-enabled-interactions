@@ -40,6 +40,9 @@ logger = logging.getLogger(__name__)
 # can race on the first turn after startup.
 _opener_lock = threading.Lock()
 _opener_cache: dict[tuple[str, str, str | None, str | None, str | None], Path | None] = {}
+# Monotonic timestamp of the last failed synthesis per cache key, so a failure
+# can expire instead of disabling the opener for the life of the process.
+_opener_failed_at: dict[tuple[str, str, str | None, str | None, str | None], float] = {}
 
 
 def _render_opener(
@@ -49,6 +52,7 @@ def _render_opener(
     voice: str | None,
     language: str | None,
     instructions: str | None,
+    postprocess: Callable[[Path], None] | None = None,
 ) -> Path | None:
     """Return a cached WAV of ``text``, synthesising it on first use.
 
@@ -60,16 +64,42 @@ def _render_opener(
         voice:        TTS voice, or None for the service default.
         language:     TTS language, or None for the service default.
         instructions: Optional TTS style instructions.
+        postprocess:  Applied once to a freshly synthesised file, before it is
+                      cached. This is where the trim and gain that every other
+                      segment receives are applied — the opener is played as a
+                      plain file copy, so if it is not normalised here it never
+                      is, and it plays at a noticeably different level from the
+                      reply that follows it. Deliberately NOT applied to a file
+                      already on disk from an earlier process: that one was
+                      normalised when it was written, and applying gain twice
+                      would clip it.
 
     Returns:
         Path to the rendered WAV, or None when synthesis failed. A failure is
-        cached as None so a broken TTS service cannot make every turn pay a
-        failed round-trip.
+        remembered for ``config.DEFAULT_OPENER_RETRY_SECONDS`` so a broken TTS
+        service cannot make every turn pay a failed round-trip, but it is
+        retried after that so a transient failure does not disable the opener
+        for the lifetime of the process.
     """
     key = (text, model, voice, language, instructions)
     with _opener_lock:
         if key in _opener_cache:
-            return _opener_cache[key]
+            cached = _opener_cache[key]
+            if cached is not None:
+                return cached
+            failed_at = _opener_failed_at.get(key)
+            if (
+                failed_at is not None
+                and (time.monotonic() - failed_at) < config.DEFAULT_OPENER_RETRY_SECONDS
+            ):
+                return None
+            # Cooldown elapsed: fall through and try again.
+            logger.info(
+                "[OPENER] Retrying synthesis after %.0fs cooldown",
+                config.DEFAULT_OPENER_RETRY_SECONDS,
+            )
+            _opener_cache.pop(key, None)
+            _opener_failed_at.pop(key, None)
 
         cache_dir = Path(config.DEFAULT_OPENER_CACHE_DIR)
         if not cache_dir.is_absolute():
@@ -94,14 +124,28 @@ def _render_opener(
                 language=language,
                 instructions=instructions,
             )
+            if postprocess is not None:
+                postprocess(path)
             logger.info(
                 "[OPENER] Rendered %r -> %s in %.0f ms",
                 text, path.name, (time.monotonic() - t0) * 1000,
             )
             _opener_cache[key] = path
+            _opener_failed_at.pop(key, None)
         except Exception:
-            logger.exception("[OPENER] Synthesis failed; opener disabled for this process")
+            # Remove any partial or half-processed file. It would otherwise be
+            # picked up by the exists() check above on the next process start
+            # and served as if it were a good opener.
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("[OPENER] Could not remove failed render %s", path)
+            logger.exception(
+                "[OPENER] Synthesis failed; opener disabled for %.0fs",
+                config.DEFAULT_OPENER_RETRY_SECONDS,
+            )
             _opener_cache[key] = None
+            _opener_failed_at[key] = time.monotonic()
         return _opener_cache[key]
 
 
@@ -822,6 +866,10 @@ class BaseAudioSession:
         # that stopped on a file copy is never mistaken for one that stopped
         # on the pipeline's actual reply.
         self._first_audio_was_opener: bool = False
+        # Whether the opener was wanted this turn but could not be rendered.
+        # Without this a disabled-by-failure opener was invisible: the turn
+        # simply had no segment 0 and nothing said why.
+        self._opener_failed: bool = False
         # Trailing silence the endpoint waited through before committing the
         # turn. Needed to report voice-to-voice latency, because every other
         # timestamp in the trace starts after this wait has already elapsed.
@@ -1765,6 +1813,20 @@ class BaseAudioSession:
             datetime.now(UTC).isoformat(), latency_ms,
         )
 
+    def _postprocess_opener(self, path: Path) -> None:
+        """Apply the same trim and gain every other TTS segment receives.
+
+        Called once, on a freshly synthesised opener, from ``_render_opener``.
+        Without this the opener is the only segment in a turn that keeps the
+        service's raw level and its leading/trailing silence, so it plays at a
+        noticeably different level from the reply that follows it.
+
+        Args:
+            path: Freshly synthesised opener WAV, modified in place.
+        """
+        self._trim_tts_segment(path, (config.DEFAULT_OPENER_TEXT or "").strip())
+        self._apply_tts_gain(path)
+
     def _emit_opener(self) -> None:
         """Play a cached, non-committal opener while the agent turn runs.
 
@@ -1791,8 +1853,11 @@ class BaseAudioSession:
             self.request.tts_voice,
             self.request.tts_language,
             self.request.tts_instructions,
+            postprocess=self._postprocess_opener,
         )
         if source is None:
+            with self._lock:
+                self._opener_failed = True
             return
 
         try:
@@ -1831,9 +1896,6 @@ class BaseAudioSession:
         history = list(getattr(self.request, "history", []) or [])
 
         # Route through the ordering agent when enabled; fall back to direct RAG.
-        if self.agent_client is not None:
-            logger.info("[SESSION] Routing turn to agent: session=%s (conv=%s) message=%r",
-                        self.session_id, self.agent_session_id, transcript[:80])
         if self.agent_client is not None:
             logger.info("[SESSION] Routing turn to agent: session=%s (conv=%s) message=%r",
                         self.session_id, self.agent_session_id, transcript[:80])
@@ -1924,6 +1986,24 @@ class BaseAudioSession:
             # (existing metric) intentionally keeps including the TTS drain;
             # this is the isolated figure for anyone debugging tool/LLM time.
             self._t_agent_stream_end = time.monotonic()
+
+        except Exception:
+            # The opener is emitted *before* this call, so a failure here used
+            # to leave the customer with "One moment." and then silence. Close
+            # the exchange with a non-committal apology. It is queued before
+            # the finally block below drains the TTS workers, so it is spoken
+            # on the way out. Only when nothing else has been said this turn —
+            # a mid-reply failure has already produced audio.
+            logger.exception(
+                "[SESSION] session=%s agent turn failed", self.session_id
+            )
+            fallback = (config.DEFAULT_AGENT_FAILURE_TEXT or "").strip()
+            if sentence_index == 0 and fallback:
+                sentence_index += 1
+                if self._t_first_tts is None:
+                    self._t_first_tts = time.monotonic()
+                sentence_queue.put((sentence_index, fallback))
+            raise
 
         finally:
             self._stop_tts_workers(sentence_queue, workers)
@@ -2068,6 +2148,7 @@ class BaseAudioSession:
                 voice_to_voice_answer_ms=voice_to_voice_answer_ms,
                 processing_latency_answer_ms=processing_latency_answer_ms,
                 first_audio_was_opener=self._first_audio_was_opener,
+                opener_failed=self._opener_failed,
                 endpoint_silence_run_ms=endpoint_silence_run_ms,
                 final_flush_wait_ms=final_flush_wait_ms,
                 post_speech_gap_ms=post_speech_gap_ms,
