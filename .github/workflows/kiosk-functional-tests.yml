@@ -173,6 +173,72 @@ jobs:
           retention-days: 30
 
   # ---------------------------------------------------------------------------
+  # RAG-SERVICE UNIT TESTS
+  # rag-service/tests/ has its own pytest root (rag-service/pytest.ini and
+  # rag-service/tests/conftest.py, which puts rag-service/ and the repo's
+  # plugins/ on sys.path). It was never invoked by this workflow, so the
+  # agent-side suite — MCP callable generation, the ordering guards, and the
+  # reply templates — could regress without CI noticing. Runs on every push
+  # and PR, same as Tier 1.
+  #
+  # Deliberately NOT `pip install -r rag-service/requirements.txt`: that pulls
+  # torch, openvino, chromadb and sentence-transformers (several GB) purely to
+  # build the *runtime*. These tests never load a model or an index — they
+  # mock call_tool and the ADK runner — so only the import-time dependencies
+  # are installed here. google-adk is pinned to the same floor as
+  # rag-service/requirements.txt; if that floor moves, move it here too.
+  # ---------------------------------------------------------------------------
+  rag-service-unit-tests:
+    name: "rag-service unit tests"
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: smart-kiosk-assistant/rag-service/requirements.txt
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            "google-adk>=1.28.1" \
+            "numpy==1.26.4" \
+            "PyYAML==6.0.2" \
+            pytest==8.3.5 \
+            pytest-timeout==2.3.1
+
+      - name: Run rag-service unit tests
+        # Step-level working-directory is relative to the workspace root, not
+        # to the workflow default, so the full path is spelled out here (same
+        # as the Tier 2 steps below). rag-service/ must be the working
+        # directory because tests/conftest.py resolves rag-service/ and the
+        # repo's plugins/ onto sys.path relative to itself.
+        working-directory: smart-kiosk-assistant/rag-service
+        run: |
+          python -m pytest tests/ \
+            --tb=short \
+            -v \
+            --timeout=60 \
+            --junitxml=test-results/rag-service-results.xml
+
+      - name: Upload rag-service test results
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v4
+        with:
+          name: rag-service-test-results
+          path: smart-kiosk-assistant/rag-service/test-results/rag-service-results.xml
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
   # TIER 2 — Build, deploy & full-stack integration tests
   # Covers TC #5 and TC #8–#13 from functional-test-cases-sheet.md:
   #   #5  Docker build tests (all images present after `make build`)

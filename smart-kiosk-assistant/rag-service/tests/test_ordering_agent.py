@@ -31,9 +31,17 @@ def test_make_mcp_callable_invokes_mcp_tool(monkeypatch) -> None:
     result = _run(fn(order_id="ORD-1", items=[{"product_id": "coke", "quantity": 1}]))
 
     assert result == {"status": "success", "result": "updated"}
+    # dry_run is forced onto every mutating tool server-side and stripped from
+    # the model-visible schema, so the model can never set it. Outside a
+    # speculative draft it is explicitly False, which is what makes a real
+    # turn persist even if a stale value leaked in from elsewhere.
     fake_call_tool.assert_awaited_once_with(
         "update_order",
-        {"order_id": "ORD-1", "items": [{"product_id": "coke", "quantity": 1}]},
+        {
+            "order_id": "ORD-1",
+            "items": [{"product_id": "coke", "quantity": 1}],
+            "dry_run": False,
+        },
     )
     assert fn.__name__ == "update_order"
     assert fn.__doc__ == "Add items"
@@ -77,9 +85,14 @@ def test_make_mcp_callable_infers_list_type_for_optional_anyof_items(monkeypatch
     assert "user_id" not in fn.__annotations__
 
     _run(fn(items=[{"product_id": "coke", "quantity": 1}]))
+    # dry_run=False: see test_make_mcp_callable_invokes_mcp_tool.
     fake_call_tool.assert_awaited_once_with(
         "remove_from_order",
-        {"user_id": "anonymous", "items": [{"product_id": "coke", "quantity": 1}]},
+        {
+            "user_id": "anonymous",
+            "items": [{"product_id": "coke", "quantity": 1}],
+            "dry_run": False,
+        },
     )
 
 

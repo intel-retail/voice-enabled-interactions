@@ -230,11 +230,28 @@ class TestSpeakDispatch:
         assert rt.speak("place_order", {"status": "success", "result": "not json"}) is None
 
     def test_speakable_tools_set(self):
+        """Tripwire: adding a template makes a tool speakable.
+
+        ``SPEAKABLE_TOOLS`` is derived from the template registry, so a new
+        template silently widens what the agent can say without a second
+        model call. ``get_current_order`` and ``get_popular_products`` were
+        added deliberately; anything else appearing here needs review.
+        """
         assert rt.SPEAKABLE_TOOLS == {
             "place_order", "update_order", "confirm_order",
             "confirm_active_order", "remove_from_order",
             "list_products", "list_categories",
+            "get_current_order", "get_popular_products",
         }
+
+    def test_every_read_tool_is_speakable_and_gated(self):
+        """Read tools must be speakable, and must all go through the browse gate.
+
+        A read tool with a template but no gate entry would end the turn on
+        an intermediate lookup (templating sets ``skip_summarization``), which
+        is exactly the failure mode _READ_TOOLS exists to prevent.
+        """
+        assert rt._READ_TOOLS <= rt.SPEAKABLE_TOOLS
 
     def test_mutation_templates_ignore_utterance(self):
         """The browse gate must never suppress a mutation template."""
