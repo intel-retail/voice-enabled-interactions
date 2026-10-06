@@ -1,8 +1,6 @@
 fastapi==0.141.1
-gradio==6.16.0
 httpx==0.28.1
 numpy==2.2.6
-plotly==5.24.1
 pydantic==2.11.7
 python-multipart==0.0.31
 sounddevice==0.5.1
@@ -46,7 +44,11 @@ fastmcp==3.2.0
 # declares no install_requires, so this pulls in only the one small module
 # (vlm_metrics_logger.py) -- not performance-tools' own dev requirements.txt
 # (pandas/matplotlib/etc.), which is unrelated to this package's setup.py.
-# Pinned to @main (no tags exist upstream); if that module's log format ever
-# changes there, kiosk-core's build could pick it up silently -- watch for
-# that on version bumps.
-git+https://github.com/intel-retail/performance-tools.git@main#subdirectory=benchmark-scripts
+# Pinned to a commit, not @main: no tags exist upstream, and an unpinned
+# @main meant a change to this module's log format could reach kiosk-core's
+# build silently and break the consolidator without any change here. This
+# is the last merged upstream commit at which vlm_metrics_logger.py is
+# byte-identical to the version the benchmark submodule uses, so the two
+# cannot drift apart. Bump deliberately, and re-check the log format when
+# you do.
+git+https://github.com/intel-retail/performance-tools.git@144d3b6#subdirectory=benchmark-scripts

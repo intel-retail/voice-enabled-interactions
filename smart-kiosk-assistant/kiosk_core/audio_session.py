@@ -610,7 +610,7 @@ class BaseAudioSession:
         # Segments can finish synthesis out of order when
         # config.DEFAULT_TTS_WORKER_CONCURRENCY > 1 (e.g. a short sentence 2
         # finishing before a longer sentence 1). tts_audio_segments must still
-        # be exposed to clients in index order — gradio_app.py queues newly
+        # be exposed to clients in index order — the UI queues newly
         # appended segments for playback in list-append order, so an
         # out-of-order append would play sentence 2 before sentence 1.
         # _tts_pending_publish holds finished-but-not-yet-publishable segments
