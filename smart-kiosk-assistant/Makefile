@@ -776,23 +776,27 @@ benchmark: check-env validate-profile ## Run the voice-to-voice latency benchmar
 	@# OpenVINO recompile/export on first use -- TTS on GPU measured 281s for
 	@# the very first call -- so folding that cold start into the measured
 	@# runs would swamp the steady-state number the profile exists to compare.
-	@if [ "$(V2V_WARMUP_RUNS)" != "0" ]; then \
-		echo "$(BLUE)  Warm-up ($(V2V_WARMUP_RUNS) discarded run(s))...$(NC)"; \
-		cd $(_V2V_PERF_TOOLS) && python3 benchmark_smart_kiosk_v2v.py \
-			--app_dir $(CURDIR) \
-			--results_dir $(CURDIR)/$(RESULTS_DIR)/warmup \
-			$(if $(V2V_SCRIPT),--script $(V2V_SCRIPT),) \
-			--runs $(V2V_WARMUP_RUNS) \
-			--label warmup \
-			$(V2V_ARGS) >/dev/null 2>&1 || true; \
-	fi
+	@#
+	@# The warm-up is delegated to the orchestrator's own --warmup_runs rather
+	@# than run here. This Makefile used to do a separate warm-up pass first,
+	@# which was wrong three ways: it brought the stack up and down a second
+	@# time (so it warmed a process that was then discarded), `V2V_WARMUP_RUNS=0`
+	@# did not disable the orchestrator's warm-up underneath it, and its output
+	@# was sent to /dev/null with `|| true`, so a warm-up that failed outright
+	@# looked identical to one that succeeded. Passing the value through means
+	@# the run manifest's "warmup_runs" now records what actually ran.
 	cd $(_V2V_PERF_TOOLS) && python3 benchmark_smart_kiosk_v2v.py \
 		--app_dir $(CURDIR) \
 		--results_dir $(CURDIR)/$(RESULTS_DIR) \
 		$(if $(V2V_SCRIPT),--script $(V2V_SCRIPT),) \
 		--runs $(V2V_RUNS) \
+		--warmup_runs $(V2V_WARMUP_RUNS) \
 		--label $(V2V_LABEL) \
 		$(V2V_ARGS)
+	@# Only reached when the orchestrator exited 0. A manifest left reading
+	@# "started" therefore means the run died partway and the result files
+	@# beside it belong to an earlier run.
+	@python3 scripts/finish_run_manifest.py --results-dir $(RESULTS_DIR)
 	@# The orchestrator's `make down` (called internally, in a `finally:`
 	@# block) leaves the OS-level hardware counters sitting in ./metrics/
 	@# (bind-mounted from the now-stopped metrics-collector container) --
