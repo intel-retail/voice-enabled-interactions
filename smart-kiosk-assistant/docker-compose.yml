@@ -774,12 +774,18 @@ services:
       KIOSK_CORE_ENDPOINT_MIN_WORDS:        ${KIOSK_CORE_ENDPOINT_MIN_WORDS:-3}
       # Same explicit-allowlist gotcha as ADAPTIVE_FLUSH_PAUSE_SECONDS below:
       # setting this in .env alone does nothing without this line. The
-      # fallback must match kiosk_core/config.py's own default (0) and
-      # .env.example, which both ship 0 -- this previously fell back to 0.2,
-      # so the no-.env path ran a different endpointing profile from the
-      # shipped one, and the comment here described a third value (0.15)
-      # that was never actually set.
-      KIOSK_CORE_ENDPOINT_STABLE_SECONDS:  ${KIOSK_CORE_ENDPOINT_STABLE_SECONDS:-0}
+      # fallback must match kiosk_core/config.py's own default and
+      # .env.example; all three ship 0.2.
+      #
+      # 0.2 (two-confirmation) rather than 0 (single-confirmation) because
+      # the 88-turn sweep measured 0 committing 55-64% of turns before the
+      # customer had finished speaking, which broke order confirmation:
+      # "Yes, that is everything. Please confirm my order." was committed as
+      # "Yes, that is everything." and answered with "Sorry, I couldn't
+      # confirm your order just now". At 0.2 that drops to ~10%. See
+      # config.py for the full measurement table and the ~650ms
+      # voice-to-voice p50 cost.
+      KIOSK_CORE_ENDPOINT_STABLE_SECONDS:  ${KIOSK_CORE_ENDPOINT_STABLE_SECONDS:-0.2}
       # Was previously never actually wired through from .env to the
       # container (only referenced in a comment above) — this compose file
       # uses an explicit environment: allowlist, not a blanket .env

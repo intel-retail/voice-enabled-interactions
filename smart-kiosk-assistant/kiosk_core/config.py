@@ -663,12 +663,22 @@ DEFAULT_ENDPOINT_MIN_WORDS = int(os.getenv("KIOSK_CORE_ENDPOINT_MIN_WORDS", "3")
 # keeps changing and the window resets. That is why 0.2 outperforms a longer
 # timer, and it costs ~650ms of voice-to-voice p50.
 #
-# Residual risk at any setting: a customer who hesitates for longer than the
-# window mid-order ("Um, I think I want... the Spicy Chicken Crunch Burger")
-# still has the turn committed on the fragment. That needs a semantic
-# completeness signal rather than a timer. The fixture benchmark reports
-# early_commit_count so this rate is tracked rather than assumed to be zero.
-DEFAULT_ENDPOINT_STABLE_SECONDS = float(os.getenv("KIOSK_CORE_ENDPOINT_STABLE_SECONDS", "0"))
+# Restored to 0.2 (2026-10). At 0 the stack mis-heard order confirmation:
+# "Yes, that is everything. Please confirm my order." committed as "Yes,
+# that is everything." and the customer was told "Sorry, I couldn't confirm
+# your order just now". A correct order at 1.4s beats a wrong one at 0.76s,
+# so the latency cost is accepted deliberately. The firing-rate argument that
+# justified 0 still stands on its own terms; it was measured on 4-10 turns
+# from a single conversation, which could not surface what it traded away.
+#
+# Residual risk at 0.2: a customer who hesitates for longer than the window
+# mid-order ("Um, I think I want... the Spicy Chicken Crunch Burger") would
+# still have the turn committed on the fragment on timing alone. That case is
+# handled lexically instead -- see _INCOMPLETE_TAIL_WORDS in audio_session.py,
+# which refuses to call a transcript finished when it ends on a word that
+# demands a continuation. The fixture benchmark reports early_commit_count so
+# this rate is tracked rather than assumed to be zero.
+DEFAULT_ENDPOINT_STABLE_SECONDS = float(os.getenv("KIOSK_CORE_ENDPOINT_STABLE_SECONDS", "0.2"))
 DEFAULT_MAX_SESSION_SECONDS = float(os.getenv("KIOSK_CORE_MAX_SESSION_SECONDS", "20.0"))
 DEFAULT_SILENCE_THRESHOLD = int(os.getenv("KIOSK_CORE_SILENCE_THRESHOLD", "900"))
 
