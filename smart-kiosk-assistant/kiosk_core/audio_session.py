@@ -318,6 +318,29 @@ _INCOMPLETE_TAIL_WORDS = frozenset(
       "i we you they".split()
     # prepositions that must take an object: "with...", "a burger and fries for..."
     + "for with in on at by from about without".split()
+    # Transitive verbs that demand a direct object in this domain. A customer
+    # who hesitates mid-order ("Um, I think I want... the Spicy Chicken Crunch
+    # Burger") otherwise leaves a fragment that passes every other check:
+    # "um i think i want" is five words, ends on a real word, and Whisper
+    # punctuates it "Um, I think I want." so the trailing-comma guard above
+    # cannot catch it either. The stability window only buys ~0.2s, far less
+    # than a real hesitation, so this is the lexical backstop for it.
+    #
+    # Deliberately excludes words that DO legitimately end a kiosk turn, even
+    # though they are transitive elsewhere -- notably "order" ("please confirm
+    # my order") and "everything" ("yes, that is everything"). Judged on the
+    # final word only, so "that's what I want" is the one false positive class
+    # here; it costs the full silence timeout, never a truncated order, which
+    # is the direction this whole check is required to fail in.
+    + "want wants wanted need needs needed add adds remove removes delete "
+      "change swap replace make makes give gives bring choose pick "
+      "take takes try include includes".split()
+    # Verbs that take a clause, not a noun: the fragment "Um, I think" is
+    # three words and ends on a real word, so it reads finished and commits
+    # the turn before "...I want the Spicy Chicken Crunch Burger" is spoken.
+    # Measured: this, not the dangling transitive above, was what actually
+    # fired the shortcut on the hesitation turn in the 88-turn sweep.
+    + "think thinks guess believe suppose reckon wonder mean means say says tell".split()
 )
 
 _ENDPOINT_WORD_RE = re.compile(r"[^a-z' ]")

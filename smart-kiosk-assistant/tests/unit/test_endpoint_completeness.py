@@ -119,3 +119,51 @@ class TestEndpointStabilityKey:
 
     def test_none_and_empty_are_equivalent(self):
         assert _endpoint_stability_key(None) == _endpoint_stability_key("")
+
+
+class TestDanglingTransitiveVerbs:
+    """A hesitation mid-order leaves a fragment that passes every other gate.
+
+    "Um, I think I want... the Spicy Chicken Crunch Burger" was measured
+    committing as "Um, I think I want." on the 88-turn scripted sweep: five
+    words, ending on a real word, and Whisper supplies the full stop itself so
+    the trailing-comma guard cannot catch it. The stability window only buys
+    ~0.2s, far less than a real hesitation, so the final word has to carry it.
+    """
+
+    @pytest.mark.parametrize(
+        "fragment",
+        [
+            "Um, I think I want.",
+            "Um, I think",
+            "I think I want",
+            "I guess",
+            "I was going to say",
+            "Can you please add",
+            "I would like to change",
+            "Actually, can you remove",
+            "I'll take",
+            "Can you make",
+            "I want to try",
+        ],
+    )
+    def test_a_dangling_transitive_verb_is_not_finished(self, fragment):
+        assert _looks_complete(fragment, MIN_WORDS) is False
+
+    @pytest.mark.parametrize(
+        "utterance",
+        [
+            # These legitimately end a kiosk turn and must keep committing
+            # early -- "order" and "everything" are the regression risk, since
+            # both follow a verb that is transitive elsewhere.
+            "That is everything. Please confirm my order.",
+            "Yes, that is everything.",
+            "Okay, please add one chocolate brownie to my order.",
+            "How much does the chocolate brownie cost?",
+            "and one chocolate brownie too, please.",
+            "Actually, please also add a Pepsi 330ML.",
+            "Hi, I would like to order one classic chicken burger, please.",
+        ],
+    )
+    def test_a_finished_order_turn_still_commits_early(self, utterance):
+        assert _looks_complete(utterance, MIN_WORDS) is True
