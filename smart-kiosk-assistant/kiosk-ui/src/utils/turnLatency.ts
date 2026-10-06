@@ -6,8 +6,7 @@
  * from the same trace and MUST show identical numbers for the same stage.
  * They previously each re-derived these values independently:
  *   - PipelineFlow used the v2v-latency-optimisation vocabulary (critical
- *     path only): asr.last_word_to_transcript_ms, agent.ttft_ms, and a
- *     derived TTS-time-to-first-audio slice.
+ *     path only): asr.transcription_latency_ms, agent.ttft_ms, and TTS TTFB.
  *   - ExecutiveKpis used the raw cumulative trace registers instead:
  *     asr.ms (all chunks summed), agent.llm.ms (cumulative model time
  *     across every round-trip), tts.ms (every segment's synth time summed).
@@ -24,7 +23,7 @@ export interface LatencyMap {
   llm: number | null; // LLM time to first token (TTFT) — on the v2v critical path
   llmCalls: number; // number of LLM round-trips this turn
   agentOverhead: number | null; // agent round-trip minus LLM time (tools + framework)
-  tts: number | null; // TTS time to first audio (portion of ttfa after LLM TTFT)
+  tts: number | null; // TTS time to first byte (TTFB)
   retrievalInvoked: boolean;
 }
 
@@ -33,13 +32,12 @@ export function extractLatencies(kpis: KpiBundle): LatencyMap {
 
   if (trace) {
     const ttft = trace.agent?.ttft_ms ?? null;
-    const ttfa = trace.wall?.time_to_first_audio_ms ?? null;
     return {
       // Real ASR compute latency on the critical path (last spoken word ->
       // transcript ready), NOT the "all chunks summed" total -- matches the
       // ~180-220ms target tracked during the v2v-latency work. Falls back to
       // the cumulative figure only when the analyzer didn't report it.
-      asr: trace.asr?.last_word_to_transcript_ms ?? trace.asr?.ms ?? null,
+      asr: trace.asr?.transcription_latency_ms ?? trace.asr?.ms ?? null,
       retrieval: trace.agent?.retrieval?.invoked ? (trace.agent.retrieval.ms ?? null) : null,
       // LLM time to first token (agent-start -> first reply token/sentence):
       // the actual customer-felt LLM latency on the v2v path, not the
@@ -50,11 +48,9 @@ export function extractLatencies(kpis: KpiBundle): LatencyMap {
         trace.agent?.llm?.ms != null && ttft != null
           ? Math.max(0, ttft - trace.agent.llm.ms)
           : null,
-      // TTS time to first audio: the TTS-only slice of time_to_first_audio_ms,
-      // i.e. ttfa minus the LLM TTFT already counted above -- NOT the
-      // cumulative synth time for every segment in the reply (that overlaps
-      // playback and isn't on the critical path to the first sound out).
-      tts: ttfa != null && ttft != null ? Math.max(0, ttfa - ttft) : (trace.tts?.ms ?? null),
+      // TTS TTFB is measured inside the TTS span, so cached opener playback
+      // cannot collapse this card to 0 ms.
+      tts: trace.tts?.ttfb_ms ?? trace.tts?.ms ?? null,
       retrievalInvoked: trace.agent?.retrieval?.invoked ?? false,
     };
   }

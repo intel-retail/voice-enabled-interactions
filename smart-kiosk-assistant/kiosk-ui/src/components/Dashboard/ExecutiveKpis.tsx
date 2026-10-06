@@ -2,10 +2,10 @@
  * ExecutiveKpis — large KPI cards visible at all times on the dashboard.
  *
  * Cards:
- *   1. V2V Latency      (customer's last word → first sound out of the speaker)
- *   2. ASR Speed        (last spoken word → transcript ready)
- *   3. LLM Latency      (time to first token / TTFT)
- *   4. TTS Speed        (time to first audio, after LLM TTFT)
+ *   1. Voice-to-voice latency  (customer's last word → first sound at speaker)
+ *   2. Transcription latency   (last spoken word → transcript ready)
+ *   3. LLM TTFT                (time to first token)
+ *   4. TTS TTFB                (time to first byte)
  *
  * Source of truth is the per-turn trace at kiosk-core /api/v1/pipeline/latest,
  * routed through the SAME extraction helper as PipelineFlow
@@ -98,6 +98,8 @@ export function ExecutiveKpis({ kpis }: ExecutiveKpisProps) {
   // Customer's last word -> first sound out of the speaker. Has no legacy
   // global-register fallback (only exists on the per-turn trace).
   const v2vMs = live ? trace.wall.voice_to_voice_ms : null;
+  const v2vAnswerMs = live ? (trace.wall.voice_to_voice_answer_ms ?? null) : null;
+  const firstAudioWasOpener = live ? trace.wall.first_audio_was_opener : false;
   const asrMs = lats.asr;
   const llmMs = lats.llm;
   const ttsMs = lats.tts;
@@ -115,6 +117,10 @@ export function ExecutiveKpis({ kpis }: ExecutiveKpisProps) {
   const asrModel = tail(kpis.asr?.model);
   const llmModel = tail((kpis.rag as Record<string, unknown>)?.llm_model);
   const ttsModel = tail(kpis.tts?.model);
+  const v2vSub =
+    firstAudioWasOpener && v2vAnswerMs !== null
+      ? `Cached opener first · answer audio ${formatLatency(v2vAnswerMs)} · ${sourceNote}`
+      : `Last word → first sound at speaker · ${sourceNote}`;
 
   return (
     <div className="space-y-2">
@@ -123,24 +129,24 @@ export function ExecutiveKpis({ kpis }: ExecutiveKpisProps) {
         Performance KPIs
       </h2>
 
-      {/* Card grid — V2V leads as the customer-facing headline number */}
+      {/* Card grid — voice-to-voice leads as the customer-facing headline number */}
       <div className="grid grid-cols-2 gap-3">
-        {/* V2V Latency */}
+        {/* Voice-to-voice latency */}
         <KpiCard
           icon="🗣️"
-          title="V2V Latency"
+          title="Voice-to-voice latency"
           value={latencyValue(v2vMs)}
           unit={latencyUnit(v2vMs)}
-          sub={`Last word → first sound out · ${sourceNote}`}
+          sub={v2vSub}
           accentCls="border-purple-400/40"
           valueCls="text-purple-700"
           updated={v2vMs !== null}
         />
 
-        {/* ASR Speed */}
+        {/* Transcription latency */}
         <KpiCard
           icon="🎙"
-          title="ASR Speed"
+          title="Transcription latency"
           value={latencyValue(asrMs)}
           unit={latencyUnit(asrMs)}
           sub={`${asrModel} · ${asrDevice}`}
@@ -152,7 +158,7 @@ export function ExecutiveKpis({ kpis }: ExecutiveKpisProps) {
         {/* LLM Generation */}
         <KpiCard
           icon="🧠"
-          title="LLM Latency"
+          title="LLM TTFT"
           value={latencyValue(llmMs)}
           unit={latencyUnit(llmMs)}
           sub={`${llmModel} · ${llmDevice}${llmCalls > 0 ? ` · ${llmCalls} call${llmCalls > 1 ? 's' : ''}` : ''}`}
@@ -161,10 +167,10 @@ export function ExecutiveKpis({ kpis }: ExecutiveKpisProps) {
           updated={llmMs !== null}
         />
 
-        {/* TTS Speed */}
+        {/* TTS TTFB */}
         <KpiCard
           icon="🔊"
-          title="TTS Speed"
+          title="TTS TTFB"
           value={latencyValue(ttsMs)}
           unit={latencyUnit(ttsMs)}
           sub={`${ttsModel} · ${ttsDevice}${ttsSegments > 0 ? ` · ${ttsSegments} seg` : ''}`}

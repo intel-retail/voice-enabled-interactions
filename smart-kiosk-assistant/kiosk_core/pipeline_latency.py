@@ -82,19 +82,20 @@ class AsrSpan:
     device: str = "CPU"
     chunks: int = 0                # number of transcribe calls summed into ms
     final_flush_skipped: bool = False  # see config.DEFAULT_SKIP_EMPTY_FINAL_FLUSH_ENABLED
-    # Continuous-streaming mode only (KIOSK_CORE_ANALYZER_STREAMING_ENABLED):
-    # the customer's actual last word (backdated from the silence run, same
-    # anchor as wall.voice_to_voice_ms) to the moment a transcript covering
-    # it actually landed from the analyzer. This is the genuine ASR compute
-    # latency contributing to the critical path -- it deliberately EXCLUDES
-    # the trailing-silence wait the endpoint separately sits through before
-    # acting on that transcript (endpoint_wait_ms already reports that), so
-    # this number is comparable to a bare "utterance -> transcript" figure
-    # rather than inflated by a design choice unrelated to ASR speed. None
-    # when streaming mode never ran this turn, or no post-last-word
-    # transcript update was observed (already had everything before the
-    # customer finished speaking).
-    last_word_to_transcript_ms: float | None = None
+    # Transcription latency: the customer's actual last word (same anchor as
+    # wall.voice_to_voice_ms) to the moment a transcript covering it landed
+    # from the analyzer. This is the genuine ASR compute latency on the
+    # critical path -- it deliberately EXCLUDES the trailing-silence wait the
+    # endpoint sits through before acting on that transcript
+    # (wall.endpointing_delay_ms already reports that), so it is comparable
+    # to a bare "utterance -> transcript" figure rather than inflated by a
+    # design choice unrelated to ASR speed.
+    #
+    # Continuous-streaming mode only (KIOSK_CORE_ANALYZER_STREAMING_ENABLED).
+    # None when streaming mode never ran this turn, or no post-last-word
+    # transcript update was observed (the analyzer already had everything
+    # before the customer finished speaking).
+    transcription_latency_ms: float | None = None
 
 
 @dataclass
@@ -103,81 +104,90 @@ class TtsSpan:
     device: str = "CPU"
     segments: int = 0
     overlapped_with_agent: bool = True   # always true — TTS runs concurrently
+    # TTS time to first byte: first sentence handed to the synthesiser ->
+    # that sentence's audio on disk. The stage figure that pairs with
+    # agent.llm.ttft_ms; ``ms`` above is the whole synthesis drain, which
+    # keeps running long after the customer has started hearing the reply.
+    ttfb_ms: float | None = None
 
 
 @dataclass
 class WallTimes:
+    """Per-turn latency, using the agreed Smart Kiosk latency vocabulary.
+
+    The three headline spans are defined so that they always reconcile on a
+    single wall clock::
+
+        voice_to_voice_ms = endpointing_delay_ms + processing_latency_ms
+
+    ``time_to_first_audio_ms`` was retired: it meant different spans in
+    different places (sometimes from the endpoint decision, sometimes from
+    the last word) and it stopped the clock when a WAV was written rather
+    than at the speaker.
+    """
+
     turn_total_ms: float | None = None
-    time_to_first_audio_ms: float | None = None
-    # How long the endpoint waited in trailing silence before committing the
-    # turn (1.5s fixed, or KIOSK_CORE_ENDPOINT_SHORT_SECONDS when the
-    # transcript already read as a finished sentence). The customer sits
-    # through this, so any voice-to-voice figure has to include it.
-    endpoint_wait_ms: float | None = None
-    # The final chunk's real ASR round-trip: the mandatory drain-and-join of
-    # the flush queue (self._flush_queue.join() in _process_frame_stream)
-    # that _finalize_run blocks on right after the endpoint decision, before
-    # the turn is considered "started" (t_turn_start). This is real wall
-    # time the customer waits through that neither endpoint_wait_ms (the
-    # trailing-silence run only) nor time_to_first_audio_ms (measured from
-    # t_turn_start onward) accounts for — without this field,
-    # voice_to_voice_ms could be larger than
-    # endpoint_wait_ms + time_to_first_audio_ms with no visible explanation.
-    # None when _t_last_word was never set (see WallTimes.voice_to_voice_ms).
-    final_flush_wait_ms: float | None = None
-    # Customer's last word -> first sound out of the speaker. This is the
-    # "voice to voice" clock, the one a customer actually feels, and the only
-    # one comparable to external voice-kiosk figures. The other timings in this
-    # trace start at the endpoint decision instead, which excludes the wait.
+    # ── Headline: customer's last word -> first sound at the speaker ──────
+    # The number a customer actually feels and the only one comparable to
+    # external voice-kiosk figures. Includes the opener when the opener is
+    # enabled -- check ``first_audio_was_opener`` before quoting it as a
+    # pipeline figure, and prefer ``voice_to_voice_answer_ms`` if it is True.
     voice_to_voice_ms: float | None = None
-    # voice_to_voice_ms with BOTH non-compute waiting windows subtracted back
-    # out: endpoint_wait_ms (the deliberate trailing-silence wait) AND
-    # post_speech_gap_ms (mic-release reaction time / trailing buffered
-    # frames). Neither is a pipeline/hardware cost, so neither belongs in a
-    # number meant to answer "how fast is our compute pipeline". Equal to
-    # final_flush_wait_ms + time_to_first_audio_ms. None only when
-    # voice_to_voice_ms itself is None.
-    voice_to_voice_post_endpoint_ms: float | None = None
-    # Browser-mic-release turns only (no endpoint_wait_ms): the gap between
-    # the customer's actual last speech frame (_t_last_word, backend-observed)
-    # and the moment the flush/turn-start sequence began (right after the
-    # mic-release signal was received and processed). This is real elapsed
-    # time -- customer reaction time releasing the button, plus any trailing
-    # audio still queued -- not network/browser-clock skew (both ends of this
-    # gap are backend monotonic timestamps). Previously this silently
-    # inflated voice_to_voice_ms with no visible line item; now broken out so
-    # voice_to_voice_ms = endpoint_wait_ms + post_speech_gap_ms +
-    # final_flush_wait_ms + time_to_first_audio_ms is fully reconstructable.
-    # On the silence-timeout path this has endpoint_wait_ms already
-    # subtracted out (the two windows overlap there -- flush only starts once
-    # the silence wait elapses), so it should be near-zero, not the raw
-    # (much larger) elapsed time since last word.
+    # Customer's last word -> the turn-end decision (the endpoint committing
+    # on trailing silence, or the mic-release signal being processed).
+    # Wall-clock, measured between two backend monotonic stamps. This is a
+    # design choice (how long we deliberately wait to be sure the customer
+    # finished), not compute cost, but the customer sits through it, so it is
+    # part of voice_to_voice_ms.
+    endpointing_delay_ms: float | None = None
+    # Turn-end decision -> first sound at the speaker. This is the part that
+    # is actually our pipeline: final ASR flush, agent/LLM, tools, guards and
+    # TTS. The number to optimise and to compare across devices.
+    processing_latency_ms: float | None = None
+    # ── Same spans, but stopping on the first sound that carries the ANSWER.
+    # The opener ("One moment.") is real audio and legitimately breaks the
+    # silence, but it tells the customer nothing and is a cached file copy,
+    # so it is reported separately rather than allowed to flatter the
+    # headline. With the opener disabled these equal the two fields above.
+    voice_to_voice_answer_ms: float | None = None
+    processing_latency_answer_ms: float | None = None
+    # True when the first sound of this turn was the canned opener. Makes a
+    # near-zero processing_latency_ms self-explanatory in the trace instead
+    # of looking like a pipeline result.
+    first_audio_was_opener: bool = False
+    # ── Sub-components of the two spans above (diagnostics) ──────────────
+    # The endpoint's trailing-silence run at the instant it committed, in
+    # AUDIO-domain seconds (counted from samples, not the wall clock). Kept
+    # as a diagnostic for "did the shortcut fire?" -- never mix it into a
+    # wall-clock arithmetic, which is what the old endpoint_wait_ms did.
+    endpoint_silence_run_ms: float | None = None
+    # The final chunk's real ASR round-trip: the mandatory drain-and-join of
+    # the flush queue that _finalize_run blocks on right after the turn-end
+    # decision. A component of processing_latency_ms, broken out because it
+    # is the single largest non-obvious contributor to it.
+    final_flush_wait_ms: float | None = None
+    # Browser mic-release turns only: the gap between the customer's actual
+    # last speech frame and the moment the flush/turn-start sequence began --
+    # button-release reaction time plus any trailing buffered frames. A
+    # component of endpointing_delay_ms on that path.
     post_speech_gap_ms: float | None = None
-    # Customer's last word -> first sound that carries the ANSWER. The opener
-    # ("One moment.") is real audio and legitimately stops the silence, but it
-    # is not informative, so it is reported separately rather than allowed to
-    # flatter voice_to_voice_ms.
-    voice_to_voice_informative_ms: float | None = None
     # File-replay only (FileAudioSession): time from the first byte of the
-    # fixture being fed into the pipeline to first audio out. voice_to_voice_ms
-    # above estimates "last word" from OUR OWN detector's measured silence run,
-    # which is a live-mic necessity — there is no ground truth on a live mic.
-    # A fixture, unlike a live mic, HAS an independent ground truth: the exact
+    # fixture being fed into the pipeline to first audio out. The fields
+    # above anchor on OUR OWN detector's view of the last word, which is a
+    # live-mic necessity -- there is no ground truth on a live mic. A
+    # fixture, unlike a live mic, HAS an independent ground truth: the exact
     # sample where the recording's real speech ends, discoverable once via a
     # silence detector run directly on the file (outside this pipeline, so it
     # is not circular). Benchmarks combine this field with that offset to get
-    # a v2v number with zero dependency on this system's own VAD timing,
-    # mirroring kiosk-voice-lab's fixture-manifest t_eos design. None for
-    # microphone/browser-stream sessions, where no such anchor exists.
+    # a voice-to-voice number with zero dependency on this system's own VAD
+    # timing. None for microphone/browser-stream sessions.
     playback_to_first_audio_ms: float | None = None
+    playback_to_answer_audio_ms: float | None = None
     # True: this turn committed via the sentence-completeness shortcut
-    # (endpoint_wait_ms ~= KIOSK_CORE_ENDPOINT_SHORT_SECONDS). False: it fell
-    # through to the full silence_timeout_seconds wait because the transcript
-    # was not yet stable/complete (usually because ASR had not returned in
-    # time). None: neither silence-based commit path ran this turn (e.g.
-    # stopped_by_api, max_duration_reached). Added to make "is the adaptive
-    # shortcut actually firing?" directly observable per turn instead of
-    # inferred from endpoint_wait_ms clustering near one value or the other.
+    # (KIOSK_CORE_ENDPOINT_SHORT_SECONDS). False: it fell through to the full
+    # silence_timeout_seconds wait because the transcript was not yet
+    # stable/complete. None: neither silence-based commit path ran this turn
+    # (e.g. stopped_by_api, max_duration_reached).
     endpoint_shortcut_fired: bool | None = None
 
 

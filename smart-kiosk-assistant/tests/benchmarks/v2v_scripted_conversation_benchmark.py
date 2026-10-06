@@ -443,11 +443,13 @@ def main(argv: list[str] | None = None) -> int:
                     print(
                         f"[v2v-scripted]   tts_synth={round(synth_ms, 1)} ms  "
                         f"v2v={turn.voice_to_voice_ms} ms  "
-                        f"v2v_post_endpoint={turn.voice_to_voice_post_endpoint_ms} ms  "
-                        f"endpoint_wait={turn.endpoint_wait_ms} ms  "
+                        f"v2v_answer={turn.voice_to_voice_answer_ms} ms  "
+                        f"processing={turn.processing_latency_ms} ms  "
+                        f"endpointing={turn.endpointing_delay_ms} ms  "
+                        f"opener={turn.first_audio_was_opener}  "
                         f"final_flush_wait={turn.final_flush_wait_ms} ms  "
                         f"shortcut_fired={turn.endpoint_shortcut_fired}  "
-                        f"ttfa={turn.time_to_first_audio_ms} ms{gt}  "
+                        f"tts_ttfb={turn.tts_ttfb_ms} ms{gt}  "
                         f"transcript={turn.transcript[:80]!r}"
                     )
 

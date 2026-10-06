@@ -29,7 +29,7 @@ Usage::
     # Re-measure after tuning, against an already-running stack
     python tests/benchmarks/agent_latency_benchmark.py \
         --label prefix-cache-int4 --skip-up \
-        --compare tests/benchmarks/results/baseline.json
+        --compare path/to/previous-run.json
 
     # Agent tier only (fast iteration loop)
     python tests/benchmarks/agent_latency_benchmark.py --tier A --runs 5 --skip-up
@@ -213,11 +213,18 @@ class VoiceTurnResult:
     reply: str = ""
     # Extracted from GET /api/v1/pipeline/latest
     trace_wall_total_ms: float | None = None
-    trace_time_to_first_audio_ms: float | None = None
+    trace_voice_to_voice_ms: float | None = None
+    trace_voice_to_voice_answer_ms: float | None = None
+    trace_first_audio_was_opener: bool = False
+    trace_endpointing_delay_ms: float | None = None
+    trace_processing_latency_ms: float | None = None
+    trace_processing_latency_answer_ms: float | None = None
     trace_asr_ms: float | None = None
+    trace_transcription_latency_ms: float | None = None
     trace_agent_ttft_ms: float | None = None
     trace_agent_total_ms: float | None = None
     trace_tts_ms: float | None = None
+    trace_tts_ttfb_ms: float | None = None
     error: str | None = None
 
 
@@ -620,19 +627,29 @@ def run_voice_tier(
             wall_ms = (time.perf_counter() - t0) * 1000
 
             trace = fetch_pipeline_trace() or {}
+            wall = trace.get("wall", {}) or {}
+            asr = trace.get("asr", {}) or {}
             agent = trace.get("agent", {}) or {}
+            tts = trace.get("tts", {}) or {}
             result = VoiceTurnResult(
                 run=i,
                 tts_synth_ms=round(synth_ms, 1),
                 session_wall_ms=round(wall_ms, 1),
                 transcript=snapshot.get("transcript", ""),
                 reply=snapshot.get("response", ""),
-                trace_wall_total_ms=(trace.get("wall", {}) or {}).get("turn_total_ms"),
-                trace_time_to_first_audio_ms=(trace.get("wall", {}) or {}).get("time_to_first_audio_ms"),
-                trace_asr_ms=(trace.get("asr", {}) or {}).get("ms"),
+                trace_wall_total_ms=wall.get("turn_total_ms"),
+                trace_voice_to_voice_ms=wall.get("voice_to_voice_ms"),
+                trace_voice_to_voice_answer_ms=wall.get("voice_to_voice_answer_ms"),
+                trace_first_audio_was_opener=bool(wall.get("first_audio_was_opener", False)),
+                trace_endpointing_delay_ms=wall.get("endpointing_delay_ms"),
+                trace_processing_latency_ms=wall.get("processing_latency_ms"),
+                trace_processing_latency_answer_ms=wall.get("processing_latency_answer_ms"),
+                trace_asr_ms=asr.get("ms"),
+                trace_transcription_latency_ms=asr.get("transcription_latency_ms"),
                 trace_agent_ttft_ms=agent.get("ttft_ms"),
                 trace_agent_total_ms=agent.get("total_ms"),
-                trace_tts_ms=(trace.get("tts", {}) or {}).get("ms"),
+                trace_tts_ms=tts.get("ms"),
+                trace_tts_ttfb_ms=tts.get("ttfb_ms"),
                 error=snapshot.get("error"),
             )
             print(
@@ -696,15 +713,42 @@ def build_summary(report: BenchmarkReport) -> dict[str, Any]:
             "trace_turn_total": _stats(
                 [r.trace_wall_total_ms for r in ok_voice if r.trace_wall_total_ms]
             ),
-            "trace_time_to_first_audio": _stats(
-                [r.trace_time_to_first_audio_ms for r in ok_voice if r.trace_time_to_first_audio_ms]
+            "trace_voice_to_voice": _stats(
+                [r.trace_voice_to_voice_ms for r in ok_voice if r.trace_voice_to_voice_ms]
+            ),
+            "trace_voice_to_voice_answer": _stats(
+                [r.trace_voice_to_voice_answer_ms for r in ok_voice if r.trace_voice_to_voice_answer_ms]
+            ),
+            "trace_endpointing_delay": _stats(
+                [r.trace_endpointing_delay_ms for r in ok_voice if r.trace_endpointing_delay_ms]
+            ),
+            "trace_processing_latency": _stats(
+                [r.trace_processing_latency_ms for r in ok_voice if r.trace_processing_latency_ms]
+            ),
+            "trace_processing_latency_answer": _stats(
+                [
+                    r.trace_processing_latency_answer_ms
+                    for r in ok_voice
+                    if r.trace_processing_latency_answer_ms
+                ]
             ),
             "trace_asr": _stats([r.trace_asr_ms for r in ok_voice if r.trace_asr_ms]),
+            "trace_transcription_latency": _stats(
+                [r.trace_transcription_latency_ms for r in ok_voice if r.trace_transcription_latency_ms]
+            ),
             "trace_agent_total": _stats(
                 [r.trace_agent_total_ms for r in ok_voice if r.trace_agent_total_ms]
             ),
+            "trace_llm_ttft": _stats(
+                [r.trace_agent_ttft_ms for r in ok_voice if r.trace_agent_ttft_ms]
+            ),
             "trace_tts": _stats([r.trace_tts_ms for r in ok_voice if r.trace_tts_ms]),
+            "trace_tts_ttfb": _stats([r.trace_tts_ttfb_ms for r in ok_voice if r.trace_tts_ttfb_ms]),
         }
+        summary["voice_e2e"]["first_audio_was_opener_count"] = sum(
+            1 for r in ok_voice if r.trace_first_audio_was_opener
+        )
+        summary["voice_e2e"]["first_audio_turn_count"] = len(ok_voice)
 
     errors = [r.error for r in report.agent_runs if r.error]
     errors += [r.error for r in report.voice_runs if r.error]
@@ -748,14 +792,27 @@ def print_summary(report: BenchmarkReport) -> None:
         for key, label in (
             ("session_wall", "session wall (upload→done)"),
             ("trace_turn_total", "trace turn_total"),
-            ("trace_time_to_first_audio", "trace time_to_first_audio"),
-            ("trace_asr", "trace asr"),
+            ("trace_voice_to_voice", "voice-to-voice latency"),
+            ("trace_voice_to_voice_answer", "voice-to-voice answer latency"),
+            ("trace_endpointing_delay", "endpointing delay"),
+            ("trace_processing_latency", "processing latency"),
+            ("trace_processing_latency_answer", "processing latency to answer"),
+            ("trace_transcription_latency", "transcription latency"),
+            ("trace_asr", "trace ASR total"),
+            ("trace_llm_ttft", "LLM TTFT"),
             ("trace_agent_total", "trace agent_total"),
-            ("trace_tts", "trace tts"),
+            ("trace_tts_ttfb", "TTS TTFB"),
+            ("trace_tts", "trace TTS total"),
         ):
             st = voice.get(key) or {}
             if st:
                 print(f"  {label:<28}: median {st['median_ms']:>8.0f} ms   mean {st['mean_ms']:>8.0f} ms")
+        if voice.get("first_audio_turn_count"):
+            print(
+                "  first_audio_was_opener    : "
+                f"{voice.get('first_audio_was_opener_count')} / "
+                f"{voice.get('first_audio_turn_count')} turns"
+            )
 
     if report.summary.get("errors"):
         print("\nERRORS:")
@@ -800,7 +857,10 @@ def print_comparison(baseline_path: Path, current: BenchmarkReport) -> None:
     c_voice = current.summary.get("voice_e2e") or {}
     for key, label in (
         ("trace_turn_total", "Tier B turn_total (median)"),
-        ("trace_time_to_first_audio", "Tier B first audio (median)"),
+        ("trace_voice_to_voice", "Tier B voice-to-voice latency (median)"),
+        ("trace_voice_to_voice_answer", "Tier B voice-to-voice answer latency (median)"),
+        ("trace_processing_latency", "Tier B processing latency (median)"),
+        ("trace_endpointing_delay", "Tier B endpointing delay (median)"),
         ("trace_agent_total", "Tier B agent_total (median)"),
         ("trace_asr", "Tier B asr (median)"),
     ):

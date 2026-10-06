@@ -422,7 +422,7 @@ DEFAULT_SILENCE_TIMEOUT_SECONDS = float(os.getenv("KIOSK_CORE_SILENCE_TIMEOUT_SE
 # boundary with tests/benchmarks/v2v_fixture_benchmark.py against rec1_16k.wav
 # and rec2_16k.wav (real recorded speech, 3 runs each):
 #   * 0.50s: transcripts identical/correct vs the 0.70s baseline on both
-#     fixtures, 6/6 runs. endpoint_wait_ms dropped ~150ms (rec1: ~1,000ms ->
+#     fixtures, 6/6 runs. endpoint_silence_run_ms dropped ~150ms (rec1: ~1,000ms ->
 #     ~900ms). SAFE.
 #   * 0.40s: reproduced the same class of hallucination the 0.30s value
 #     caused originally — "Good." became "Good, good, good." (repeated word)
@@ -636,10 +636,10 @@ DEFAULT_ENDPOINT_MIN_WORDS = int(os.getenv("KIOSK_CORE_ENDPOINT_MIN_WORDS", "3")
 # DEFAULT_ADAPTIVE_FLUSH_PAUSE_SECONDS's own real (destructive) commit to the
 # punch, so that commit hasn't cleared the buffer yet and the final flush has
 # to transcribe the whole utterance instead of a short tail — measured
-# final_flush_wait_ms ~420-560ms on turns where endpoint_wait_ms landed at the
+# final_flush_wait_ms ~420-560ms on turns where endpoint_silence_run_ms landed at the
 # ~200ms floor, vs. ~10-70ms on turns where it landed >=600ms (adaptive commit
 # already won). Net effect across 3 full-conversation runs was still a clear
-# win end to end (endpoint_wait_ms + final_flush_wait_ms combined dropped
+# win end to end (endpoint_silence_run_ms + final_flush_wait_ms combined dropped
 # from ~1200-1700ms/turn to ~600-750ms/turn on the turns that fire), but this
 # is why total v2v didn't fall as far as the raw firing-rate jump alone would
 # suggest — see docs/performance-improvements-2026-09.md before tuning either

@@ -10,13 +10,12 @@
  * metric — V2V / V2V p95 / Processing are the surfaced customer-facing clocks.
  *
  * Per-stage chip values reflect the v2v-latency-optimisation work's own
- * vocabulary (see benchmark-vocabolary.txt / v2v_scripted_conversation_benchmark.py):
+ * vocabulary (see kiosk_core/pipeline_latency.py):
  *   ASR = real compute latency, last spoken word → transcript ready
- *         (asr.last_word_to_transcript_ms), NOT the "all chunks summed" total.
+ *         (asr.transcription_latency_ms), NOT the "all chunks summed" total.
  *   LLM = time to first token (TTFT), agent-start → first reply token/sentence
  *         (agent.ttft_ms), NOT cumulative model time across every round-trip.
- *   TTS = time to first audio, i.e. the TTS-only slice of
- *         wall.time_to_first_audio_ms remaining after the LLM TTFT above.
+ *   TTS = time to first byte (tts.ttfb_ms), NOT cumulative synth time.
  *
  * Color coding  CPU=Blue  GPU=Green  NPU=Purple
  * Stage colors: ASR=Orange  Retrieval=Yellow  LLM=Cyan  TTS=Pink
@@ -123,30 +122,16 @@ export function PipelineFlow({ kpis, phase }: PipelineFlowProps) {
   const activeStage = activeStageFromPhase(phase);
 
   // Shared-vocabulary "Processing latency" (turn-end decision -> first sound
-  // out of the speaker). Deliberately NOT time_to_first_audio_ms: the two
-  // differ whenever work starts speculatively during the endpoint's
-  // trailing-silence wait (e.g. shortcut turns: ttfa ~195ms vs processing
-  // latency ~3ms, because audio was already rendered before the turn-end
-  // decision fired) -- see kiosk_core/pipeline_latency.py WallTimes docstring
-  // and benchmark-vocabolary.txt. "Time to first audio" is retired as a
-  // headline KPI name; it's still available in the per-turn table below for
-  // diagnostics, just not surfaced here as a top-level chip.
-  const processingMs = trace?.wall?.voice_to_voice_post_endpoint_ms ?? null;
+  // out of the speaker).
+  const processingMs = trace?.wall?.processing_latency_ms ?? null;
   // Voice-to-voice is the customer-felt clock: last word spoken -> first sound
   // out of the speaker. It is NOT derivable from turn_total_ms (E2E, retired
   // as a headline chip), because turn_total_ms starts at the endpoint
   // decision and so excludes the trailing-silence wait.
   const v2vMs = trace?.wall?.voice_to_voice_ms ?? null;
-  const v2vInformativeMs = trace?.wall?.voice_to_voice_informative_ms ?? null;
-  // The non-compute chunk of v2v that Processing (above) deliberately
-  // excludes: endpoint_wait_ms (trailing-silence dwell) + post_speech_gap_ms
-  // (mic-release reaction time / trailing buffered audio) + final_flush_wait_ms
-  // (draining the ASR flush queue). This is real, customer-felt wait time —
-  // without a chip for it, ASR+LLM+TTS's stage numbers never add up to V2V
-  // and look like a bug. Derived as v2v - processing rather than summed
-  // directly so it's never inconsistent with the two chips either side of it.
-  const endpointWaitMs =
-    v2vMs !== null && processingMs !== null ? Math.max(0, v2vMs - processingMs) : null;
+  const v2vAnswerMs = trace?.wall?.voice_to_voice_answer_ms ?? null;
+  const firstAudioWasOpener = trace?.wall?.first_audio_was_opener ?? false;
+  const endpointingDelayMs = trace?.wall?.endpointing_delay_ms ?? null;
 
   // One row per request/response, newest first.
   const recentTurns = (kpis.pipelineRecent ?? [])
@@ -154,14 +139,13 @@ export function PipelineFlow({ kpis, phase }: PipelineFlowProps) {
     .slice()
     .reverse();
 
-  // Rolling p95 over the recent-turns window -- the customer-facing target
-  // metric (a single bad tail turn is what damages a real interaction;
-  // showing only the latest turn's V2V, or a mean/median across the window,
-  // would hide it).
-  const v2vP95Ms = percentile(
-    recentTurns.map((t) => t?.wall?.voice_to_voice_ms as number).filter((v) => v != null),
-    0.95,
-  );
+  const v2vSamples = recentTurns.map((t) => t?.wall?.voice_to_voice_ms as number).filter((v) => v != null);
+  // With the nearest-rank p95 used here, fewer than 20 samples always selects
+  // the maximum, so label that case honestly instead of calling it p95.
+  const minP95Samples = 20;
+  const v2vTailMs =
+    v2vSamples.length >= minP95Samples ? percentile(v2vSamples, 0.95) : percentile(v2vSamples, 1);
+  const v2vTailLabel = v2vSamples.length >= minP95Samples ? 'p95' : `max (last ${v2vSamples.length})`;
 
   return (
     <div className="space-y-3">
@@ -174,30 +158,31 @@ export function PipelineFlow({ kpis, phase }: PipelineFlowProps) {
           {v2vMs !== null && (
             <span className="rounded-full bg-purple-50 px-2.5 py-0.5 text-[11px] font-semibold text-purple-700 border border-purple-200"
               title={
-                'Voice to voice — customer\u2019s last word to first sound out of the speaker' +
-                (v2vInformativeMs !== null
-                  ? ` (to first informative audio: ${latencyLabel(v2vInformativeMs)})`
+                'Voice-to-voice latency — customer\u2019s last word to first sound at the speaker' +
+                (firstAudioWasOpener && v2vAnswerMs !== null
+                  ? ` (answer audio: ${latencyLabel(v2vAnswerMs)})`
                   : '')
               }>
-              V2V {latencyLabel(v2vMs)}
+              Voice-to-voice {latencyLabel(v2vMs)}
+              {firstAudioWasOpener && v2vAnswerMs !== null ? ` · answer ${latencyLabel(v2vAnswerMs)}` : ''}
             </span>
           )}
-          {v2vP95Ms !== null && (
+          {v2vTailMs !== null && (
             <span className="rounded-full bg-purple-100 px-2 py-0.5 text-[10px] font-semibold text-purple-800 border border-purple-300"
-              title={`V2V p95 over the last ${recentTurns.length} turns — the customer-facing target metric (median hides the bad tail)`}>
-              V2V p95 {latencyLabel(v2vP95Ms)}
+              title={`Voice-to-voice ${v2vTailLabel} over ${v2vSamples.length} recent turn${v2vSamples.length === 1 ? '' : 's'}`}>
+              Voice-to-voice {v2vTailLabel} {latencyLabel(v2vTailMs)}
             </span>
           )}
           {processingMs !== null && (
             <span className="rounded-full bg-green-50 px-2 py-0.5 text-[10px] font-semibold text-green-700 border border-green-200"
-              title="Processing latency — turn-end decision to first sound out of the speaker (shared cross-team vocabulary term; voice_to_voice = endpointing delay + processing latency)">
-              Processing {latencyLabel(processingMs)}
+              title="Processing latency — turn-end decision to first sound out of the speaker (voice-to-voice latency = endpointing delay + processing latency)">
+              Processing latency {latencyLabel(processingMs)}
             </span>
           )}
-          {endpointWaitMs !== null && (
+          {endpointingDelayMs !== null && (
             <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700 border border-amber-200"
-              title="Endpoint/mic wait — trailing-silence dwell + mic-release reaction time + ASR flush-queue drain, all BEFORE processing starts. Real customer-felt wait, not pipeline compute; V2V = this + Processing.">
-              Endpoint wait {latencyLabel(endpointWaitMs)}
+              title="Endpointing delay — customer's last word to the turn-end decision.">
+              Endpointing delay {latencyLabel(endpointingDelayMs)}
             </span>
           )}
         </div>
@@ -255,9 +240,9 @@ export function PipelineFlow({ kpis, phase }: PipelineFlowProps) {
                 style={isActive ? { boxShadow: `0 0 16px 2px ${stage.glowColor}` } : undefined}
                 title={stage.id === 'retrieval' && !invoked ? 'Not invoked this turn (ordering path)' :
                        stage.id === 'asr'
-                         ? 'ASR latency — last spoken word to transcript ready (excludes the endpoint silence wait)'
+                         ? 'Transcription latency — last spoken word to transcript ready'
                        : stage.id === 'llm'
-                         ? 'LLM time to first token (TTFT) — agent-start to first reply token/sentence'
+                         ? 'LLM TTFT (time to first token) — agent-start to first reply token/sentence'
                            + (lats.llmCalls > 0
                                ? ` · cumulative model time across ${lats.llmCalls} round-trip(s)`
                                  + (lats.agentOverhead != null
@@ -265,7 +250,7 @@ export function PipelineFlow({ kpis, phase }: PipelineFlowProps) {
                                      : '')
                                : '')
                        : stage.id === 'tts'
-                         ? 'TTS time to first audio — first segment synth + WAV write, after the LLM TTFT'
+                         ? 'TTS TTFB (time to first byte) — first sentence handed to synthesiser to audio on disk'
                          : undefined}
               >
                 {/* Device badge top-right */}
@@ -331,13 +316,13 @@ export function PipelineFlow({ kpis, phase }: PipelineFlowProps) {
       {/* Stage-metric clarification when turn trace is available */}
       {trace && (
         <p className="text-[9px] text-gray-400 text-right">
-          ASR = last word → transcript ready · LLM = time to first token (TTFT)
+          Transcription latency = last word → transcript ready · LLM TTFT = time to first token
           {lats.llmCalls > 0
             ? ` (${lats.llmCalls} model call${lats.llmCalls > 1 ? 's' : ''}`
               + (lats.agentOverhead != null ? `, +${Math.round(lats.agentOverhead)} ms agent/tool overhead)` : ')')
             : ''}
-          {' · TTS = time to first audio (TTS overlaps LLM)'}
-          {' · V2V = Endpoint wait + Processing (ASR/LLM/TTS chips are compute-only sub-components of Processing)'}
+          {' · TTS TTFB = time to first byte'}
+          {' · Voice-to-voice latency = Endpointing delay + Processing latency'}
         </p>
       )}
 
@@ -346,4 +331,3 @@ export function PipelineFlow({ kpis, phase }: PipelineFlowProps) {
 }
 
 export default PipelineFlow;
-

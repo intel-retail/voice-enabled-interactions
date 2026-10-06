@@ -749,10 +749,9 @@ class BaseAudioSession:
         # reconstructing "t0 - endpoint_wait_seconds" fixes a real undercount
         # in voice-to-voice latency that previously ignored that round-trip.
         self._t_last_word: float | None = None
-        # Directly-observed instant of the LAST audio frame actually
-        # containing speech that kiosk-core sent to audio-analyzer (updated
-        # every time — see the send_frame() call sites in
-        # _process_frame_stream — so only the most recent one survives).
+        # Directly-observed instant the LAST audio frame actually containing
+        # speech was processed (updated on every speech frame in
+        # _process_frame_stream, so only the most recent one survives).
         # _t_last_word above is *derived*: "now minus silence_run_seconds" at
         # the moment the endpoint fires, which assumes the frame-processing
         # loop's own silence_run_seconds counter tracks real elapsed time
@@ -761,10 +760,25 @@ class BaseAudioSession:
         # inference tick) can make that counter run ahead of or behind the
         # wall clock, silently skewing every v2v number derived from it. This
         # field is not derived from anything — it is the wall-clock instant
-        # send_frame() was actually called for the last speech-containing
-        # frame — so it is preferred over the derived value wherever both
-        # exist (see _log_last_word_spoken).
-        self._t_last_speech_frame_sent: float | None = None
+        # the last speech-containing frame was seen — so it is preferred over
+        # the derived value wherever both exist (see _log_last_word_spoken).
+        #
+        # Stamped for EVERY speech frame regardless of whether continuous
+        # streaming is active. It used to be re-stamped only inside the
+        # `if self._streaming_active:` branch, so with streaming off (the
+        # default) nothing after the very first speech frame ever updated it
+        # and every voice-to-voice number was anchored on the customer's
+        # FIRST word instead of their last — inflating v2v by the entire
+        # length of the utterance.
+        self._t_last_speech_frame: float | None = None
+        # Wall-clock instant the turn-end decision was taken: the endpoint
+        # committing on trailing silence, or the mic-release signal being
+        # processed on the browser push-to-talk path. Splits the customer's
+        # wait into the two spans the team agreed to report separately —
+        # endpointing delay (last word -> here) and processing latency
+        # (here -> first sound at the speaker) — both on the same wall clock
+        # so they always sum to voice_to_voice_ms.
+        self._t_endpoint_decision: float | None = None
         self._t_agent_start: float | None = None    # just before agent HTTP call
         self._t_agent_end: float | None = None      # agent reply received
         # End of the token stream / trailing-text handling — before
@@ -780,6 +794,11 @@ class BaseAudioSession:
         # to fall back to the queue stamp and under-reported voice-to-voice
         # latency by a whole TTS round-trip (~300ms measured).
         self._t_first_audio: float | None = None
+        # Whether the first sound of this turn was the canned opener rather
+        # than the answer itself. Reported per turn so a voice_to_voice_ms
+        # that stopped on a file copy is never mistaken for one that stopped
+        # on the pipeline's actual reply.
+        self._first_audio_was_opener: bool = False
         # Trailing silence the endpoint waited through before committing the
         # turn. Needed to report voice-to-voice latency, because every other
         # timestamp in the trace starts after this wait has already elapsed.
@@ -790,7 +809,7 @@ class BaseAudioSession:
         # comment on _t_last_word above: this is the gap between _t_last_word
         # and _t_turn_start that endpoint_wait_seconds does not cover. Exposed
         # as its own field so voice_to_voice_ms is reconstructable from parts
-        # (endpoint_wait_ms + final_flush_wait_ms + time_to_first_audio_ms)
+        # (a component of processing_latency_ms)
         # instead of silently vanishing into an unexplained gap.
         self._final_flush_wait_seconds: float | None = None
         # Monotonic instant the final-flush drain-and-join sequence began
@@ -804,7 +823,7 @@ class BaseAudioSession:
         # of the two silence-based commit branches (stays None for
         # "stopped_by_api"/"max_duration_reached"/etc., where neither ran).
         # Added to answer, empirically per-turn rather than by inference from
-        # endpoint_wait_ms alone, "is the adaptive shortcut actually firing,
+        # endpoint_silence_run_ms alone, "is the adaptive shortcut actually firing,
         # or is ASR too slow for it to ever get a chance?" — see
         # docs/performance-improvements-2026-09.md.
         self._endpoint_shortcut_fired: bool | None = None
@@ -990,7 +1009,7 @@ class BaseAudioSession:
                         # construction (the preroll-drain loop above only
                         # ever buffered frames while still deciding, and this
                         # one just triggered is_speech=True itself).
-                        self._t_last_speech_frame_sent = time.monotonic()
+                        self._t_last_speech_frame = time.monotonic()
                     else:
                         self._preroll_frames.append(frame)
                     continue
@@ -999,15 +1018,16 @@ class BaseAudioSession:
                 self._captured_samples += len(frame)
                 if self._streaming_active:
                     self.realtime_client.send_frame(frame.tobytes())
-                    if is_speech:
-                        # Overwritten every time -- only the LAST speech
-                        # frame's send instant survives by the time the
-                        # endpoint fires. See the field's docstring in
-                        # __init__ for why this is preferred over deriving
-                        # the same instant from silence_run_seconds.
-                        self._t_last_speech_frame_sent = time.monotonic()
 
                 if is_speech:
+                    # Overwritten on every speech frame -- only the LAST one
+                    # survives by the time the endpoint fires. See the field's
+                    # docstring in __init__ for why this is preferred over
+                    # deriving the same instant from silence_run_seconds, and
+                    # why it must NOT be nested under `_streaming_active`
+                    # (streaming is off by default, which used to leave this
+                    # anchored on the customer's first word).
+                    self._t_last_speech_frame = time.monotonic()
                     silence_run_seconds = 0.0
                     _adaptive_flushed = False  # new speech: allow adaptive flush again
                     self._chunk_has_speech = True
@@ -1031,7 +1051,7 @@ class BaseAudioSession:
                     # tick happened to land next -- up to 0.4s of pure
                     # scheduling lag before ASR even started on the complete
                     # utterance (measured: this was the largest single
-                    # contributor to asr_last_word_to_transcript_ms). Gated
+                    # contributor to transcription_latency_ms). Gated
                     # the same way as the periodic ping (silence_run_seconds
                     # == exactly one frame means this is the FIRST silence
                     # frame this run) so it never fires more than once per
@@ -1359,6 +1379,11 @@ class BaseAudioSession:
         # rather than silently absorbed before the clock starts.
         _t_final_flush_start = time.monotonic()
         self._t_final_flush_start = _t_final_flush_start
+        # Catch-all turn-end decision stamp for paths that reach here without
+        # one (stopped_by_api, max_duration_reached, error). The silence and
+        # mic-release paths stamp their own, earlier and more accurately.
+        if self._t_endpoint_decision is None:
+            self._t_endpoint_decision = _t_final_flush_start
         if config.DEFAULT_SKIP_EMPTY_FINAL_FLUSH_ENABLED and self._unconfirmed_speech_pending:
             self._flush_queue.join()
         skip_final_flush = (
@@ -1444,7 +1469,7 @@ class BaseAudioSession:
         #
         # Timed explicitly (rather than left as an implicit gap between
         # _t_last_word and _t_turn_start) because it was previously invisible
-        # in the trace: endpoint_wait_ms only reports the trailing-silence
+        # in the trace: endpoint_silence_run_ms only reports the trailing-silence
         # wait, so a turn's reported wait+compute numbers silently undercounted
         # voice_to_voice_ms by however long this join blocked — on some turns
         # the single largest stage in the whole clock. See
@@ -1643,22 +1668,27 @@ class BaseAudioSession:
            real word. This assumes the frame-processing loop's own
            ``silence_run_seconds`` counter tracks wall-clock time exactly —
            true only under perfectly steady frame delivery.
-        2. Observed: ``self._t_last_speech_frame_sent``, stamped at the
-           actual instant ``send_frame()`` was called for the last
-           speech-containing frame (see _process_frame_stream). Not derived
-           from anything, so immune to the drift (1) is exposed to (bursty
-           delivery, GC pauses, a slow VAD tick).
+        2. Observed: ``self._t_last_speech_frame``, stamped at the actual
+           instant the last speech-containing frame was processed (see
+           _process_frame_stream). Not derived from anything, so immune to
+           the drift (1) is exposed to (bursty delivery, GC pauses, a slow
+           VAD tick).
 
-        Prefer (2) whenever it exists — streaming sessions always have it
-        once real speech was captured. The derived value is logged alongside
-        it (drift_ms) so a growing gap between the two is visible in the
-        trace rather than silently biasing v2v numbers one way or the other.
+        Prefer (2) whenever it exists — any session that captured real speech
+        has it, streaming or not. The derived value is logged alongside it
+        (drift_ms) so a growing gap between the two is visible in the trace
+        rather than silently biasing v2v numbers one way or the other.
         """
+        # The endpoint has just committed: this call site IS the turn-end
+        # decision on the silence-timeout path. Stamped on the wall clock so
+        # endpointing delay and processing latency share one time base.
+        if self._t_endpoint_decision is None:
+            self._t_endpoint_decision = time.monotonic()
         derived_t_last_word = time.monotonic() - silence_run_seconds
         drift_ms = 0.0
-        if self._t_last_speech_frame_sent is not None:
-            self._t_last_word = self._t_last_speech_frame_sent
-            drift_ms = (derived_t_last_word - self._t_last_speech_frame_sent) * 1000
+        if self._t_last_speech_frame is not None:
+            self._t_last_word = self._t_last_speech_frame
+            drift_ms = (derived_t_last_word - self._t_last_speech_frame) * 1000
         else:
             self._t_last_word = derived_t_last_word
         last_word_ts = datetime.now(UTC) - timedelta(
@@ -1670,7 +1700,7 @@ class BaseAudioSession:
             "source=%s, derived_vs_observed_drift_ms=%.1f)",
             self.session_id, self.agent_session_id,
             last_word_ts.isoformat(), silence_run_seconds,
-            "observed" if self._t_last_speech_frame_sent is not None else "derived",
+            "observed" if self._t_last_speech_frame is not None else "derived",
             drift_ms,
         )
 
@@ -1726,6 +1756,11 @@ class BaseAudioSession:
             with self._lock:
                 if self._t_first_audio is None:
                     self._t_first_audio = time.monotonic()
+                    # Mark the published voice-to-voice number as having
+                    # stopped on the canned opener (a cached file copy), not
+                    # on the pipeline's actual reply. Consumers must read
+                    # voice_to_voice_answer_ms for the pipeline figure.
+                    self._first_audio_was_opener = True
                 self._t_last_tts = time.monotonic()
                 self.tts_audio_segments.append(
                     {
@@ -1885,15 +1920,15 @@ class BaseAudioSession:
         # be derived from turn_start, because every chunk is already transcribed
         # by the time _finalize_run stamps t0.
         asr_ms = round(self._asr_ms_total, 1) if self._asr_chunks else None
-        # Continuous-streaming mode only: customer's last word -> transcript
-        # ready, with the deliberate trailing-silence wait excluded (that's
-        # endpoint_wait_ms, a design choice, not ASR compute time). See
-        # AsrSpan.last_word_to_transcript_ms's docstring for the rationale.
-        asr_last_word_to_transcript_ms = None
+        # Transcription latency: customer's last word -> transcript ready,
+        # with the deliberate trailing-silence wait excluded (that's
+        # endpointing_delay_ms, a design choice, not ASR compute time). See
+        # AsrSpan.transcription_latency_ms's docstring for the rationale.
+        transcription_latency_ms = None
         if self.realtime_client is not None and self._t_last_word is not None:
             _landed_at = self.realtime_client.first_content_landed_at_or_after(self._t_last_word)
             if _landed_at is not None:
-                asr_last_word_to_transcript_ms = round(
+                transcription_latency_ms = round(
                     max(0.0, (_landed_at - self._t_last_word) * 1000), 1
                 )
         # Agent TTFT = from agent_start to when first token (reply) arrived
@@ -1910,30 +1945,32 @@ class BaseAudioSession:
         agent_stream_ms = _ms(t_agent_s, self._t_agent_stream_end)
         # TTS = from first sentence queued to last segment written
         tts_ms = _ms(t_first, t_last)
-        # Time to first audio = from end of speech (t0, stamped by
-        # _finalize_run) to the moment the first segment became available.
-        #
-        # Measured from t0 rather than from agent_start because the opener is
-        # published *before* the agent call starts, which would otherwise make
-        # this negative. t0 is also the more honest boundary: it is what the
-        # customer actually waits through after they stop talking.
-        ttfa_ms = _ms(t0, self._t_first_audio or t_first)
-        # Voice to voice: the customer's last word to the first sound.
-        #
-        # Prefer _t_last_word (set in _log_last_word_spoken) when available:
-        # it is measured directly from the endpoint decision, backdated by
-        # the trailing-silence wait, so it is anchored the instant speech
-        # actually stopped. Using it directly (rather than reconstructing
-        # "t0 - endpoint_wait_seconds" and adding endpoint_wait_ms back onto a
-        # t0-based delta) also naturally includes the final chunk's ASR
-        # round-trip that _finalize_run blocks on before stamping t0 — that
-        # gap was previously silently missing from this metric.
-        #
-        # Falls back to the older endpoint_wait_ms-based reconstruction when
-        # _t_last_word was never set (e.g. end_reason was "stopped_by_api" or
-        # "max_duration_reached", which don't go through the silence-timeout
-        # commit path that sets it).
-        endpoint_wait_ms = (
+        # TTS time to first byte: first sentence handed to the synthesiser ->
+        # that sentence's audio on disk. Pairs with the LLM's TTFT as the
+        # stage-level figure; tts_ms above is the whole drain.
+        tts_ttfb_ms = _ms(t_first, self._t_first_answer_audio)
+
+        # ── The three agreed spans ───────────────────────────────────────
+        # All measured between backend monotonic stamps on ONE wall clock, so
+        # voice_to_voice_ms == endpointing_delay_ms + processing_latency_ms
+        # always reconciles. The previous implementation mixed audio-domain
+        # silence_run_seconds into wall-clock arithmetic and had to special-
+        # case the result to avoid negative numbers.
+        t_last_word = self._t_last_word
+        t_decision = self._t_endpoint_decision
+        # First sound at the speaker, and first sound carrying the answer.
+        # Both are on-disk stamps: queuing a sentence makes no sound.
+        t_first_audio = self._t_first_audio or t_first
+        t_answer_audio = self._t_first_answer_audio
+
+        endpointing_delay_ms = _ms(t_last_word, t_decision)
+        processing_latency_ms = _ms(t_decision, t_first_audio)
+        processing_latency_answer_ms = _ms(t_decision, t_answer_audio)
+        voice_to_voice_ms = _ms(t_last_word, t_first_audio)
+        voice_to_voice_answer_ms = _ms(t_last_word, t_answer_audio)
+
+        # Diagnostics backing the two spans above.
+        endpoint_silence_run_ms = (
             round(self._endpoint_wait_seconds * 1000, 1)
             if self._endpoint_wait_seconds is not None
             else None
@@ -1943,61 +1980,15 @@ class BaseAudioSession:
             if self._final_flush_wait_seconds is not None
             else None
         )
-        t_last_word = self._t_last_word
-        # Gap between the customer's true last speech frame and the instant
-        # the flush/turn-start sequence began.
-        #
-        # Only meaningful on the browser mic-release path (endpoint_wait_ms
-        # is None there): reports the full, real wall-clock gap -- how long
-        # after the customer's last word they took to release the mic
-        # button, plus any trailing buffered frames. Both ends are backend
-        # monotonic timestamps, no browser clock involved.
-        #
-        # Forced to 0 on the silence-timeout path (endpoint_wait_ms is set):
-        # that field is measured in AUDIO-DOMAIN time (silence_run_seconds,
-        # counted from audio samples), not wall-clock time, so it is NOT
-        # safe to subtract it from a wall-clock gap here -- whenever frames
-        # arrive faster than real-time (bursty delivery, a fixture pushed
-        # without exact real-time pacing), the audio-domain duration can be
-        # far larger than the true wall-clock gap, which previously produced
-        # nonsensical negative values. The silence wait is already fully
-        # reported via endpoint_wait_ms; there is nothing left to add here.
-        if endpoint_wait_ms is not None:
-            post_speech_gap_ms = 0.0
-        else:
+        # Browser mic-release path only: how long after the customer's last
+        # word the flush sequence actually began (button-release reaction
+        # time plus any trailing buffered frames). On the silence-timeout
+        # path the endpoint decision already accounts for this window, so
+        # reporting it again would double-count it.
+        if self._endpoint_wait_seconds is None:
             post_speech_gap_ms = _ms(t_last_word, self._t_final_flush_start)
-        if t_last_word is not None:
-            v2v_ms = _ms(t_last_word, self._t_first_audio or t_first)
         else:
-            v2v_ms = (
-                round(endpoint_wait_ms + ttfa_ms, 1)
-                if endpoint_wait_ms is not None and ttfa_ms is not None
-                else None
-            )
-        # v2v with BOTH deliberate/customer-side waiting time subtracted back
-        # out: the endpoint's trailing-silence wait AND the post-speech gap
-        # (mic-release reaction time). Neither is pipeline compute cost, so
-        # neither belongs in the number meant to answer "how fast is our
-        # compute pipeline" -- see WallTimes.voice_to_voice_post_endpoint_ms.
-        # Left over is exactly final_flush_wait_ms + time_to_first_audio_ms.
-        v2v_post_endpoint_ms = (
-            round(v2v_ms - (endpoint_wait_ms or 0) - max(post_speech_gap_ms or 0, 0), 1)
-            if v2v_ms is not None
-            else None
-        )
-        # Same clock, but to the first sound that actually answers. The opener
-        # is deliberately excluded here: it breaks the silence but tells the
-        # customer nothing, so counting it as "the reply" would flatter the
-        # number. Uses the on-disk stamp, not the queue stamp.
-        informative_ms = _ms(t0, self._t_first_answer_audio)
-        if t_last_word is not None:
-            v2v_informative_ms = _ms(t_last_word, self._t_first_answer_audio)
-        else:
-            v2v_informative_ms = (
-                round(endpoint_wait_ms + informative_ms, 1)
-                if endpoint_wait_ms is not None and informative_ms is not None
-                else None
-            )
+            post_speech_gap_ms = 0.0
         # Wall E2E: genuinely end-to-end — from the first speech frame captured
         # (so audio capture and ASR are included) to the last TTS segment
         # written. Falls back to turn_start when no speech was ever detected.
@@ -2007,7 +1998,8 @@ class BaseAudioSession:
         # File-replay ground-truth anchor (see _t_playback_start comment) —
         # only ever set on FileAudioSession, so this is None on a live mic or
         # browser-stream turn.
-        playback_to_first_audio_ms = _ms(self._t_playback_start, self._t_first_audio or t_first)
+        playback_to_first_audio_ms = _ms(self._t_playback_start, t_first_audio)
+        playback_to_answer_audio_ms = _ms(self._t_playback_start, t_answer_audio)
 
         retrieval_invoked = any(
             "retrieval" in tc.lower() or "knowledge" in tc.lower() or "lookup" in tc.lower()
@@ -2021,21 +2013,24 @@ class BaseAudioSession:
             ended_at=datetime.now(UTC).isoformat(),
             wall=WallTimes(
                 turn_total_ms=wall_total_ms,
-                time_to_first_audio_ms=ttfa_ms,
-                endpoint_wait_ms=endpoint_wait_ms,
+                voice_to_voice_ms=voice_to_voice_ms,
+                endpointing_delay_ms=endpointing_delay_ms,
+                processing_latency_ms=processing_latency_ms,
+                voice_to_voice_answer_ms=voice_to_voice_answer_ms,
+                processing_latency_answer_ms=processing_latency_answer_ms,
+                first_audio_was_opener=self._first_audio_was_opener,
+                endpoint_silence_run_ms=endpoint_silence_run_ms,
                 final_flush_wait_ms=final_flush_wait_ms,
-                voice_to_voice_ms=v2v_ms,
-                voice_to_voice_post_endpoint_ms=v2v_post_endpoint_ms,
                 post_speech_gap_ms=post_speech_gap_ms,
-                voice_to_voice_informative_ms=v2v_informative_ms,
                 playback_to_first_audio_ms=playback_to_first_audio_ms,
+                playback_to_answer_audio_ms=playback_to_answer_audio_ms,
                 endpoint_shortcut_fired=self._endpoint_shortcut_fired,
             ),
             asr=AsrSpan(
                 ms=asr_ms,
                 chunks=self._asr_chunks,
                 final_flush_skipped=self._final_flush_skipped,
-                last_word_to_transcript_ms=asr_last_word_to_transcript_ms,
+                transcription_latency_ms=transcription_latency_ms,
             ),
             agent=AgentSpan(
                 ttft_ms=ttft_ms,
@@ -2059,10 +2054,19 @@ class BaseAudioSession:
                 ms=tts_ms,
                 segments=self._tts_segment_count,
                 overlapped_with_agent=True,
+                ttfb_ms=tts_ttfb_ms,
             ),
         )
         pipeline_store.record(trace)
-        self._emit_vlm_metrics(t_last_word, self._t_first_audio or t_first)
+        # Published to performance-tools as THE voice-to-voice number for this
+        # turn. Anchored on the first sound carrying the ANSWER, not on the
+        # cached opener: with the opener enabled (the default) the opener stamp
+        # is a file copy taken before the agent call even starts, so publishing
+        # it would report end-of-turn detection plus a file copy as if it were
+        # the pipeline. Falls back to the first sound of any kind when no
+        # answer segment was ever produced (failed turn), so a broken turn
+        # still shows up rather than vanishing from the benchmark.
+        self._emit_vlm_metrics(t_last_word, t_answer_audio or t_first_audio)
         logger.info(
             "[PIPELINE] turn=%s wall=%.0fms asr=%.0fms(%d) ttft=%.0fms tts=%.0fms "
             "llm=%.0fms(%d) agent_stream=%.0fms mcp=%.0fms(%d) retrieval=%s/%.0fms tools=%s",
@@ -2295,7 +2299,7 @@ class BaseAudioSession:
                         # Prefer _t_last_word (see _record_turn_trace) — it is
                         # anchored to the real last-word instant, including
                         # the final chunk's ASR round-trip, and keeps this log
-                        # line consistent with the API's v2v_informative_ms.
+                        # line consistent with the API's voice_to_voice_answer_ms.
                         anchor = self._t_last_word
                         if anchor is None and self._t_turn_start is not None:
                             anchor = self._t_turn_start - (self._endpoint_wait_seconds or 0.0)
@@ -3570,8 +3574,8 @@ class BrowserStreamSession(BaseAudioSession):
             # the mic-release signal can arrive a little after the last real
             # word (button-release reaction time, any trailing buffered
             # frames still being sent), so it is a slightly late proxy at
-            # best. See _t_last_speech_frame_sent's docstring in __init__.
-            self._t_last_word = self._t_last_speech_frame_sent or time.monotonic()
+            # best. See _t_last_speech_frame's docstring in __init__.
+            self._t_last_word = self._t_last_speech_frame or time.monotonic()
             # Convert the monotonic anchor to an approximate wall-clock instant
             # purely for human-readable logging -- previously this logged a
             # fresh datetime.now(UTC) instead, which silently disagreed with
@@ -3587,8 +3591,14 @@ class BrowserStreamSession(BaseAudioSession):
                 self.session_id, self.agent_session_id,
                 anchor_wall_ts.isoformat(),
                 _gap_s * 1000,
-                "observed" if self._t_last_speech_frame_sent is not None else "signal_end",
+                "observed" if self._t_last_speech_frame is not None else "signal_end",
             )
+        # Mic-release path: receiving this signal IS the turn-end decision.
+        # Stamped here (not in _finalize_run) so endpointing delay covers the
+        # customer's post-speech pause and button-release reaction time, which
+        # is exactly the span a push-to-talk customer waits through.
+        if self._t_endpoint_decision is None:
+            self._t_endpoint_decision = time.monotonic()
         self._push_queue.put(None)
 
     def _run(self) -> None:
