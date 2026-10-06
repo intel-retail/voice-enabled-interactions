@@ -556,9 +556,9 @@ services:
       # pure-RAG deployments (healthcare, education) to skip MCP bootstrap.
       ORDERING_AGENT_ENABLED: ${ORDERING_AGENT_ENABLED:-true}
       # Lab-only ADK vs non-ADK A/B route (/api/v1/agent/chat-no-adk), used
-      # solely by tests/benchmarks/*_no_adk.py. Off by default: it can place
-      # real orders and must never be reachable in a normal deployment. Set
-      # to "true" only when running those specific benchmark scripts.
+      # solely by tests/benchmarks/agent_latency_benchmark.py. Off by default:
+      # it can place real orders and must never be reachable in a normal
+      # deployment. Set to "true" only when running that benchmark.
       AGENT_BENCHMARK_ENDPOINTS_ENABLED: ${AGENT_BENCHMARK_ENDPOINTS_ENABLED:-false}
     volumes:
       - rag_service_models:/app/rag-service/models

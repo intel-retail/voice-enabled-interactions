@@ -41,7 +41,8 @@ router = APIRouter(prefix="/api/v1/agent", tags=["agent"])
 # main.py mounts this whole router in every deployment where
 # ORDERING_AGENT_ENABLED is set (the default), so without its own flag this
 # route would be reachable in production despite being intended for
-# tests/benchmarks/*_no_adk.py only. Off by default; benchmarks must opt in.
+# tests/benchmarks/agent_latency_benchmark.py only. Off by default;
+# benchmarks must opt in.
 BENCHMARK_ENDPOINTS_ENABLED = (
     os.getenv("AGENT_BENCHMARK_ENDPOINTS_ENABLED", "false").lower() == "true"
 )
