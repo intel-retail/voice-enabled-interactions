@@ -342,9 +342,24 @@ class TurnResult:
     # number directly comparable to kiosk-voice-lab's fixture-manifest v2v.
     playback_to_first_audio_ms: float | None = None
     playback_to_answer_audio_ms: float | None = None
+    playback_to_endpoint_decision_ms: float | None = None
     true_end_of_speech_s: float | None = None
     voice_to_voice_ground_truth_ms: float | None = None
     voice_to_voice_answer_ground_truth_ms: float | None = None
+    # The clip-anchored split of voice_to_voice_ground_truth_ms. Both halves
+    # are measured on the playback clock and anchored on the fixture's own
+    # end-of-speech sample, so unlike the server-side endpointing_delay_ms
+    # they contain no dependency on this pipeline's VAD for the START of the
+    # span -- which matters because endpointing is one of the things being
+    # measured, so anchoring on the endpoint detector would define its own
+    # error away. They satisfy, by construction:
+    #
+    #   voice_to_voice_ground_truth_ms == endpointing_delay_ground_truth_ms
+    #                                     + processing_latency_ground_truth_ms
+    #
+    # which _assert_ground_truth_identity() checks on every turn.
+    endpointing_delay_ground_truth_ms: float | None = None
+    processing_latency_ground_truth_ms: float | None = None
 
     # True/False/None -- see pipeline_latency.WallTimes.endpoint_shortcut_fired.
     # Surfaced here to directly answer "is the adaptive completeness shortcut
@@ -447,8 +462,11 @@ def build_summary(turns: list[TurnResult]) -> dict[str, Any]:
         "tts_ttfb_ms",
         "playback_to_first_audio_ms",
         "playback_to_answer_audio_ms",
+        "playback_to_endpoint_decision_ms",
         "voice_to_voice_ground_truth_ms",
         "voice_to_voice_answer_ground_truth_ms",
+        "endpointing_delay_ground_truth_ms",
+        "processing_latency_ground_truth_ms",
     ]
     summary: dict[str, Any] = {
         "turns_total": len(turns),
@@ -464,6 +482,20 @@ def build_summary(turns: list[TurnResult]) -> dict[str, Any]:
     fired = [t.endpoint_shortcut_fired for t in ok if t.endpoint_shortcut_fired is not None]
     summary["endpoint_shortcut_fired_count"] = sum(1 for f_ in fired if f_)
     summary["endpoint_shortcut_eligible_count"] = len(fired)
+    # Turns whose turn-end decision landed BEFORE the clip's real end of
+    # speech -- i.e. the customer was cut off mid-utterance. Only detectable
+    # with the clip anchor: measured against our own endpoint detector this
+    # is 0 by construction, because the detector's decision IS the anchor.
+    # A non-zero count means truncated transcripts, so it is surfaced as a
+    # correctness counter rather than left to show up as a negative
+    # percentile that reads like a measurement bug.
+    early = [
+        t.endpointing_delay_ground_truth_ms
+        for t in ok
+        if t.endpointing_delay_ground_truth_ms is not None
+    ]
+    summary["early_commit_count"] = sum(1 for v in early if v < 0)
+    summary["early_commit_eligible_count"] = len(early)
     summary["latency_breakdown"] = build_latency_breakdown(summary)
     summary["kpi_vocabulary"] = build_kpi_vocabulary(summary)
     return summary
@@ -514,10 +546,32 @@ def build_kpi_vocabulary(summary: dict[str, Any]) -> dict[str, Any]:
         st = summary.get(field_name)
         return st.get(key) if isinstance(st, dict) else None
 
+    def _prefer(ground_truth_field: str, detector_field: str) -> str:
+        """Pick the clip-anchored field when the run has one.
+
+        Benchmarks replay a file, so the exact sample where speech ends is
+        knowable independently of this pipeline (see
+        true_end_of_speech_seconds). That anchor is strictly better here:
+        endpointing is one of the spans being measured, so starting the
+        clock at our own endpoint detector would subtract out part of the
+        very thing under test. Live-mic turns have no such ground truth and
+        fall back to the detector-anchored field.
+        """
+        return (
+            ground_truth_field
+            if _stat(ground_truth_field) is not None
+            else detector_field
+        )
+
     def _kpi(term: str, source: str, starts: str, stops: str, note: str = "") -> dict[str, Any]:
         return {
             "term": term,
             "source_field": source,
+            "anchor": (
+                "clip (ffmpeg silencedetect)"
+                if source.endswith("_ground_truth_ms")
+                else "detector (kiosk-core VAD/endpoint)"
+            ),
             "starts": starts,
             "stops": stops,
             "p50_ms": _stat(source),
@@ -525,27 +579,38 @@ def build_kpi_vocabulary(summary: dict[str, Any]) -> dict[str, Any]:
             "note": note,
         }
 
-    v2v_p50 = _stat("voice_to_voice_ms")
-    v2v_answer_p50 = _stat("voice_to_voice_answer_ms")
+    v2v_field = _prefer("voice_to_voice_ground_truth_ms", "voice_to_voice_ms")
+    v2v_answer_field = _prefer(
+        "voice_to_voice_answer_ground_truth_ms", "voice_to_voice_answer_ms"
+    )
+    endpointing_field = _prefer(
+        "endpointing_delay_ground_truth_ms", "endpointing_delay_ms"
+    )
+    processing_field = _prefer(
+        "processing_latency_ground_truth_ms", "processing_latency_ms"
+    )
+
+    v2v_p50 = _stat(v2v_field)
+    v2v_answer_p50 = _stat(v2v_answer_field)
     return {
         "voice_to_voice_latency": _kpi(
-            "Voice-to-voice latency", "voice_to_voice_ms",
+            "Voice-to-voice latency", v2v_field,
             "customer's last word", "first sound at speaker",
             "Includes the cached opener when first_audio_was_opener is true.",
         ),
         "voice_to_voice_answer_latency": _kpi(
-            "Voice-to-voice answer latency", "voice_to_voice_answer_ms",
+            "Voice-to-voice answer latency", v2v_answer_field,
             "customer's last word", "first answer-bearing sound at speaker",
             "Use this as the pipeline figure when the cached opener is enabled.",
         ),
         "endpointing_delay": _kpi(
-            "Endpointing delay", "endpointing_delay_ms",
+            "Endpointing delay", endpointing_field,
             "customer's last word", "turn-end decision",
             "Wall-clock customer wait; endpoint_silence_run_ms is only an "
             "audio-domain diagnostic for shortcut/full-timeout behaviour.",
         ),
         "processing_latency": _kpi(
-            "Processing latency", "processing_latency_ms",
+            "Processing latency", processing_field,
             "turn-end decision", "first sound at speaker",
             "Pipeline work after endpointing; may stop on the cached opener.",
         ),
@@ -574,9 +639,31 @@ def build_kpi_vocabulary(summary: dict[str, Any]) -> dict[str, Any]:
         },
         "identity_check": {
             "expression": "voice_to_voice = endpointing_delay + processing_latency",
-            "endpointing_delay_p50_ms": _stat("endpointing_delay_ms"),
-            "processing_latency_p50_ms": _stat("processing_latency_ms"),
+            "anchor": (
+                "clip (ffmpeg silencedetect)"
+                if v2v_field.endswith("_ground_truth_ms")
+                else "detector (kiosk-core VAD/endpoint)"
+            ),
+            # The identity holds exactly PER TURN (and is checked there by
+            # _assert_ground_truth_identity). These three are medians, and a
+            # median of sums is not the sum of medians, so they are expected
+            # to differ by a few percent. Do not "fix" that drift here --
+            # treat only the per-turn warning as a real failure.
+            "scope": "per-turn exact; medians below will not sum exactly",
+            "endpointing_delay_p50_ms": _stat(endpointing_field),
+            "processing_latency_p50_ms": _stat(processing_field),
             "voice_to_voice_p50_ms": v2v_p50,
+        },
+        # Both anchors side by side. The gap is the error the endpoint
+        # detector makes relative to the clip's real end of speech -- the
+        # exact quantity that anchoring on the detector would have hidden.
+        "anchor_cross_check": {
+            "clip_anchored_v2v_p50_ms": _stat("voice_to_voice_ground_truth_ms"),
+            "detector_anchored_v2v_p50_ms": _stat("voice_to_voice_ms"),
+            "shortcut_fired_count": summary.get("endpoint_shortcut_fired_count"),
+            "shortcut_eligible_count": summary.get("endpoint_shortcut_eligible_count"),
+            "early_commit_count": summary.get("early_commit_count"),
+            "early_commit_eligible_count": summary.get("early_commit_eligible_count"),
         },
     }
 
@@ -961,16 +1048,70 @@ def replay_fixture(
     # offset (ffmpeg, independent of this pipeline's VAD/endpoint timing).
     result.playback_to_first_audio_ms = wall.get("playback_to_first_audio_ms")
     result.playback_to_answer_audio_ms = wall.get("playback_to_answer_audio_ms")
+    result.playback_to_endpoint_decision_ms = wall.get("playback_to_endpoint_decision_ms")
     result.true_end_of_speech_s = true_end_of_speech_seconds(fixture)
-    if result.playback_to_first_audio_ms is not None and result.true_end_of_speech_s is not None:
+    true_eos_ms = (
+        result.true_end_of_speech_s * 1000
+        if result.true_end_of_speech_s is not None
+        else None
+    )
+    if result.playback_to_first_audio_ms is not None and true_eos_ms is not None:
         result.voice_to_voice_ground_truth_ms = round(
-            result.playback_to_first_audio_ms - result.true_end_of_speech_s * 1000, 1
+            result.playback_to_first_audio_ms - true_eos_ms, 1
         )
-    if result.playback_to_answer_audio_ms is not None and result.true_end_of_speech_s is not None:
+    if result.playback_to_answer_audio_ms is not None and true_eos_ms is not None:
         result.voice_to_voice_answer_ground_truth_ms = round(
-            result.playback_to_answer_audio_ms - result.true_end_of_speech_s * 1000, 1
+            result.playback_to_answer_audio_ms - true_eos_ms, 1
         )
+    # Split the clip-anchored total into the two spans the customer actually
+    # experiences. Both subtractions stay on the playback clock.
+    if result.playback_to_endpoint_decision_ms is not None:
+        if true_eos_ms is not None:
+            result.endpointing_delay_ground_truth_ms = round(
+                result.playback_to_endpoint_decision_ms - true_eos_ms, 1
+            )
+        if result.playback_to_first_audio_ms is not None:
+            result.processing_latency_ground_truth_ms = round(
+                result.playback_to_first_audio_ms
+                - result.playback_to_endpoint_decision_ms,
+                1,
+            )
+    _assert_ground_truth_identity(result)
     return result
+
+
+# Rounding each span independently can leave at most 0.1 ms per term, so a
+# 1 ms window is comfortably tight enough to catch a real anchoring mistake
+# (which would be off by the length of an utterance, not a rounding step).
+_GROUND_TRUTH_IDENTITY_TOLERANCE_MS = 1.0
+
+
+def _assert_ground_truth_identity(result: "TurnResult") -> None:
+    """Warn if the clip-anchored spans stop reconciling.
+
+    ``voice_to_voice`` must equal ``endpointing + processing`` by
+    construction -- all three are differences of instants on the same
+    playback clock. If that ever stops holding, one of the three is being
+    anchored on a different clock (the exact class of bug that made
+    voice-to-voice start at the customer's first word), so it is worth
+    saying so loudly rather than publishing a number that does not add up.
+
+    Warns rather than raises: a broken invariant should not destroy an
+    otherwise complete benchmark run, and the warning names the turn.
+    """
+    total = result.voice_to_voice_ground_truth_ms
+    endpointing = result.endpointing_delay_ground_truth_ms
+    processing = result.processing_latency_ground_truth_ms
+    if total is None or endpointing is None or processing is None:
+        return
+    drift = abs(total - (endpointing + processing))
+    if drift > _GROUND_TRUTH_IDENTITY_TOLERANCE_MS:
+        print(
+            f"[v2v]   WARNING: ground-truth spans do not reconcile "
+            f"(v2v={total} != endpointing={endpointing} + "
+            f"processing={processing}, drift={drift:.1f}ms). "
+            f"One of the three is anchored on a different clock."
+        )
 
 
 def wait_for_core(timeout: float = 60.0) -> None:

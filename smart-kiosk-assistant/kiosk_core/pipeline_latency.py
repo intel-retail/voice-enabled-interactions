@@ -183,6 +183,18 @@ class WallTimes:
     # timing. None for microphone/browser-stream sessions.
     playback_to_first_audio_ms: float | None = None
     playback_to_answer_audio_ms: float | None = None
+    # Same playback anchor, stopping at the turn-end DECISION rather than at
+    # audio out. This is the field that lets a benchmark split a clip-anchored
+    # voice_to_voice_ms into its endpointing and processing halves without
+    # ever consulting our own VAD for the start instant:
+    #
+    #   endpointing_delay  = playback_to_endpoint_decision_ms - true_eos_ms
+    #   processing_latency = playback_to_first_audio_ms
+    #                        - playback_to_endpoint_decision_ms
+    #
+    # where true_eos_ms comes from a silence detector run on the file itself.
+    # Both halves stay on the same playback clock, so they subtract cleanly.
+    playback_to_endpoint_decision_ms: float | None = None
     # True: this turn committed via the sentence-completeness shortcut
     # (KIOSK_CORE_ENDPOINT_SHORT_SECONDS). False: it fell through to the full
     # silence_timeout_seconds wait because the transcript was not yet

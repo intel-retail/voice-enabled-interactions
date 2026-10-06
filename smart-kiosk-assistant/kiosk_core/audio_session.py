@@ -2000,6 +2000,9 @@ class BaseAudioSession:
         # browser-stream turn.
         playback_to_first_audio_ms = _ms(self._t_playback_start, t_first_audio)
         playback_to_answer_audio_ms = _ms(self._t_playback_start, t_answer_audio)
+        playback_to_endpoint_decision_ms = _ms(
+            self._t_playback_start, self._t_endpoint_decision
+        )
 
         retrieval_invoked = any(
             "retrieval" in tc.lower() or "knowledge" in tc.lower() or "lookup" in tc.lower()
@@ -2024,6 +2027,7 @@ class BaseAudioSession:
                 post_speech_gap_ms=post_speech_gap_ms,
                 playback_to_first_audio_ms=playback_to_first_audio_ms,
                 playback_to_answer_audio_ms=playback_to_answer_audio_ms,
+                playback_to_endpoint_decision_ms=playback_to_endpoint_decision_ms,
                 endpoint_shortcut_fired=self._endpoint_shortcut_fired,
             ),
             asr=AsrSpan(
