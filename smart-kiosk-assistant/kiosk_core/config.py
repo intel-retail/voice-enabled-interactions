@@ -644,6 +644,30 @@ DEFAULT_ENDPOINT_MIN_WORDS = int(os.getenv("KIOSK_CORE_ENDPOINT_MIN_WORDS", "3")
 # is why total v2v didn't fall as far as the raw firing-rate jump alone would
 # suggest — see docs/performance-improvements-2026-09.md before tuning either
 # constant further.
+#
+# KNOWN RISK (2026-10, measured on the 88-turn scripted sweep that review
+# item 15 added — the validation above only ever ran 4-10 turns from a single
+# conversation, which was not enough to surface this): single-confirmation
+# mode commits turns mid-utterance on a large fraction of turns. Measured
+# early-commit rate (turn committed before the customer stopped speaking, as
+# reported by the fixture benchmark's clip-anchored early_commit_count):
+#
+#   flush 0.30s, stable 0    64%   <- what compose/.env.example shipped
+#   flush 0.50s, stable 0    55%   <- restoring the documented flush floor
+#   flush 0.30s, stable 0.2   9%
+#
+# The flush floor matters for transcript quality but is NOT the dominant
+# factor here; this constant is. A fixed silence threshold cannot tell a
+# mid-sentence pause from the end of a turn, whereas the stability window
+# detects it directly: when more speech is still arriving, the transcript
+# keeps changing and the window resets. That is why 0.2 outperforms a longer
+# timer, and it costs ~650ms of voice-to-voice p50.
+#
+# Residual risk at any setting: a customer who hesitates for longer than the
+# window mid-order ("Um, I think I want... the Spicy Chicken Crunch Burger")
+# still has the turn committed on the fragment. That needs a semantic
+# completeness signal rather than a timer. The fixture benchmark reports
+# early_commit_count so this rate is tracked rather than assumed to be zero.
 DEFAULT_ENDPOINT_STABLE_SECONDS = float(os.getenv("KIOSK_CORE_ENDPOINT_STABLE_SECONDS", "0"))
 DEFAULT_MAX_SESSION_SECONDS = float(os.getenv("KIOSK_CORE_MAX_SESSION_SECONDS", "20.0"))
 DEFAULT_SILENCE_THRESHOLD = int(os.getenv("KIOSK_CORE_SILENCE_THRESHOLD", "900"))

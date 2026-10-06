@@ -784,16 +784,25 @@ services:
       # container (only referenced in a comment above) — this compose file
       # uses an explicit environment: allowlist, not a blanket .env
       # passthrough, so every KIOSK_CORE_* override needs its own line here
-      # regardless of what .env sets. Lowered from the 0.50s code default:
-      # in streaming sessions the endpoint-completeness shortcut fires at
-      # ~0.35-0.40s (ENDPOINT_SHORT_SECONDS + ENDPOINT_STABLE_SECONDS),
-      # before the 0.50s adaptive-pause real commit ever got a chance to
-      # run — so the real, diarized commit never fired mid-utterance and
-      # the mandatory final-chunk flush had to transcribe the WHOLE
-      # utterance from scratch every turn (the dominant cost in
-      # WallTimes.final_flush_wait_ms, observed 250-600ms). Set below the
-      # shortcut's firing point so the real commit wins the race instead.
-      KIOSK_CORE_ADAPTIVE_FLUSH_PAUSE_SECONDS: ${KIOSK_CORE_ADAPTIVE_FLUSH_PAUSE_SECONDS:-0.30}
+      # regardless of what .env sets.
+      #
+      # Must not drop below the 0.50s floor that config.py documents. This
+      # shipped 0.30s to make the adaptive-pause real commit win the race
+      # against the endpoint-completeness shortcut (saving 250-600ms of
+      # final_flush_wait_ms), but 0.30s is the value config.py's own
+      # measurements single out as the original source of mid-word flushes:
+      # the chunk is cleared between "chicken" and "burger", so the tail has
+      # no sentence context and Whisper hallucinates or truncates it. 0.40s
+      # reproduced the same class of failure; 0.50s is the validated floor
+      # for this ASR model and hardware.
+      #
+      # Measured on the 88-turn sweep, restoring 0.50s fixed exactly that
+      # class of failure — a turn that had been transcribed "Wait, actually."
+      # came back as the full "Wait, actually. Can you make that the double
+      # chicken tower instead?" — and cut voice-to-voice p95 from 5618ms to
+      # 5417ms. It is not on its own a fix for turns committing early (64% ->
+      # 55%); see KIOSK_CORE_ENDPOINT_STABLE_SECONDS in config.py for that.
+      KIOSK_CORE_ADAPTIVE_FLUSH_PAUSE_SECONDS: ${KIOSK_CORE_ADAPTIVE_FLUSH_PAUSE_SECONDS:-0.50}
       # Tier 2 roadmap item #4 (cumulative-snapshot ASR), adapted: skip the
       # final tail-chunk ASR call when it holds no unflushed speech (pure
       # trailing silence — the adaptive-pause flush already sent every real
