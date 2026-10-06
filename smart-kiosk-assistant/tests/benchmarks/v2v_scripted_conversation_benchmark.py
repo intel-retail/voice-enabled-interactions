@@ -212,6 +212,16 @@ SCRIPTS: dict[str, list[str]] = {
     ],
 }
 
+# --script value that sweeps every scenario in SCRIPTS in one pass.
+ALL_SCRIPTS = "all"
+
+# Repetitions of the whole script. This used to be 3 here, 1 in the Makefile
+# and 12 in the performance-tools orchestrator -- three different answers to
+# "how many turns does `make benchmark` actually measure?". All three now say
+# 8. With --script all (11 turns per pass) that is 88 measured turns, enough
+# for a median and a p95 that is not simply the single slowest turn.
+DEFAULT_RUNS = 8
+
 DEFAULT_LEAD_PAD_SECONDS = 0.3
 DEFAULT_TRAIL_PAD_SECONDS = 2.5
 
@@ -285,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--script",
-        choices=sorted(SCRIPTS),
+        choices=sorted(SCRIPTS) + [ALL_SCRIPTS],
         default=None,
         help=(
             "Legacy named scripted conversation to replay (hardcoded in this file). "
@@ -304,7 +314,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--list-scripts", action="store_true", help="Print available scripts and exit")
     parser.add_argument("--label", default=None, help="Name for this run, used in the result filename")
-    parser.add_argument("--runs", type=int, default=3, help="Repetitions of the whole script")
+    parser.add_argument(
+        "--runs",
+        type=int,
+        default=DEFAULT_RUNS,
+        help=f"Repetitions of the whole script (default: {DEFAULT_RUNS})",
+    )
     parser.add_argument("--realtime-factor", type=float, default=1.0, help="Playback speed (1.0 = real time)")
     parser.add_argument(
         "--push-chunk-seconds",
@@ -374,7 +389,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.script:
         script_name = args.script
-        lines = SCRIPTS[args.script]
+        if args.script == ALL_SCRIPTS:
+            # One pass over every scenario: single item, multi-item with an
+            # addition, a hesitant self-correcting customer, and a full
+            # price-question + upsell + confirm journey. The reviewer's point
+            # is that a p95 over one short script is just its slowest turn;
+            # sweeping all four gives a varied turn mix per run, so a given
+            # --runs count buys proportionally more distinct customer
+            # behaviour rather than the same line repeated.
+            lines = [line for name in SCRIPTS for line in SCRIPTS[name]]
+        else:
+            lines = SCRIPTS[args.script]
     else:
         script_name = args.conversation_file.stem
         try:

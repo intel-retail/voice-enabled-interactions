@@ -717,14 +717,20 @@ build-benchmark:
 # itself), so do NOT run this against an already-running stack unless you also
 # pass V2V_ARGS="--skip_stack".
 #
-# V2V_SCRIPT is empty by default: with no --script, the orchestrator's child
-# script (tests/benchmarks/v2v_scripted_conversation_benchmark.py) reads its
-# own Sample_data/conversation.jsonl -- edit that one file to change the
-# scripted conversation without touching this Makefile or the submodule. Set
-# V2V_SCRIPT=order-simple (or order-multi/order-drift/order-upsell) to opt
-# back into one of the legacy hardcoded named conversations instead.
-V2V_SCRIPT      ?=
-V2V_RUNS        ?= 1
+# V2V_SCRIPT defaults to "all": one pass over every scenario in
+# tests/benchmarks/v2v_scripted_conversation_benchmark.py's SCRIPTS -- single
+# item, multi-item with an addition, a hesitant self-correcting customer, and
+# a price-question + upsell + confirm journey (11 turns). At V2V_RUNS=8 that
+# is 88 measured turns, which is what makes the reported p95 mean something:
+# the previous default (one 4-line conversation, V2V_RUNS=1) gave four turns,
+# so "p95" was just the slowest of the four.
+#
+# Set V2V_SCRIPT= (empty) to fall back to Sample_data/conversation.jsonl --
+# edit that one file to script a custom conversation without touching this
+# Makefile or the submodule. Set V2V_SCRIPT=order-simple (or order-multi/
+# order-drift/order-upsell) to run a single named scenario.
+V2V_SCRIPT      ?= all
+V2V_RUNS        ?= 8
 V2V_WARMUP_RUNS ?= 1
 V2V_LABEL       ?= v2v-perf-tools
 V2V_ARGS        ?=
