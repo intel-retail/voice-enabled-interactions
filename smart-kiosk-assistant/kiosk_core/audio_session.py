@@ -881,10 +881,23 @@ class BaseAudioSession:
         self._preroll_frames: deque[np.ndarray] = deque(maxlen=preroll_frames)
         self._session_output_dir = Path(__file__).resolve().parent.parent / "generated_audio" / self.session_id
 
-        # Silero VAD (optional, feature-flagged — see config.KIOSK_CORE_SILERO_VAD_ENABLED).
-        # Only constructed when enabled: it loads an onnxruntime session, which
-        # is unnecessary overhead for the default RMS-VAD path.
+        self._init_vad_backend()
+
+    def _init_vad_backend(self) -> None:
+        """Select the voice-activity detector and record which one ran.
+
+        Silero is the default but falls back to the rate-agnostic RMS VAD
+        whenever the ONNX model or onnxruntime is unavailable, or the
+        session's sample rate is one Silero does not support. That fallback
+        changes endpointing behaviour, so the choice is both logged and
+        carried into the turn trace as ``vad_backend``.
+
+        Sets ``self._silero_vad`` and ``self._vad_backend``.
+        """
+        # Only constructed when enabled: it loads an onnxruntime session,
+        # which is unnecessary overhead for the RMS-VAD path.
         self._silero_vad = None
+        self._vad_backend: str = "rms"
         if config.KIOSK_CORE_SILERO_VAD_ENABLED:
             try:
                 from kiosk_core.silero_vad import SileroVAD
@@ -894,6 +907,7 @@ class BaseAudioSession:
                     sample_rate=self.request.sample_rate,
                     intra_op_threads=config.DEFAULT_SILERO_VAD_INTRA_OP_THREADS,
                 )
+                self._vad_backend = "silero"
             except ValueError as exc:
                 # Expected, not exceptional: the session's sample rate isn't
                 # one Silero supports (e.g. 24kHz browser/Kokoro audio). Log
@@ -904,6 +918,7 @@ class BaseAudioSession:
                     exc,
                 )
                 self._silero_vad = None
+                self._vad_backend = "rms"
             except Exception:
                 # Fail open: fall back to the RMS VAD rather than breaking the
                 # session if the model file/onnxruntime isn't available.
@@ -912,6 +927,14 @@ class BaseAudioSession:
                     self.session_id,
                 )
                 self._silero_vad = None
+                self._vad_backend = "rms"
+        # Always state the detector that will actually run. The fallbacks
+        # above are logged where they happen, but a run that was never going
+        # to use Silero (flag off) looked identical in the logs to one that
+        # fell back to RMS because the model file was missing.
+        logger.info(
+            "session=%s | VAD backend: %s", self.session_id, self._vad_backend
+        )
 
     def start(self) -> None:
         with self._lock:
@@ -2052,6 +2075,7 @@ class BaseAudioSession:
                 playback_to_answer_audio_ms=playback_to_answer_audio_ms,
                 playback_to_endpoint_decision_ms=playback_to_endpoint_decision_ms,
                 endpoint_shortcut_fired=self._endpoint_shortcut_fired,
+                vad_backend=self._vad_backend,
             ),
             asr=AsrSpan(
                 ms=asr_ms,

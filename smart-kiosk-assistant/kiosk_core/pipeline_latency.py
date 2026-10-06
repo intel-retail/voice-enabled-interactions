@@ -201,6 +201,14 @@ class WallTimes:
     # stable/complete. None: neither silence-based commit path ran this turn
     # (e.g. stopped_by_api, max_duration_reached).
     endpoint_shortcut_fired: bool | None = None
+    # Which voice-activity detector actually produced this turn's speech
+    # framing: "silero" or "rms". Silero is enabled by default but falls back
+    # to RMS whenever the ONNX model file or onnxruntime is unavailable, or
+    # the session's sample rate is one Silero does not support. That fallback
+    # changes endpointing behaviour, so a turn trace that does not name the
+    # detector cannot be compared against another run — CI's Tier 1 tests, for
+    # instance, run before the model download and therefore exercise RMS.
+    vad_backend: str | None = None
 
 
 @dataclass
