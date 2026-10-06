@@ -9,6 +9,41 @@ from Docker Hub without rebuilding, see
 
 Verify the [System Requirements](./system-requirements.md).
 
+Beyond Docker, the build and benchmark flows need these host packages:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git git-lfs python3-venv ffmpeg
+```
+
+- `python3-venv` — `make benchmark` creates a virtualenv for the
+  performance-tools orchestrator. On Debian/Ubuntu the `venv` module is
+  packaged separately from `python3`, and without it the benchmark fails
+  with `ensurepip is not available`.
+- `ffmpeg` — used to transcode and resample benchmark/replay audio to the
+  16 kHz mono PCM the analyzer expects.
+
+## Pinned Upstream Sources
+
+This release builds against **specific commits** of two other
+repositories. Both are required; neither is on its project's `main`
+branch yet.
+
+| Repository | Pinned commit | Why |
+| --- | --- | --- |
+| [`intel-retail/performance-tools`](https://github.com/intel-retail/performance-tools) | `1629807` | Provides `benchmark_smart_kiosk_v2v.py`, the voice-to-voice benchmark orchestrator. Tracked as a Git **submodule**, so the commit is recorded in this repository — you do not pick it manually. |
+| [`open-edge-platform/edge-ai-libraries`](https://github.com/open-edge-platform/edge-ai-libraries) | see below | Supplies `audio-analyzer` and `text-to-speech`. The settings this release relies on (`TEXT_TO_SPEECH_WORKERS`, the ASR preview pool, and forwarding an empty ASR language to English-only checkpoints) are not yet on upstream `main`. |
+
+Building `edge-ai-libraries` from upstream `main` **will fail**:
+`text-to-speech` stops with `models.tts.runtime must be 'openvino' or
+'pytorch'`, and `audio-analyzer` fails to export
+`distil-whisper/distil-small.en`. Use the pinned source below until the
+upstream change lands.
+
+> **Note for reviewers / early adopters:** once the upstream pull request
+> is merged, replace the clone below with upstream `main` and delete this
+> section.
+
 ## Clone and Prepare
 
 The kiosk compose builds `audio-analyzer` and `text-to-speech` from the
@@ -30,14 +65,35 @@ so the two repositories must sit side by side:
 From whatever parent directory you keep the source in, run:
 
 ```bash
-git clone -b main --single-branch https://github.com/intel-retail/voice-enabled-interactions.git
+# --recurse-submodules checks out performance-tools at the commit this
+# repository pins. Without it the submodule directory is empty and
+# `make benchmark` cannot find the benchmark orchestrator.
+git clone --recurse-submodules -b main --single-branch \
+  https://github.com/intel-retail/voice-enabled-interactions.git
 cd voice-enabled-interactions/
-git clone -b main --depth 1 --filter=blob:none --sparse \
-  https://github.com/open-edge-platform/edge-ai-libraries.git
+
+# Already cloned without --recurse-submodules? Run this instead:
+#   make -C smart-kiosk-assistant update-submodules
+
+git clone --filter=blob:none --sparse \
+  https://github.com/sainijit/edge-ai-libraries.git
 git -C edge-ai-libraries sparse-checkout set \
   microservices/audio-analyzer microservices/text-to-speech
+git -C edge-ai-libraries checkout fc89569
 
 cd smart-kiosk-assistant/
+```
+
+`fc89569` is the pinned `edge-ai-libraries` commit described in
+[Pinned Upstream Sources](#pinned-upstream-sources). Note the clone
+deliberately omits `--depth 1`: a shallow clone cannot check out an
+arbitrary commit.
+
+Confirm both pins before building:
+
+```bash
+git -C ../performance-tools rev-parse --short HEAD   # expect 1629807
+git -C ../edge-ai-libraries rev-parse --short HEAD   # expect fc89569
 ```
 
 The sparse checkout pulls only the two microservices the kiosk build
@@ -55,6 +111,18 @@ missing, so create it before building:
 ```bash
 make init-env        # copies .env.example → .env
 ```
+
+`.env.example` ships `REGISTRY=true`, which makes `make build` **pull the
+released images instead of building your source**. That is the right
+default for the pull flow, but it is not what you want here. For a
+build-from-source run, either pass the override each time:
+
+```bash
+make build REGISTRY=false
+```
+
+or edit `.env` once and set `REGISTRY=false`. `docker compose build`
+(used later on this page) is unaffected — it always builds.
 
 ## Download the LLM Model for OVMS
 

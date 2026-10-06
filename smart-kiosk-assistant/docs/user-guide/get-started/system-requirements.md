@@ -33,6 +33,35 @@
   Verify with `ls /dev/dri/renderD*`. If the packages are not found,
   follow the [Intel GPU driver guide](https://dgpu-docs.intel.com).
 
+## Host Packages
+
+The pull flow needs only Docker. Building from source and running
+`make benchmark` additionally need:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git git-lfs python3-venv ffmpeg
+```
+
+| Package | Needed for | Symptom if missing |
+| --- | --- | --- |
+| `git`, `git-lfs` | Cloning this repo and the pinned upstream sources | Submodule or model assets fail to check out |
+| `python3-venv` | `make benchmark` builds a virtualenv for the benchmark orchestrator | `ensurepip is not available` |
+| `ffmpeg` | Transcoding benchmark/replay audio to 16 kHz mono PCM | Benchmark audio fixtures fail to load |
+
+## Results Directory Permissions
+
+`kiosk-core` runs in-container as uid `1000` and writes benchmark output
+to the bind-mounted `results/` directory. If your host user is not uid
+`1000`, the container cannot write there, the benchmark reports zero
+transactions even though every turn succeeded, and nothing is logged
+about it. Check and fix with:
+
+```bash
+id -u                      # if this is not 1000
+mkdir -p results && chmod 777 results
+```
+
 ## Network
 
 - Outbound internet access on first run to download model assets from

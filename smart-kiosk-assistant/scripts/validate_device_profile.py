@@ -299,7 +299,21 @@ def validate(env: dict[str, str], check_hardware: bool = True) -> Report:
     ):
         base = value.split(".", 1)[0]
         if base not in VALID_DEVICES:
-            rep.error("device-string", f"{label}={value} is not one of CPU/GPU/NPU")
+            # A .env file is not a shell: docker-compose does not expand
+            # ${OTHER_VAR} on the right-hand side of a .env assignment, it
+            # passes the literal text through. Call that out explicitly --
+            # the generic message below sent a reviewer hunting for a bad
+            # device name when the real problem was the syntax.
+            if "${" in value:
+                rep.error(
+                    "device-string",
+                    f"{label}={value} contains an unexpanded shell "
+                    "substitution. A .env file is not a shell -- write a "
+                    "literal CPU/GPU/NPU, or leave the variable unset to "
+                    "inherit the fallback defined in docker-compose.yml.",
+                )
+            else:
+                rep.error("device-string", f"{label}={value} is not one of CPU/GPU/NPU")
 
     # -- ASR --------------------------------------------------------------
     allowed = ASR_PROVIDER_DEVICES.get(asr_provider)

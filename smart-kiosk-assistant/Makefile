@@ -462,7 +462,13 @@ show-config: ## Print resolved configuration
 
 build: check-env ## Pull images (default with .env); REGISTRY=false builds locally
 	@echo "$(BLUE)Preparing Docker images...$(NC)"
-	@if [ "$(REGISTRY)" = "false" ] || [ "$(REGISTRY)" = "FALSE" ]; then \
+	@# set -e: without it this whole recipe is one `cmd; cmd; cmd` shell line
+	@# whose exit status is that of the LAST command -- the tolerant
+	@# `pull metrics-collector || echo ...` below, which always succeeds. A
+	@# failed audio-analyzer or text-to-speech build was therefore swallowed
+	@# and the recipe still printed "✓ Images ready" and exited 0.
+	@set -e; \
+	if [ "$(REGISTRY)" = "false" ] || [ "$(REGISTRY)" = "FALSE" ]; then \
 		echo "$(YELLOW)  REGISTRY=false → Building local services from source$(NC)"; \
 		REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) $(_QUEUE_PROFILE) build $(LOCAL_ONLY_SERVICES) $(_IDENTITY_SVC); \
 		echo "$(YELLOW)  Building audio-analyzer locally from ../edge-ai-libraries/microservices/audio-analyzer...$(NC)"; \
@@ -664,15 +670,26 @@ clean-metrics: ## Delete collected OS metrics dumps (metrics/)
 	@mkdir -p $(METRICS_DIR)
 
 
-update-submodule update-submodules: ## Initialize and update the performance-tools submodule
+update-submodule update-submodules: ## Check out the pinned performance-tools submodule commit
 	@echo "$(BLUE)Cloning/updating performance tool repositories...$(NC)"
 	@if ! git -C .. ls-files --error-unmatch performance-tools >/dev/null 2>&1; then \
 		echo "$(RED)performance-tools is not registered as a submodule in the Git root.$(NC)"; \
 		echo "  Register it once with: git -C .. submodule add --branch main https://github.com/intel-retail/performance-tools.git performance-tools"; \
 		exit 1; \
 	fi
-	@git -C .. submodule update --init --recursive --remote performance-tools
-	@echo "$(GREEN)Submodules updated successfully.$(NC)"
+	@# Deliberately NOT --remote. --remote ignores the gitlink recorded in
+	@# this repository and fast-forwards the submodule to the tip of its
+	@# configured branch (main), which does NOT contain
+	@# benchmark_smart_kiosk_v2v.py -- so running this target used to be the
+	@# very thing that made `make benchmark` fail with "orchestrator not
+	@# found", which then told the user to run this target again. Without
+	@# --remote the pinned commit recorded here is checked out, which is the
+	@# only commit this stack is known to work against.
+	@git -C .. submodule update --init --recursive performance-tools
+	@echo "$(GREEN)Submodules updated to the pinned commit.$(NC)"
+	@echo "  performance-tools @ $$(git -C ../performance-tools rev-parse --short HEAD)"
+	@echo "  To intentionally move the pin, check out the new commit inside"
+	@echo "  ../performance-tools and commit the updated gitlink here."
 
 fetch-benchmark:
 	@echo "$(BLUE)Fetching benchmark image from registry...$(NC)"
@@ -722,7 +739,16 @@ _V2V_PERF_TOOLS  = $(_PERF_TOOLS_DIR)
 
 benchmark: check-env validate-profile ## Run the voice-to-voice latency benchmark via performance-tools
 	@if [ ! -f "$(_V2V_PERF_TOOLS)/benchmark_smart_kiosk_v2v.py" ]; then \
-		echo "$(RED)benchmark orchestrator not found at $(_V2V_PERF_TOOLS) -- run 'make update-submodules'.$(NC)"; \
+		echo "$(RED)benchmark orchestrator not found at $(_V2V_PERF_TOOLS)$(NC)"; \
+		if [ ! -d "../performance-tools/.git" ] && [ ! -f "../performance-tools/.git" ]; then \
+			echo "  The performance-tools submodule is not checked out."; \
+			echo "  Clone with submodules:  git clone --recurse-submodules <repo>"; \
+			echo "  Or, in an existing clone: make update-submodules"; \
+		else \
+			echo "  The submodule is checked out at $$(git -C ../performance-tools rev-parse --short HEAD),"; \
+			echo "  which does not contain benchmark_smart_kiosk_v2v.py."; \
+			echo "  Restore the commit pinned by this repository with: make update-submodules"; \
+		fi; \
 		exit 1; \
 	fi
 	@$(MAKE) --no-print-directory _write-provenance
