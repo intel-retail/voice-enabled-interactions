@@ -1,8 +1,43 @@
+import logging
+import threading
 from pathlib import Path
 
 import httpx
 
 from kiosk_core import config
+
+logger = logging.getLogger(__name__)
+
+# Substrings audio-analyzer uses when an English-only Whisper checkpoint is
+# handed a language token. The ASR model lives in audio-analyzer's config, not
+# ours, so kiosk-core cannot know ahead of time whether the deployed
+# checkpoint is multilingual -- it can only find out by being told.
+_NOT_MULTILINGUAL_MARKERS = (
+    "not multilingual",
+    "cannot specify 'language'",
+    'cannot specify "language"',
+)
+
+# Latched once the deployed analyzer has rejected a language token, so only
+# the FIRST request of the process pays the failed round-trip rather than
+# every chunk of every session. Deliberately module-level: this is a property
+# of the upstream model, shared by every session, not of one AnalyzerClient.
+_language_unsupported = threading.Event()
+
+
+def _rejects_language(response: httpx.Response) -> bool:
+    """True when this error is audio-analyzer refusing a language token.
+
+    Any other 5xx (model crash, OOM, timeout) must NOT be swallowed into a
+    silent retry, so the match is on the specific upstream message.
+    """
+    if response.status_code < 400:
+        return False
+    try:
+        body = response.text.lower()
+    except Exception:  # noqa: BLE001 - a body we cannot read is not this error
+        return False
+    return any(marker in body for marker in _NOT_MULTILINGUAL_MARKERS)
 
 
 class AnalyzerClient:
@@ -65,6 +100,15 @@ class AnalyzerClient:
         # down to None — this is required to genuinely leave the language
         # unset, e.g. for English-only ASR checkpoints
         # (distil-whisper/distil-small.en) that reject any language token.
+        #
+        # _language_unsupported latches after the deployed analyzer has told
+        # us its checkpoint is English-only, so every subsequent request
+        # omits the token instead of re-failing. Without this, the shipped
+        # defaults (KIOSK_CORE_ASR_LANGUAGE=en against the English-only
+        # distil-small.en) returned HTTP 500 on every single turn and the
+        # whole stack transcribed nothing.
+        if _language_unsupported.is_set():
+            language = None
         data["language"] = language if language else " "
         # Always send the diarization flag explicitly, in both directions. The
         # analyzer's endpoint declares `diarization: bool | None = Form(None)`
@@ -88,6 +132,27 @@ class AnalyzerClient:
                 files={"file": (path.name, audio_file, "audio/wav")},
                 data=data,
             )
+        # The deployed checkpoint is English-only and rejected our language
+        # token. Latch that fact and retry this chunk once without it, rather
+        # than losing the turn's audio to a 500 the operator cannot see.
+        if data["language"] != " " and _rejects_language(response):
+            if not _language_unsupported.is_set():
+                _language_unsupported.set()
+                logger.warning(
+                    "audio-analyzer rejected language=%r (English-only ASR "
+                    "checkpoint); retrying without a language token and "
+                    "omitting it for the rest of this process. Set "
+                    "KIOSK_CORE_ASR_LANGUAGE='' to silence this, or point "
+                    "ASR_MODEL at a multilingual checkpoint.",
+                    data["language"],
+                )
+            data["language"] = " "
+            with path.open("rb") as audio_file:
+                response = self._client.post(
+                    self.analyzer_url,
+                    files={"file": (path.name, audio_file, "audio/wav")},
+                    data=data,
+                )
         response.raise_for_status()
         payload = response.json()
         assigned_session = response.headers.get("X-Session-ID")

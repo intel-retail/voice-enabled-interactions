@@ -270,9 +270,13 @@ services:
       # NPU node is mapped — OpenVINO then reports CPU/GPU only.
       ZE_ENABLE_ALT_DRIVERS: libze_intel_npu.so
       # Whisper mis-detects language on short kiosk chunks and replies in
-      # Spanish; forcing en cut WER 11.0% -> 7.0% on every device. The language
-      # is a per-request parameter, so it is set by kiosk-core
-      # (KIOSK_CORE_ASR_LANGUAGE), not by audio-analyzer config.
+      # Spanish; forcing en cut WER 11.0% -> 7.0% on every device. The
+      # language is a per-request parameter, so it is set by kiosk-core
+      # (KIOSK_CORE_ASR_LANGUAGE, see the kiosk-core service below), not by
+      # audio-analyzer config. NOTE: it must be left EMPTY whenever the ASR
+      # checkpoint is English-only, which the shipped default
+      # (distil-whisper/distil-small.en) is -- such models reject the <|en|>
+      # token outright. See KIOSK_CORE_ASR_LANGUAGE for the full note.
       # Point HF cache under the same parent as ~/.cache/whisper so a single
       # ./.cache mount persists every model cache the service uses
       # (huggingface, openai-whisper, torch hub, etc.).
@@ -714,6 +718,24 @@ services:
       KIOSK_CORE_TTS_URL:      http://text-to-speech:8011/v1/audio/speech
       # "Ryan" was the SpeechT5/Qwen-era default (US English male, bright and
       # projecting). The engine has since moved to Kokoro (see
+      # ASR language hint sent with every file-path transcription request.
+      #
+      # Defaults to EMPTY, deliberately. The default ASR checkpoint is
+      # distil-whisper/distil-small.en (see ASR_MODEL above), which is
+      # English-only: audio-analyzer turns any language value into an <|en|>
+      # token, and an English-only Whisper rejects it with
+      # "Cannot specify 'language' for not multilingual model" -> HTTP 500
+      # and an empty transcript on every single turn. config.py's own
+      # default is "en" (correct for a multilingual checkpoint run outside
+      # Docker), so this line both overrides it to match the shipped model
+      # AND makes the variable settable from .env at all -- compose uses an
+      # explicit environment: allowlist, so without this line
+      # KIOSK_CORE_ASR_LANGUAGE= in .env had no effect whatsoever.
+      #
+      # Uses ${VAR-} (no colon) so an explicitly-empty value in .env is
+      # passed through as empty rather than falling back to a default.
+      # Set to "en" only alongside a multilingual ASR_MODEL.
+      KIOSK_CORE_ASR_LANGUAGE: ${KIOSK_CORE_ASR_LANGUAGE-}
       # configs/text-to-speech/config.yaml), which has no "Ryan" voice — this
       # override was left stale after that migration and made EVERY TTS
       # request 400 (silent replies) until this fix. am_michael is Kokoro's
