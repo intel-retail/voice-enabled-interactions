@@ -43,6 +43,9 @@ _opener_cache: dict[tuple[str, str, str | None, str | None, str | None], Path | 
 # Monotonic timestamp of the last failed synthesis per cache key, so a failure
 # can expire instead of disabling the opener for the life of the process.
 _opener_failed_at: dict[tuple[str, str, str | None, str | None, str | None], float] = {}
+# Set once a vlm_metrics write has failed, so the warning is emitted a single
+# time per process rather than on every turn of a benchmark run.
+_vlm_metrics_failure_logged = False
 
 
 def _render_opener(
@@ -2258,7 +2261,21 @@ class BaseAudioSession:
                 end_epoch_ms, config.VLM_METRICS_USECASE_ENV_VAR, unique_id=self.session_id
             )
         except Exception:  # noqa: BLE001 - metrics logging must never break a live turn
-            logger.debug("[PIPELINE] vlm_metrics_logger emit failed", exc_info=True)
+            # Warn once per process, then fall back to debug. This stays
+            # best-effort -- it must never break a turn -- but a run whose
+            # metrics are all being dropped should say so at least once,
+            # instead of reporting zero transactions with nothing in the log.
+            global _vlm_metrics_failure_logged
+            if not _vlm_metrics_failure_logged:
+                _vlm_metrics_failure_logged = True
+                logger.warning(
+                    "[PIPELINE] vlm_metrics_logger emit failed; benchmark metrics "
+                    "for this run will be incomplete (results dir=%s)",
+                    config.VLM_METRICS_RESULTS_DIR,
+                    exc_info=True,
+                )
+            else:
+                logger.debug("[PIPELINE] vlm_metrics_logger emit failed", exc_info=True)
 
     @staticmethod
     def _split_first_phrase(sentence: str) -> list[str]:

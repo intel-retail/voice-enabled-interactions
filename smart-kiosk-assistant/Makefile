@@ -274,6 +274,19 @@ setup-dirs: ## Create required runtime directories
 	@# exist with the host user's ownership before `up`, otherwise Docker
 	@# auto-creates it as root and kiosk-core's user:"1000:1000" can't write.
 	@mkdir -p models storage conversations $(METRICS_DIR) $(RESULTS_DIR)
+	@# ...but ownership alone is not enough. The containers run as a fixed
+	@# uid 1000, while the host user who cloned the repo may be any uid. When
+	@# they differ the metrics writes fail silently and the benchmark reports
+	@# zero transactions even though every turn succeeded. Widen the mode so
+	@# uid 1000 can write regardless of who owns the directory.
+	@for d in $(RESULTS_DIR) $(METRICS_DIR); do \
+		owner=$$(stat -c '%u' "$$d" 2>/dev/null || echo 1000); \
+		if [ "$$owner" != "1000" ]; then \
+			chmod a+rwX "$$d" 2>/dev/null \
+				&& echo "  $(YELLOW)$$d is owned by uid $$owner, containers run as 1000 — widened permissions$(NC)" \
+				|| echo "  $(RED)✗ $$d is owned by uid $$owner and could not be made writable for uid 1000; benchmark metrics will be lost$(NC)"; \
+		fi; \
+	done
 	@echo "$(GREEN)✓ Directories ready$(NC)"
 
 setup-models: ## Download the OVMS LLM model (Qwen3-4B) via setup_models.sh

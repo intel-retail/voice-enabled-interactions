@@ -79,6 +79,19 @@ async def lifespan(app: FastAPI):
         else:
             logger.info("[STARTUP] Identity feature disabled (KIOSK_CORE_IDENTITY_ENABLED=false)")
 
+        # ── Benchmark metrics pre-flight ─────────────────────────────────────
+        # Checked once, loudly. The per-turn metrics write is best-effort by
+        # design, so an unwritable results/ bind mount used to produce a run
+        # that looked healthy but reported zero transactions.
+        if cfg.VLM_METRICS_ENABLED:
+            problem = cfg.check_vlm_metrics_results_dir()
+            if problem:
+                logger.error("[STARTUP] Benchmark metrics will not be recorded: %s", problem)
+            else:
+                logger.info(
+                    "[STARTUP] Benchmark metrics -> %s ✓", cfg.VLM_METRICS_RESULTS_DIR
+                )
+
         yield  # application runs
 
 

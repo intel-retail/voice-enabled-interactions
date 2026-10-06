@@ -1112,3 +1112,43 @@ VLM_METRICS_RESULTS_DIR = os.getenv("CONTAINER_RESULTS_PATH", "./results")
 # previously synthesized by the harness land under the same "application"
 # value and consolidate identically.
 VLM_METRICS_USECASE_ENV_VAR = "USECASE_V2V"
+
+
+def check_vlm_metrics_results_dir() -> str | None:
+    """Return a human-readable reason the results directory is unusable.
+
+    kiosk-core runs as uid 1000 inside the container while ``results/`` is a
+    host bind mount owned by whoever cloned the repo. When those differ the
+    metrics writes fail, and because they are deliberately best-effort the
+    benchmark then reports zero transactions even though every turn
+    succeeded. Checking once at startup turns a silent, confusing result into
+    an actionable message before the run begins.
+
+    Returns:
+        None when the directory is writable, otherwise a message naming the
+        path, the uid in use and the fix.
+    """
+    import os as _os
+    import tempfile
+    from pathlib import Path as _Path
+
+    path = _Path(VLM_METRICS_RESULTS_DIR)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return (
+            f"results directory {path} could not be created ({exc}); "
+            f"process uid is {_os.getuid()}"
+        )
+    try:
+        with tempfile.NamedTemporaryFile(dir=path):
+            pass
+    except OSError as exc:
+        return (
+            f"results directory {path} is not writable ({exc}); process uid "
+            f"is {_os.getuid()}. Benchmark metrics will be silently lost. "
+            f"Fix on the host with: chmod a+rwX <repo>/results (make setup-dirs "
+            f"does this automatically)."
+        )
+    return None
+
