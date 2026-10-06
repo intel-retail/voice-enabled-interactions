@@ -873,6 +873,11 @@ class BaseAudioSession:
         # Without this a disabled-by-failure opener was invisible: the turn
         # simply had no segment 0 and nothing said why.
         self._opener_failed: bool = False
+        # Whether sentence 1 came out of the speculative/opener TTS cache
+        # rather than the synthesiser. Without this a tts.ttfb_ms of ~1 ms is
+        # indistinguishable from a broken metric: it is real -- the audio was
+        # already on disk -- but it is not a measurement of synthesis.
+        self._tts_first_segment_cached: bool = False
         # Trailing silence the endpoint waited through before committing the
         # turn. Needed to report voice-to-voice latency, because every other
         # timestamp in the trace starts after this wait has already elapsed.
@@ -2190,6 +2195,7 @@ class BaseAudioSession:
                 segments=self._tts_segment_count,
                 overlapped_with_agent=True,
                 ttfb_ms=tts_ttfb_ms,
+                first_segment_cached=self._tts_first_segment_cached,
             ),
         )
         pipeline_store.record(trace)
@@ -2381,6 +2387,10 @@ class BaseAudioSession:
                     if config.DEFAULT_SPECULATIVE_TTS_PRESYNTH_ENABLED
                     else None
                 )
+                if sentence_index == 1:
+                    self._tts_first_segment_cached = bool(
+                        opener_path or (cached_path and Path(cached_path).exists())
+                    )
                 if opener_path:
                     # A previous turn (possibly in a different session) already
                     # synthesised this exact short opener in this exact voice.

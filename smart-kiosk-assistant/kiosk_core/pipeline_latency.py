@@ -109,6 +109,12 @@ class TtsSpan:
     # agent.llm.ttft_ms; ``ms`` above is the whole synthesis drain, which
     # keeps running long after the customer has started hearing the reply.
     ttfb_ms: float | None = None
+    # True when sentence 1 was served from the speculative/opener TTS cache
+    # instead of being synthesised. ``ttfb_ms`` is then a file copy -- around
+    # a millisecond -- which is a real figure but not a measurement of the
+    # synthesiser. Anything presenting ttfb_ms must say which of the two it
+    # is showing, or the number reads as broken.
+    first_segment_cached: bool = False
 
 
 @dataclass

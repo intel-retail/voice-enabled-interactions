@@ -392,6 +392,11 @@ class TurnResult:
     template_ms: float | None = None
     tts_ms: float | None = None
     tts_ttfb_ms: float | None = None
+    # True when sentence 1 came from the speculative/opener TTS cache, so
+    # tts_ttfb_ms is a file copy rather than synthesis. Reported per turn
+    # because a run where most turns hit the cache has a TTFB figure that
+    # says nothing about the synthesiser.
+    tts_first_segment_cached: bool | None = None
     tts_segments: int | None = None
 
     @property
@@ -479,6 +484,15 @@ def build_summary(turns: list[TurnResult]) -> dict[str, Any]:
     opener_flags = [t.first_audio_was_opener for t in ok]
     summary["first_audio_was_opener_count"] = sum(1 for f_ in opener_flags if f_)
     summary["first_audio_turn_count"] = len(opener_flags)
+    # A TTS TTFB of ~1 ms is a cache hit, not a fast synthesiser. Report how
+    # many turns it applied to so the TTFB percentiles above can be read
+    # correctly instead of looking like a broken metric.
+    cached = [
+        t.tts_first_segment_cached for t in ok
+        if t.tts_first_segment_cached is not None
+    ]
+    summary["tts_first_segment_cached_count"] = sum(1 for f_ in cached if f_)
+    summary["tts_first_segment_turn_count"] = len(cached)
     fired = [t.endpoint_shortcut_fired for t in ok if t.endpoint_shortcut_fired is not None]
     summary["endpoint_shortcut_fired_count"] = sum(1 for f_ in fired if f_)
     summary["endpoint_shortcut_eligible_count"] = len(fired)
@@ -1040,6 +1054,7 @@ def replay_fixture(
     result.template_ms = template.get("ms")
     result.tts_ms = tts.get("ms")
     result.tts_ttfb_ms = tts.get("ttfb_ms")
+    result.tts_first_segment_cached = tts.get("first_segment_cached")
     result.tts_segments = tts.get("segments")
     result.endpoint_shortcut_fired = wall.get("endpoint_shortcut_fired")
 

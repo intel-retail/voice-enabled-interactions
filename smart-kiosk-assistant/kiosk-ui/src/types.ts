@@ -165,6 +165,11 @@ export interface PipelineTtsSpan {
   segments: number;
   overlapped_with_agent: boolean;
   ttfb_ms?: number | null;
+  /**
+   * True when sentence 1 came from the speculative/opener TTS cache. ttfb_ms
+   * is then a file copy, not a measurement of the synthesiser.
+   */
+  first_segment_cached?: boolean;
 }
 
 export interface PipelineTurnTrace {

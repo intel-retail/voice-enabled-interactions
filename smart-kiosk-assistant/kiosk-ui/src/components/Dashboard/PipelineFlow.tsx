@@ -119,6 +119,12 @@ export function PipelineFlow({ kpis, phase }: PipelineFlowProps) {
     tts:       kpis.tts?.device ?? trace?.tts?.device,
   };
 
+  // Sentence 1 can be served from the speculative/opener TTS cache, in which
+  // case ttfb_ms is a file copy of around a millisecond. That is a real
+  // figure, but it is not a measurement of the synthesiser, and a card
+  // reading "0 ms" with no explanation looks like a broken metric.
+  const ttsCached = trace?.tts?.first_segment_cached === true;
+
   const activeStage = activeStageFromPhase(phase);
 
   // Shared-vocabulary "Processing latency" (turn-end decision -> first sound
@@ -250,7 +256,9 @@ export function PipelineFlow({ kpis, phase }: PipelineFlowProps) {
                                      : '')
                                : '')
                        : stage.id === 'tts'
-                         ? 'TTS TTFB (time to first byte) — first sentence handed to synthesiser to audio on disk'
+                         ? (ttsCached
+                             ? 'First sentence was already synthesised (speculative TTS cache), so this is a file copy, not synthesis time'
+                             : 'TTS TTFB (time to first byte) — first sentence handed to synthesiser to audio on disk')
                          : undefined}
               >
                 {/* Device badge top-right */}
@@ -278,6 +286,16 @@ export function PipelineFlow({ kpis, phase }: PipelineFlowProps) {
                 >
                   {latencyLabel(latMs, invoked)}
                 </div>
+
+                {/* A near-zero TTS figure is real but is a cache hit, not
+                    synthesis. Say so on the card itself, not only in the
+                    tooltip -- the number is read far more often than it is
+                    hovered. */}
+                {stage.id === 'tts' && ttsCached && (
+                  <span className="mt-0.5 text-[8px] font-semibold uppercase tracking-wide text-gray-400">
+                    cached
+                  </span>
+                )}
 
                 {/* Active indicator dot */}
                 {isActive && (
