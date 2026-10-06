@@ -1113,6 +1113,21 @@ VLM_METRICS_RESULTS_DIR = os.getenv("CONTAINER_RESULTS_PATH", "./results")
 # value and consolidate identically.
 VLM_METRICS_USECASE_ENV_VAR = "USECASE_V2V"
 
+# The "id" vlm_metrics_logger stamps on every start/end pair. The consolidator
+# groups by "{application}_{id}" and averages each group into its own CSV row,
+# so this identifies the *stream* producing turns, not the individual turn.
+#
+# This used to be the per-turn session_id, which gave consolidated_metrics.csv
+# one row per turn, every one of them reading "Based on 1 total calls" against
+# an opaque UUID -- no average, no percentile, nothing to compare between runs
+# (PR #112 review, item 13). A single stable id collapses those into the one
+# aggregate row the consolidator exists to produce. Per-turn detail is not lost:
+# it lives in the benchmark's own JSON report and in GET /api/v1/pipeline/latest.
+#
+# Override only when several kiosks write into one results directory and their
+# turns need telling apart.
+VLM_METRICS_STREAM_ID = os.getenv("KIOSK_CORE_VLM_METRICS_STREAM_ID", "kiosk-voice")
+
 
 def check_vlm_metrics_results_dir() -> str | None:
     """Return a human-readable reason the results directory is unusable.

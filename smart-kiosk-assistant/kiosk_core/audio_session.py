@@ -2260,11 +2260,19 @@ class BaseAudioSession:
             anchor_epoch_ms = time.time() * 1000
             start_epoch_ms = anchor_epoch_ms - (anchor_mono - t_start_mono) * 1000
             end_epoch_ms = anchor_epoch_ms - (anchor_mono - t_end_mono) * 1000
+            # A stable stream id, NOT self.session_id -- see
+            # config.VLM_METRICS_STREAM_ID. The consolidator averages per
+            # "{application}_{id}" group, so a per-turn id produced one CSV row
+            # per turn and no aggregate at all.
             user_log_start_time(
-                start_epoch_ms, config.VLM_METRICS_USECASE_ENV_VAR, unique_id=self.session_id
+                start_epoch_ms,
+                config.VLM_METRICS_USECASE_ENV_VAR,
+                unique_id=config.VLM_METRICS_STREAM_ID,
             )
             user_log_end_time(
-                end_epoch_ms, config.VLM_METRICS_USECASE_ENV_VAR, unique_id=self.session_id
+                end_epoch_ms,
+                config.VLM_METRICS_USECASE_ENV_VAR,
+                unique_id=config.VLM_METRICS_STREAM_ID,
             )
         except Exception:  # noqa: BLE001 - metrics logging must never break a live turn
             # Warn once per process, then fall back to debug. This stays
