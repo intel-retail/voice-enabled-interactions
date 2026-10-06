@@ -833,9 +833,20 @@ benchmark: check-env validate-profile ## Run the voice-to-voice latency benchmar
 _PERF_TOOLS_VENV = . venv/bin/activate
 
 sync-metrics-into-results: setup-dirs ## Copy OS-level hardware counters from ./metrics into ./results
-	@cp -f $(METRICS_DIR)/cpu_usage.log $(METRICS_DIR)/memory_usage.log $(METRICS_DIR)/npu_usage.csv \
+	@# -p preserves modification times, which trim_metrics_to_window.py below
+	@# uses to anchor each counter file onto the epoch clock -- none of these
+	@# formats records an epoch timestamp, and two of them are written in the
+	@# container's timezone. A plain `cp` would reset the mtimes to now and
+	@# silently destroy that anchor.
+	@cp -pf $(METRICS_DIR)/cpu_usage.log $(METRICS_DIR)/memory_usage.log $(METRICS_DIR)/npu_usage.csv \
 		$(RESULTS_DIR)/ 2>/dev/null || true
-	@cp -f $(METRICS_DIR)/qmassa*-tool-generated.json $(RESULTS_DIR)/ 2>/dev/null || true
+	@cp -pf $(METRICS_DIR)/qmassa*-tool-generated.json $(RESULTS_DIR)/ 2>/dev/null || true
+	@# The collector samples for the whole time the stack is up -- image
+	@# pulls, the health wait, the discarded warmup, teardown -- so averaging
+	@# the raw files describes a mostly-idle stack rather than the measured
+	@# turns. Narrow them to the window the benchmark recorded. A no-op when
+	@# results/measured_window.json is absent, i.e. outside a benchmark run.
+	@python3 scripts/trim_metrics_to_window.py --results-dir $(RESULTS_DIR)
 	@# qmassa rewrites its whole JSON document from scratch on every sample
 	@# rather than appending; a container killed mid-write (or -- observed in
 	@# practice -- CPU/IO contention while `docker compose down` tears down
