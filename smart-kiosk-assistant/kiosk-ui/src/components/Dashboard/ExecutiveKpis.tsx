@@ -97,7 +97,7 @@ export function ExecutiveKpis({ kpis }: ExecutiveKpisProps) {
 
   // Customer's last word -> first sound out of the speaker. Has no legacy
   // global-register fallback (only exists on the per-turn trace).
-  const v2vMs = live ? trace.wall.voice_to_voice_ms : null;
+  const v2vMs = live ? (trace.wall.voice_to_voice_ms ?? null) : null;
   const v2vAnswerMs = live ? (trace.wall.voice_to_voice_answer_ms ?? null) : null;
   const firstAudioWasOpener = live ? trace.wall.first_audio_was_opener : false;
   const asrMs = lats.asr;
