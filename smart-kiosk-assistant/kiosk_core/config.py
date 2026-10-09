@@ -220,7 +220,7 @@ DEFAULT_TTS_SPEECH_NORMALIZE_ENABLED = os.getenv(
 # price, or outcome, otherwise it can contradict the menu/removal/confirm
 # guards that rewrite the real reply when a tool fails.
 DEFAULT_OPENER_ENABLED = os.getenv(
-    "KIOSK_CORE_OPENER_ENABLED", "true"
+    "KIOSK_CORE_OPENER_ENABLED", "false"
 ).lower() not in ("false", "0", "no")
 DEFAULT_OPENER_TEXT = os.getenv("KIOSK_CORE_OPENER_TEXT", "One moment.")
 # Rendered opener cache. Synthesised once per (text, voice, language) and

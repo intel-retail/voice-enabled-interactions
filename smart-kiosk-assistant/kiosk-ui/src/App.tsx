@@ -31,8 +31,8 @@ export default function App() {
     error: voiceError,
     playbackState,
     conversationMode,
-    startConversation,
-    endConversation,
+    start,
+    stop,
     interruptSpeaking,
     reset: resetVoice,
   } = useVoiceSession({ deviceId: selectedId, enabled: !ingestBusy, onTurnComplete });
@@ -106,8 +106,8 @@ export default function App() {
                       playbackState={playbackState}
                       locked={ingestBusy}
                       conversationMode={conversationMode}
-                      onStart={startConversation}
-                      onStop={endConversation}
+                      onStart={start}
+                      onStop={stop}
                       onInterrupt={interruptSpeaking}
                     />
                     <p className="text-xs text-kiosk-textlo text-center min-h-[1rem] max-w-sm">
