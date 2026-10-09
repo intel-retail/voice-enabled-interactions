@@ -760,7 +760,7 @@ services:
       # silence while the tool-call JSON is generated. A short, cached phrase
       # is played immediately to fill that window. Must stay non-committal —
       # it is spoken before any tool has run. Set ENABLED=false to disable.
-      KIOSK_CORE_OPENER_ENABLED: ${KIOSK_CORE_OPENER_ENABLED:-true}
+      KIOSK_CORE_OPENER_ENABLED: ${KIOSK_CORE_OPENER_ENABLED:-false}
       KIOSK_CORE_OPENER_TEXT:    ${KIOSK_CORE_OPENER_TEXT:-One moment.}
       # Adaptive endpoint: shorten the end-of-turn wait when the transcript
       # already reads as a finished sentence. Fails closed to
