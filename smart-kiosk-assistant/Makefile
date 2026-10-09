@@ -165,12 +165,16 @@ _QUEUE_PROFILE  = $(if $(_QUEUE_ON),--profile queue,)
 export KIOSK_CORE_QUEUE_SERVICE_ENABLED = $(if $(_QUEUE_ON),true,false)
 
 # audio-analyzer and text-to-speech are published to Docker Hub by the
-# edge-ai-libraries CI pipeline and are pulled by default. With
-# REGISTRY=false they are instead built locally from the sibling
-# ../edge-ai-libraries/microservices/{audio-analyzer,text-to-speech}
-# checkout (see their build.context in docker-compose.yml). In pull mode,
-# text-to-speech is still always built locally because the registry image
-# lacks Kokoro TTS support (see docker-compose.yml text-to-speech comment).
+# audio-analyzer and text-to-speech are consumed as prebuilt images only --
+# this repo no longer carries a build reference to ../edge-ai-libraries.
+# In registry mode (REGISTRY=true or a registry name) they are pulled, like
+# metrics-collector. With REGISTRY=false they are NOT built here; the locally
+# tagged intel/{audio-analyzer,text-to-speech}:${RELEASE_TAG} image is used as
+# is -- build it once directly from the edge-ai-libraries fork
+# (docker compose build in that repo, or `make build` before this split), then
+# it is reused. The fork source lives at
+# ../edge-ai-libraries/microservices/{audio-analyzer,text-to-speech} and must be
+# kept in sync with upstream open-edge-platform/edge-ai-libraries.
 
 # Colors
 RED    := \033[0;31m
@@ -484,10 +488,13 @@ build: check-env ## Pull images (default with .env); REGISTRY=false builds local
 	if [ "$(REGISTRY)" = "false" ] || [ "$(REGISTRY)" = "FALSE" ]; then \
 		echo "$(YELLOW)  REGISTRY=false → Building local services from source$(NC)"; \
 		REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) $(_QUEUE_PROFILE) build $(LOCAL_ONLY_SERVICES) $(_IDENTITY_SVC); \
-		echo "$(YELLOW)  Building audio-analyzer locally from ../edge-ai-libraries/microservices/audio-analyzer...$(NC)"; \
-		REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) build audio-analyzer; \
-		echo "$(YELLOW)  Building text-to-speech locally from ../edge-ai-libraries/microservices/text-to-speech...$(NC)"; \
-		REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) build text-to-speech; \
+		echo "$(YELLOW)  audio-analyzer / text-to-speech are image-only here -- using the locally tagged $(_DOCKER_REGISTRY)/{audio-analyzer,text-to-speech}:$(RELEASE_TAG) image (build it once from the edge-ai-libraries fork).$(NC)"; \
+		for svc in audio-analyzer text-to-speech; do \
+			if ! docker image inspect $(_DOCKER_REGISTRY)/$$svc:$(RELEASE_TAG) >/dev/null 2>&1; then \
+				echo "$(RED)  ✗ $(_DOCKER_REGISTRY)/$$svc:$(RELEASE_TAG) not found locally. Build it once from the fork (cd ../edge-ai-libraries && docker compose build) or run 'make build REGISTRY=true' to pull it.$(NC)"; \
+				exit 1; \
+			fi; \
+		done; \
 	else \
 		echo "$(YELLOW)  REGISTRY=$(REGISTRY) → Pulling images from registry '$(_DOCKER_REGISTRY)'$(NC)"; \
 		REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull $(LOCAL_ONLY_SERVICES); \
@@ -497,8 +504,8 @@ build: check-env ## Pull images (default with .env); REGISTRY=false builds local
 		fi; \
 		echo "$(YELLOW)  Pulling audio-analyzer from registry...$(NC)"; \
 		REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull audio-analyzer; \
-		echo "$(YELLOW)  Building text-to-speech locally (registry image lacks Kokoro TTS support - see docker-compose.yml text-to-speech comment)...$(NC)"; \
-		REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) build text-to-speech; \
+		echo "$(YELLOW)  Pulling text-to-speech from registry...$(NC)"; \
+		REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull text-to-speech; \
 	fi; \
 	REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull metrics-collector || \
 		echo "$(YELLOW)  ⚠ Could not pull metrics-collector (intel/hl-ai-metrics-collector) from registry -- using locally cached image if present. Build it from edge-ai-suites/health-and-life-sciences-ai-suite/multi_modal_patient_monitoring/services/metrics-collector if missing.$(NC)"

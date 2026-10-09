@@ -230,26 +230,12 @@ services:
     stop_grace_period: 30s
 
   audio-analyzer:
-    # Built locally from the sibling edge-ai-libraries checkout, matching the
-    # text-to-speech service above, so local changes to the ASR/diarization
-    # pipeline are picked up. Comment out `build:` and rely on `image:` alone
-    # to go back to pulling the upstream prebuilt image.
-    #
-    # Uses the top-level Dockerfile rather than docker/Dockerfile: the two are
-    # identical except that this one parenthesises the torchcodec uninstall,
-    # so `|| true` applies only to that uninstall instead of swallowing a
-    # failure anywhere in the preceding pip chain (which would silently
-    # produce a broken image).
-    build:
-      context: ../edge-ai-libraries/microservices/audio-analyzer
-      dockerfile: Dockerfile
-      # No HF_TOKEN build arg on purpose. The Dockerfile does
-      # `ENV HF_TOKEN=${HF_TOKEN}`, so passing it at build time bakes the
-      # secret permanently into an image layer (recoverable by anyone who can
-      # inspect or pull the image). It is unnecessary anyway: the token is
-      # already supplied at runtime in the environment block below, and the
-      # service loads pyannote from the pre-cached ./models with
-      # HF_HUB_OFFLINE=1, so nothing gated is fetched during the build.
+    # Consumed as a prebuilt image only. The source lives in the separate
+    # edge-ai-libraries repo (../edge-ai-libraries/microservices/audio-analyzer,
+    # a fork kept in sync with upstream open-edge-platform/edge-ai-libraries);
+    # it is NOT built from this repo. Build the image once from that repo
+    # (`docker compose build` there) or pull it with REGISTRY=true, then it is
+    # reused via the image: tag below.
     image: ${REGISTRY:-intel}/audio-analyzer:${RELEASE_TAG:-latest}
     container_name: audio-analyzer
     # Hardcoded to match the image's baked-in app user and the
@@ -364,13 +350,12 @@ services:
     restart: unless-stopped
 
   text-to-speech:
-    # Built locally from a sibling edge-ai-libraries checkout so the Kokoro
-    # TTS engine (added there, not upstream) is available. Comment out
-    # `build:` and rely on `image:` alone to go back to pulling the
-    # upstream prebuilt image (SpeechT5/Qwen only, no Kokoro).
-    build:
-      context: ../edge-ai-libraries/microservices/text-to-speech
-      dockerfile: Dockerfile
+    # Consumed as a prebuilt image only. The source lives in the separate
+    # edge-ai-libraries repo (../edge-ai-libraries/microservices/text-to-speech,
+    # a fork kept in sync with upstream open-edge-platform/edge-ai-libraries,
+    # which adds the Kokoro TTS engine); it is NOT built from this repo. Build
+    # the image once from that repo (`docker compose build` there) or pull it
+    # with REGISTRY=true, then it is reused via the image: tag below.
     image: ${REGISTRY:-intel}/text-to-speech:${RELEASE_TAG:-latest}
     container_name: text-to-speech
     user: "1000:1000"
