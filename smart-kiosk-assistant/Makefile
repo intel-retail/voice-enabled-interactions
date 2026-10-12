@@ -103,7 +103,7 @@ REGISTRY         ?= false
 _ENV_REGISTRY    ?= $(if $(strip $(REGISTRY_REPO)),$(strip $(REGISTRY_REPO)),intel)
 _DOCKER_REGISTRY  = $(if $(filter false FALSE true TRUE,$(REGISTRY)),$(_ENV_REGISTRY),$(REGISTRY))
 
-RELEASE_TAG      ?= 2026.1.0
+RELEASE_TAG      ?= latest
 export TAG       := $(RELEASE_TAG)
 
 TARGET_DEVICE    ?= GPU
