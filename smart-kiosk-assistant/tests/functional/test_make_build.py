@@ -187,3 +187,113 @@ class TestDockerComposeImageNames:
             assert compose_images[service], (
                 f"Service '{service}' has no image defined in docker-compose.yml"
             )
+
+
+# ---------------------------------------------------------------------------
+# REGISTRY / REGISTRY_REPO substitution regression tests (ITEP-96940)
+# ---------------------------------------------------------------------------
+class TestRegistryRepoSubstitution:
+    """`docker-compose.yml` image names must resolve from REGISTRY_REPO, not
+    REGISTRY, and the Makefile must forward a REGISTRY_REPO override instead
+    of silently dropping it.
+
+    Regression coverage for ITEP-96940: `REGISTRY=true` (the Makefile
+    build-mode flag) must never leak into `image:` as a literal
+    "true/<service>" registry prefix, and a custom `REGISTRY_REPO` must
+    survive both raw `docker compose` and `make` invocations.
+    """
+
+    # ovms-llm uses a fixed, externally-published image
+    # (openvino/model_server) that is intentionally NOT prefixed by
+    # REGISTRY_REPO — it is not one of this repo's own built/pulled images.
+    # ovms-cache-init is a one-shot init container on the public `busybox`
+    # image for the same reason, so it is exempt on the same grounds.
+    _REGISTRY_REPO_EXEMPT_SERVICES = {"ovms-llm", "ovms-cache-init"}
+
+    @staticmethod
+    def _compose_config_images(env_overrides: dict[str, str]) -> dict[str, str]:
+        """Run `docker compose config` with the given env and return {service: image}."""
+        import yaml
+
+        env = {**_os.environ, **env_overrides}
+        result = subprocess.run(
+            ["docker", "compose", "-f", "docker-compose.yml", "config", "--format", "json"],
+            cwd=str(_KIOSK_ROOT),
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+        assert result.returncode == 0, (
+            f"docker compose config failed (exit {result.returncode}).\n"
+            f"STDERR:\n{result.stderr[-2000:]}"
+        )
+        import json
+        config = json.loads(result.stdout)
+        services = config.get("services", {})
+        return {svc: data.get("image", "") for svc, data in services.items()}
+
+    @pytest.mark.tier2
+    def test_registry_true_does_not_leak_into_image_name(self):
+        """REGISTRY=true (Makefile build-mode flag) must not resolve into `image:`.
+
+        This is the exact regression reported in ITEP-96940: a shipped
+        `.env`/`.env.example` with REGISTRY=true previously caused every
+        `image:` line to resolve to the literal, non-existent "true/<service>"
+        registry when raw `docker compose pull/up` was run (bypassing `make`).
+        """
+        images = self._compose_config_images({"REGISTRY": "true", "REGISTRY_REPO": ""})
+        assert images, "docker compose config returned no services"
+        for service, image in images.items():
+            if service in self._REGISTRY_REPO_EXEMPT_SERVICES:
+                continue
+            assert not image.startswith("true/"), (
+                f"Service '{service}' resolved to '{image}' — REGISTRY=true leaked "
+                f"into the image name instead of being ignored by docker-compose.yml"
+            )
+            assert image.startswith(f"{REGISTRY_PREFIX}/"), (
+                f"Service '{service}' resolved to '{image}', expected the default "
+                f"'{REGISTRY_PREFIX}/' prefix from REGISTRY_REPO's fallback"
+            )
+
+    @pytest.mark.tier2
+    def test_registry_repo_override_is_honored_by_raw_compose(self):
+        """A custom REGISTRY_REPO must be honored by raw `docker compose config`."""
+        custom_repo = "myregistry.example.com/team"
+        images = self._compose_config_images({"REGISTRY_REPO": custom_repo})
+        assert images, "docker compose config returned no services"
+        for service, image in images.items():
+            if service in self._REGISTRY_REPO_EXEMPT_SERVICES:
+                continue
+            assert image.startswith(f"{custom_repo}/"), (
+                f"Service '{service}' resolved to '{image}', expected the "
+                f"'{custom_repo}/' prefix from the REGISTRY_REPO override"
+            )
+
+    @pytest.mark.tier2
+    def test_make_forwards_registry_repo_override(self):
+        """`make` must forward a custom REGISTRY_REPO override to docker compose.
+
+        Regression coverage: the Makefile previously forwarded `REGISTRY=...`
+        to docker compose for every build/up/pull invocation. Since
+        docker-compose.yml stopped reading REGISTRY, that forwarding became a
+        no-op and silently dropped any custom-registry override
+        (e.g. `make build REGISTRY=myregistry.example.com/team`).
+        """
+        custom_repo = "myregistry.example.com/team"
+        result = subprocess.run(
+            ["make", "-n", "up", f"REGISTRY={custom_repo}"],
+            cwd=str(_KIOSK_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, (
+            f"make -n up REGISTRY={custom_repo} failed (exit {result.returncode}).\n"
+            f"STDERR:\n{result.stderr[-2000:]}"
+        )
+        assert f"REGISTRY_REPO={custom_repo}" in result.stdout, (
+            f"Expected 'make up REGISTRY={custom_repo}' to forward "
+            f"REGISTRY_REPO={custom_repo} to docker compose, but it was not found "
+            f"in the dry-run output:\n{result.stdout}"
+        )

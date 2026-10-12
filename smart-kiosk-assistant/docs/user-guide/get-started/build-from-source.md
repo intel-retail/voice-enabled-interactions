@@ -105,8 +105,8 @@ the extra files. Only the build flow needs `edge-ai-libraries` on disk
 ## Create the Environment File
 
 `.env` is not committed to the repo. `docker-compose.yml` reads
-`REGISTRY`/`RELEASE_TAG` from it and falls back to `latest` if it's
-missing, so create it before building:
+`REGISTRY_REPO`/`RELEASE_TAG` from it and falls back to `latest` if
+it's missing, so create it before building:
 
 ```bash
 make init-env        # copies .env.example → .env
@@ -149,12 +149,12 @@ HuggingFace Hub and updates `OVMS_MODEL_NAME`, `TARGET_DEVICE`, and
 The top-level [docker-compose.yml](https://github.com/intel-retail/voice-enabled-interactions/blob/main/smart-kiosk-assistant/docker-compose.yml)
 declares both `image:` and `build:` for each of the five services: `audio-analyzer`,
 `text-to-speech`, `rag-service`, `kiosk-core`, and `kiosk-ui`. Both
-`REGISTRY` and `RELEASE_TAG` are read from `.env` (created in
+`REGISTRY_REPO` and `RELEASE_TAG` are read from `.env` (created in
 [Create the Environment File](#create-the-environment-file) above;
-defaults: `REGISTRY=intel`, `RELEASE_TAG` pins the current release).
+defaults: `REGISTRY_REPO=intel`, `RELEASE_TAG` pins the current release).
 
 `docker compose build` rebuilds each service from source and tags the
-result as the same `${REGISTRY}/<svc>:${RELEASE_TAG}` reference used by
+result as the same `${REGISTRY_REPO}/<svc>:${RELEASE_TAG}` reference used by
 the pull flow, so subsequent `docker compose up` calls reuse the local
 build until you `docker compose pull` again.
 

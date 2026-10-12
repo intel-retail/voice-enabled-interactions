@@ -12,6 +12,15 @@
 # Build from src:   docker compose build && docker compose up -d
 # Stop:             docker compose down
 # Logs:             docker compose logs -f
+#
+# Image registry: every `image:` below resolves via REGISTRY_REPO (default:
+# intel), NOT the Makefile's REGISTRY build-mode flag (true/false). Compose
+# does plain string substitution with no notion of booleans, so if `image:`
+# read ${REGISTRY:-intel} directly, a shipped `.env` with REGISTRY=true would
+# resolve to the literal, non-existent "true/<service>" registry and every
+# pull would fail with "access denied" — this hit raw `docker compose
+# pull/up` users who don't go through `make`. Set REGISTRY_REPO in .env only
+# if you publish to a different registry/namespace.
 
 services:
 
@@ -28,7 +37,7 @@ services:
     build:
       context: ./rtsp-streamer
       dockerfile: Dockerfile
-    image: ${REGISTRY:-intel}/rtsp-streamer:${RELEASE_TAG:-latest}
+    image: ${REGISTRY_REPO:-intel}/rtsp-streamer:${RELEASE_TAG:-latest}
     container_name: rtsp-streamer
     # Gated behind the `queue` compose profile (container-layer flag), same
     # pattern as identity-service — ON by default via the Makefile's `up`
@@ -88,7 +97,7 @@ services:
     build:
       context: ./queue-service
       dockerfile: docker/Dockerfile
-    image: ${REGISTRY:-intel}/queue-service:${RELEASE_TAG:-latest}
+    image: ${REGISTRY_REPO:-intel}/queue-service:${RELEASE_TAG:-latest}
     container_name: queue-service
     # Gated behind the `queue` compose profile — see rtsp-streamer above for
     # the full rationale (ON by default; `make up QUEUE=false` disables it).
@@ -183,13 +192,7 @@ services:
     # service can go back to pulling the shared image instead of shadowing it
     # with a locally-built one. Override the tag with METRICS_COLLECTOR_TAG in
     # .env if a newer version is published.
-    # Deliberately NOT ${REGISTRY}: that variable selects where the images we
-    # build locally are tagged/pushed (e.g. REGISTRY=false while iterating), but
-    # this image is only ever pulled from upstream, so following REGISTRY just
-    # produces "pull access denied for false/hl-ai-metrics-collector" and blocks
-    # `docker compose up` for the whole stack. Override the namespace with
-    # METRICS_COLLECTOR_REGISTRY if it is ever mirrored elsewhere.
-    image: ${METRICS_COLLECTOR_REGISTRY:-intel}/hl-ai-metrics-collector:${METRICS_COLLECTOR_TAG:-2026.2.0}
+    image: ${REGISTRY_REPO:-intel}/hl-ai-metrics-collector:${METRICS_COLLECTOR_TAG:-2026.2.0}
     container_name: metrics-collector
     privileged: true
     pid: host
@@ -236,7 +239,7 @@ services:
     # it is NOT built from this repo. Build the image once from that repo
     # (`docker compose build` there) or pull it with REGISTRY=true, then it is
     # reused via the image: tag below.
-    image: ${REGISTRY:-intel}/audio-analyzer:${RELEASE_TAG:-latest}
+    image: ${REGISTRY_REPO:-intel}/audio-analyzer:${RELEASE_TAG:-latest}
     container_name: audio-analyzer
     # Hardcoded to match the image's baked-in app user and the
     # ownership of the named volumes. Do not change.
@@ -356,7 +359,7 @@ services:
     # which adds the Kokoro TTS engine); it is NOT built from this repo. Build
     # the image once from that repo (`docker compose build` there) or pull it
     # with REGISTRY=true, then it is reused via the image: tag below.
-    image: ${REGISTRY:-intel}/text-to-speech:${RELEASE_TAG:-latest}
+    image: ${REGISTRY_REPO:-intel}/text-to-speech:${RELEASE_TAG:-latest}
     container_name: text-to-speech
     user: "1000:1000"
     ports:
@@ -440,7 +443,7 @@ services:
     build:
       context: ./rag-service
       dockerfile: Dockerfile
-    image: ${REGISTRY:-intel}/rag-service:${RELEASE_TAG:-latest}
+    image: ${REGISTRY_REPO:-intel}/rag-service:${RELEASE_TAG:-latest}
     container_name: rag-service
     # Hardcoded to match the image's baked-in app user and the
     # ownership of the named volumes. Do not change.
@@ -696,7 +699,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ${REGISTRY:-intel}/kiosk-core:${RELEASE_TAG:-latest}
+    image: ${REGISTRY_REPO:-intel}/kiosk-core:${RELEASE_TAG:-latest}
     container_name: kiosk-core
     user: "1000:1000"
     ports:
@@ -953,7 +956,7 @@ services:
     build:
       context: .
       dockerfile: identity-service/Dockerfile
-    image: ${REGISTRY:-intel}/identity-service:${RELEASE_TAG:-latest}
+    image: ${REGISTRY_REPO:-intel}/identity-service:${RELEASE_TAG:-latest}
     container_name: identity-service
     profiles: ["identity"]
     user: "1000:1000"
@@ -1008,7 +1011,7 @@ services:
     build:
       context: ./kiosk-ui
       dockerfile: Dockerfile
-    image: ${REGISTRY:-intel}/kiosk-ui:${RELEASE_TAG:-latest}
+    image: ${REGISTRY_REPO:-intel}/kiosk-ui:${RELEASE_TAG:-latest}
     container_name: kiosk-ui
     ports:
       - "7860:7860"
@@ -1030,7 +1033,7 @@ services:
   # so the two screens can never drift out of sync with each other's backend
   # wiring. No separate build context or Dockerfile.
   kiosk-ui-customer:
-    image: ${REGISTRY:-intel}/kiosk-ui:${RELEASE_TAG:-latest}
+    image: ${REGISTRY_REPO:-intel}/kiosk-ui:${RELEASE_TAG:-latest}
     container_name: kiosk-ui-customer
     ports:
       - "7861:7860"

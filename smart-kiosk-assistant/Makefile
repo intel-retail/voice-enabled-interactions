@@ -75,24 +75,32 @@ COMPOSE_FILE     ?= docker-compose.yml
 # REGISTRY=true   → pull pre-built images from the registry
 #
 # NOTE: `-include .env` above runs BEFORE this assignment, and the shipped
-#       .env sets REGISTRY=intel. Because `?=` does not override an
+#       .env sets REGISTRY=true. Because `?=` does not override an
 #       already-set variable, the effective default when a .env is present is
 #       PULL, not build. Pass REGISTRY=false explicitly to build locally:
 #           make build REGISTRY=false
 #
-# NOTE: "false" and "true" are build-mode flags only. docker-compose always
-#       receives the real registry name (REGISTRY=intel) so image tags are never
-#       "false/<svc>:..." or "true/<svc>:...". Passing an explicit registry name
-#       (e.g. REGISTRY=myrepo.example.com/team) also selects pull mode and is
-#       forwarded to docker-compose verbatim — that registry must mirror every
-#       image, including the upstream audio-analyzer, text-to-speech, and
-#       hl-ai-metrics-collector, since `make up` resolves them the same way.
+# NOTE: "false" and "true" are build-mode flags only, consumed exclusively by
+#       this Makefile. The actual registry/image prefix used to resolve every
+#       `image:` in docker-compose.yml comes from REGISTRY_REPO (set in .env,
+#       default: intel) — docker-compose.yml no longer reads REGISTRY itself,
+#       so raw `docker compose pull/up` (bypassing `make` entirely) resolves
+#       images correctly too, instead of producing a literal, non-existent
+#       "true/<svc>:..." registry. Passing an explicit registry name here
+#       (e.g. REGISTRY=myrepo.example.com/team) still selects pull mode and
+#       is forwarded to docker-compose as REGISTRY_REPO below — that registry
+#       must mirror every image, including the upstream audio-analyzer,
+#       text-to-speech, and hl-ai-metrics-collector, since `make up` resolves
+#       them the same way.
 REGISTRY         ?= false
 
-# _DOCKER_REGISTRY: the actual registry prefix passed to docker-compose.
-# When the user passes REGISTRY=false or REGISTRY=true it is treated as a
-# build-mode switch; the real registry name comes from .env (default: intel).
-_ENV_REGISTRY    ?= intel
+# _DOCKER_REGISTRY: the actual registry prefix forwarded to docker-compose as
+# REGISTRY_REPO. When the user passes REGISTRY=false or REGISTRY=true it is
+# treated as a build-mode switch only; the real registry name comes from
+# .env's REGISTRY_REPO (default: intel). Passing any other value for
+# REGISTRY (e.g. a private registry host) is treated as an explicit registry
+# override and takes precedence over REGISTRY_REPO.
+_ENV_REGISTRY    ?= $(if $(strip $(REGISTRY_REPO)),$(strip $(REGISTRY_REPO)),intel)
 _DOCKER_REGISTRY  = $(if $(filter false FALSE true TRUE,$(REGISTRY)),$(_ENV_REGISTRY),$(REGISTRY))
 
 RELEASE_TAG      ?= 2026.1.0
@@ -487,27 +495,18 @@ build: check-env ## Pull images (default with .env); REGISTRY=false builds local
 	@set -e; \
 	if [ "$(REGISTRY)" = "false" ] || [ "$(REGISTRY)" = "FALSE" ]; then \
 		echo "$(YELLOW)  REGISTRY=false → Building local services from source$(NC)"; \
-		REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) $(_QUEUE_PROFILE) build $(LOCAL_ONLY_SERVICES) $(_IDENTITY_SVC); \
-		echo "$(YELLOW)  audio-analyzer / text-to-speech are image-only here -- using the locally tagged $(_DOCKER_REGISTRY)/{audio-analyzer,text-to-speech}:$(RELEASE_TAG) image (build it once from the edge-ai-libraries fork).$(NC)"; \
-		for svc in audio-analyzer text-to-speech; do \
-			if ! docker image inspect $(_DOCKER_REGISTRY)/$$svc:$(RELEASE_TAG) >/dev/null 2>&1; then \
-				echo "$(RED)  ✗ $(_DOCKER_REGISTRY)/$$svc:$(RELEASE_TAG) not found locally. Build it once from the fork (cd ../edge-ai-libraries && docker compose build) or run 'make build REGISTRY=true' to pull it.$(NC)"; \
-				exit 1; \
-			fi; \
-		done; \
+		REGISTRY_REPO=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) $(_QUEUE_PROFILE) build $(LOCAL_ONLY_SERVICES) $(_IDENTITY_SVC); \
 	else \
 		echo "$(YELLOW)  REGISTRY=$(REGISTRY) → Pulling images from registry '$(_DOCKER_REGISTRY)'$(NC)"; \
-		REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull $(LOCAL_ONLY_SERVICES); \
+		REGISTRY_REPO=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull $(LOCAL_ONLY_SERVICES); \
 		if [ -n "$(_IDENTITY_SVC)" ]; then \
 			echo "$(YELLOW)  Building identity-service locally (no registry image)...$(NC)"; \
-			REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) build identity-service; \
+			REGISTRY_REPO=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) build identity-service; \
 		fi; \
-		echo "$(YELLOW)  Pulling audio-analyzer from registry...$(NC)"; \
-		REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull audio-analyzer; \
-		echo "$(YELLOW)  Pulling text-to-speech from registry...$(NC)"; \
-		REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull text-to-speech; \
 	fi; \
-	REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull metrics-collector || \
+	echo "$(YELLOW)  Pulling audio-analyzer, text-to-speech, and metrics-collector from registry (image-only; built once from the edge-ai-libraries fork)...$(NC)"; \
+	REGISTRY_REPO=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull audio-analyzer text-to-speech; \
+	REGISTRY_REPO=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull metrics-collector || \
 		echo "$(YELLOW)  ⚠ Could not pull metrics-collector (intel/hl-ai-metrics-collector) from registry -- using locally cached image if present. Build it from edge-ai-suites/health-and-life-sciences-ai-suite/multi_modal_patient_monitoring/services/metrics-collector if missing.$(NC)"
 	@echo "$(GREEN)✓ Images ready$(NC)"
 
@@ -517,7 +516,7 @@ build: check-env ## Pull images (default with .env); REGISTRY=false builds local
 
 up: check-env setup-dirs clean-metrics ## Start all services
 	@echo "$(BLUE)Starting Smart Kiosk Assistant...$(NC)"
-	REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) $(_QUEUE_PROFILE) up -d
+	REGISTRY_REPO=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) $(_QUEUE_PROFILE) up -d
 	@echo ""
 	@echo "$(GREEN)✓ Stack started$(NC)"
 	@echo "  Kiosk UI        → http://localhost:7860"
