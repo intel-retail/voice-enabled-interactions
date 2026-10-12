@@ -210,6 +210,22 @@ SCRIPTS: dict[str, list[str]] = {
         "Okay, please add one Chocolate Brownie to my order.",
         "That is everything, please confirm my order.",
     ],
+    # Representative single-item ordering KPI: one clean mutation per turn, no
+    # multi-item requests, substitutions, disfluencies or price lookups -- so
+    # every turn stays on the directive fast path instead of falling back to
+    # the slower tool-calling path. Prompts are natural 7-8 word utterances
+    # (not clipped commands), every product is named so it resolves, and the
+    # script ends in a confirm so each --runs repetition starts from an empty
+    # cart. This is the scenario to quote for the ordering voice-to-voice
+    # median; keep multi-item / substitution / Q&A turns in their own KPI.
+    "order-fastpath": [
+        "I would like one Classic Chicken Burger please.",
+        "Please add one regular Classic French Fries too.",
+        "Please add one Pepsi three thirty ml please.",
+        "I will have one Spicy Chicken Crunch Burger.",
+        "Please add one Chocolate Brownie to my order.",
+        "That is everything, please confirm my order now.",
+    ],
 }
 
 # --script value that sweeps every scenario in SCRIPTS in one pass.
