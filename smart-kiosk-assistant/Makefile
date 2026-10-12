@@ -737,19 +737,22 @@ build-benchmark:
 # itself), so do NOT run this against an already-running stack unless you also
 # pass V2V_ARGS="--skip_stack".
 #
-# V2V_SCRIPT defaults to "all": one pass over every scenario in
-# tests/benchmarks/v2v_scripted_conversation_benchmark.py's SCRIPTS -- single
-# item, multi-item with an addition, a hesitant self-correcting customer, and
-# a price-question + upsell + confirm journey (11 turns). At V2V_RUNS=8 that
-# is 88 measured turns, which is what makes the reported p95 mean something:
-# the previous default (one 4-line conversation, V2V_RUNS=1) gave four turns,
-# so "p95" was just the slowest of the four.
+# V2V_SCRIPT defaults to "order-fastpath": six single-intent 7-8 word ordering
+# turns (one clean mutation each, ending in confirm) in
+# tests/benchmarks/v2v_scripted_conversation_benchmark.py's SCRIPTS. This is
+# the representative clean-ordering voice-to-voice KPI and is the number to
+# quote for ordering latency. At V2V_RUNS=8 that is 48 measured turns, enough
+# for a median and a p95 that is not simply the single slowest turn.
 #
-# Set V2V_SCRIPT= (empty) to fall back to Sample_data/conversation.jsonl --
-# edit that one file to script a custom conversation without touching this
-# Makefile or the submodule. Set V2V_SCRIPT=order-simple (or order-multi/
-# order-drift/order-upsell) to run a single named scenario.
-V2V_SCRIPT      ?= all
+# Set V2V_SCRIPT=all for one pass over every scenario (single item, multi-item,
+# a hesitant self-correcting customer, and a price-question + upsell + confirm
+# journey) -- 88 measured turns that keep multi-item / substitution / Q&A in
+# the same report. Set V2V_SCRIPT= (empty) to fall back to
+# Sample_data/conversation.jsonl -- edit that one file to script a custom
+# conversation without touching this Makefile or the submodule. Set
+# V2V_SCRIPT=order-simple (or order-multi/order-drift/order-upsell) to run a
+# single named scenario.
+V2V_SCRIPT      ?= order-fastpath
 V2V_RUNS        ?= 8
 V2V_WARMUP_RUNS ?= 1
 V2V_LABEL       ?= v2v-perf-tools
