@@ -73,39 +73,103 @@ export interface KpiData {
 
 // ── Pipeline turn trace (from /api/v1/pipeline/latest) ──────────────────────
 export interface PipelineWall {
-  turn_total_ms: number | null;
-  time_to_first_audio_ms: number | null;
+  turn_total_ms?: number | null;
+  /**
+   * Customer's last word -> first sound out of the speaker. The "voice to
+   * voice" clock — the only figure comparable to external voice-kiosk numbers,
+   * because unlike turn_total_ms it includes endpointing delay.
+   */
+  voice_to_voice_ms?: number | null;
+  /** Customer's last word -> turn-end decision. */
+  endpointing_delay_ms?: number | null;
+  /** Turn-end decision -> first sound out of the speaker. */
+  processing_latency_ms?: number | null;
+  /** Customer's last word -> first sound that carries the actual answer. */
+  voice_to_voice_answer_ms?: number | null;
+  /** Turn-end decision -> first sound that carries the actual answer. */
+  processing_latency_answer_ms?: number | null;
+  /** True when first sound was the cached "One moment." opener. */
+  first_audio_was_opener: boolean;
+  /** Audio-domain trailing-silence run diagnostic; do not use for wall-clock arithmetic. */
+  endpoint_silence_run_ms?: number | null;
+  /** Real ASR round-trip on the final chunk (flush-queue join after turn-end decision). */
+  final_flush_wait_ms?: number | null;
+  /**
+   * Browser-mic-release turns only: gap between the customer's true last
+   * speech frame and the flush sequence starting (button-release reaction
+   * time + any trailing buffered frames). Both ends are backend monotonic
+   * timestamps — not network/browser-clock overhead. None on the
+   * silence-timeout endpoint path, where this gap is ~0 by construction.
+   */
+  post_speech_gap_ms?: number | null;
+  playback_to_first_audio_ms?: number | null;
+  playback_to_answer_audio_ms?: number | null;
+  /** True: the sentence-completeness shortcut fired (didn't wait full silence_timeout). */
+  endpoint_shortcut_fired?: boolean | null;
 }
 
 export interface PipelineAsrSpan {
-  ms: number | null;
+  ms?: number | null;
   device: string;
-  chunks?: number;
+  chunks: number;
+  final_flush_skipped: boolean;
+  /**
+   * Continuous-streaming mode only: customer's actual last word -> the
+   * moment a transcript covering it landed from the analyzer. The genuine
+   * ASR compute latency on the critical path.
+   */
+  transcription_latency_ms?: number | null;
 }
 
 export interface PipelineRetrievalSpan {
   invoked: boolean;
-  ms: number | null;
+  ms?: number | null;
 }
 
 export interface PipelineLlmSpan {
-  ms: number | null;
+  ms?: number | null;
+  ttft_ms?: number | null;
   calls: number;
   device: string;
 }
 
+export interface PipelineMcpSpan {
+  ms?: number | null;
+  calls: number;
+}
+
+export interface PipelineGuardSpan {
+  ms?: number | null;
+  calls: number;
+}
+
+export interface PipelineTemplateSpan {
+  ms?: number | null;
+  calls: number;
+}
+
 export interface PipelineAgentSpan {
-  ttft_ms: number | null;
-  total_ms: number | null;
+  ttft_ms?: number | null;
+  total_ms?: number | null;
+  stream_ms?: number | null;
   retrieval: PipelineRetrievalSpan;
   llm: PipelineLlmSpan;
+  mcp: PipelineMcpSpan;
+  guard: PipelineGuardSpan;
+  template: PipelineTemplateSpan;
 }
 
 export interface PipelineTtsSpan {
-  ms: number | null;
+  ms?: number | null;
   device: string;
   segments: number;
   overlapped_with_agent: boolean;
+  ttfb_ms?: number | null;
+  /**
+   * True when sentence 1 came from the speculative/opener TTS cache. ttfb_ms
+   * is then a file copy, not a measurement of the synthesiser.
+   */
+  first_segment_cached?: boolean;
 }
 
 export interface PipelineTurnTrace {
@@ -124,6 +188,8 @@ export interface KpiBundle {
   rag: KpiData;
   tts: KpiData;
   pipeline?: PipelineTurnTrace | null;
+  /** Most recent turns, newest last — one entry per request/response. */
+  pipelineRecent?: PipelineTurnTrace[];
 }
 
 // ── Metrics ─────────────────────────────────────────────────────────────────
@@ -235,4 +301,3 @@ export interface RegisterResponse {
 export interface IdentityEnabledResponse {
   enabled: boolean;
 }
-

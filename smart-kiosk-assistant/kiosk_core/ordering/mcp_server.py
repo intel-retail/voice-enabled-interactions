@@ -581,7 +581,10 @@ async def get_popular_products(
 
 @mcp.tool()
 async def place_order(
-    user_id: str, items: list[dict[str, Any]], dietary: str | None = None
+    user_id: str,
+    items: list[dict[str, Any]],
+    dietary: str | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Add items to the customer's cart (creates it if none is open).
 
@@ -595,6 +598,9 @@ async def place_order(
             resolves it.
         dietary: Leave unset — the caller fills this in automatically from
             anything the customer has already said about diet this session.
+        dry_run: Internal/agent-only flag (never set by the model — stripped
+            from its schema). When True, every resolution step runs normally
+            but nothing is persisted; used for speculative draft previews.
 
     Returns:
         The order (order_id, items, total, status="draft"), or an error
@@ -616,8 +622,11 @@ async def place_order(
     try:
         item_list = [OrderItemIn(**i) for i in resolved]
         req = CreateOrderRequest(user_id=user_id, items=item_list)
-        order = await _svc().place_order(req)
-        logger.info("[MCP-SERVER] place_order user=%s order_id=%d total=%.2f", user_id, order.order_id, order.total)
+        order = await _svc().place_order(req, dry_run=dry_run)
+        logger.info(
+            "[MCP-SERVER] %splace_order user=%s order_id=%d total=%.2f",
+            "[DRY-RUN] " if dry_run else "", user_id, order.order_id, order.total,
+        )
         result = await _attach_upsell(order.model_dump(mode="json"))
         # Names of exactly what this call added, distinct from ``result["items"]``
         # (the whole cart) — lets the caller announce only the new items.
@@ -649,7 +658,8 @@ async def place_order(
 
 @mcp.tool()
 async def update_order(
-    order_id: int, items: list[dict[str, Any]], dietary: str | None = None
+    order_id: int, items: list[dict[str, Any]], dietary: str | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Add or increment items on an existing draft order.
 
@@ -659,6 +669,7 @@ async def update_order(
             catalogue id OR a plain product name — the server resolves it.
         dietary: Leave unset — the caller fills this in automatically from
             anything the customer has already said about diet this session.
+        dry_run: Internal/agent-only flag — see ``place_order``.
 
     Returns:
         Updated order with recalculated total, or an error dict with
@@ -679,8 +690,11 @@ async def update_order(
         return _nothing_resolved_quantity_error(implausible_qty)
     try:
         item_list = [OrderItemIn(**i) for i in resolved]
-        order = await _svc().update_order_items(order_id, item_list)
-        logger.info("[MCP-SERVER] update_order order_id=%d new_total=%.2f", order_id, order.total)
+        order = await _svc().update_order_items(order_id, item_list, dry_run=dry_run)
+        logger.info(
+            "[MCP-SERVER] %supdate_order order_id=%d new_total=%.2f",
+            "[DRY-RUN] " if dry_run else "", order_id, order.total,
+        )
         result = await _attach_upsell(order.model_dump(mode="json"))
         # Names of exactly what this call added, distinct from ``result["items"]``
         # (the whole cart) — lets the caller announce only the new items.
@@ -754,7 +768,7 @@ async def get_current_order(user_id: str = "anonymous") -> dict[str, Any] | None
 
 
 @mcp.tool()
-async def confirm_active_order(user_id: str = "anonymous") -> dict[str, Any]:
+async def confirm_active_order(user_id: str = "anonymous", dry_run: bool = False) -> dict[str, Any]:
     """Confirm the customer's current draft order without needing its id.
 
     Use this when the customer says "yes", "confirm", or "that's all" and you
@@ -763,6 +777,7 @@ async def confirm_active_order(user_id: str = "anonymous") -> dict[str, Any]:
 
     Args:
         user_id: The customer placing the order. Defaults to "anonymous".
+        dry_run: Internal/agent-only flag — see ``place_order``.
 
     Returns:
         Confirmed order with status="confirmed" and the order_id, or an error dict.
@@ -786,10 +801,10 @@ async def confirm_active_order(user_id: str = "anonymous") -> dict[str, Any]:
             )
         }
     try:
-        confirmed = await _svc().confirm_order(order.order_id)
+        confirmed = await _svc().confirm_order(order.order_id, dry_run=dry_run)
         logger.info(
-            "[MCP-SERVER] confirm_active_order user=%s order_id=%d total=%.2f ✓",
-            user_id, confirmed.order_id, confirmed.total,
+            "[MCP-SERVER] %sconfirm_active_order user=%s order_id=%d total=%.2f ✓",
+            "[DRY-RUN] " if dry_run else "", user_id, confirmed.order_id, confirmed.total,
         )
         return confirmed.model_dump(mode="json")
     except ValueError as exc:
@@ -801,6 +816,7 @@ async def confirm_active_order(user_id: str = "anonymous") -> dict[str, Any]:
 async def remove_from_order(
     user_id: str = "anonymous",
     items: list[dict[str, Any]] | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Remove one or more items from the customer's current cart.
 
@@ -881,7 +897,7 @@ async def remove_from_order(
         }
 
     try:
-        updated, not_found = await _svc().remove_order_items(order.order_id, resolved)
+        updated, not_found = await _svc().remove_order_items(order.order_id, resolved, dry_run=dry_run)
     except ValueError as exc:
         logger.warning("[MCP-SERVER] remove_from_order user=%s rejected: %s", user_id, exc)
         return {"error": str(exc)}
@@ -904,14 +920,14 @@ async def remove_from_order(
     ]
     result["cart_empty"] = len(remaining_ids) == 0
     logger.info(
-        "[MCP-SERVER] remove_from_order user=%s order_id=%d removed=%s not_in_cart=%s new_total=%.2f",
-        user_id, updated.order_id, removed_names, result["not_in_cart"], updated.total,
+        "[MCP-SERVER] %sremove_from_order user=%s order_id=%d removed=%s not_in_cart=%s new_total=%.2f",
+        "[DRY-RUN] " if dry_run else "", user_id, updated.order_id, removed_names, result["not_in_cart"], updated.total,
     )
     return result
 
 
 @mcp.tool()
-async def cancel_order(user_id: str = "anonymous") -> dict[str, Any]:
+async def cancel_order(user_id: str = "anonymous", dry_run: bool = False) -> dict[str, Any]:
     """Cancel the customer's entire open draft order in one step.
 
     Use this ONLY for "cancel my (whole/entire/complete) order", "start over",
@@ -924,12 +940,13 @@ async def cancel_order(user_id: str = "anonymous") -> dict[str, Any]:
 
     Args:
         user_id: The customer whose draft order to cancel. Defaults to "anonymous".
+        dry_run: Internal/agent-only flag — see ``place_order``.
 
     Returns:
         ``{"cancelled": True, "order_id": ..., "items_removed": [...]}`` on
         success, or ``{"error": ...}`` if there was no open order to cancel.
     """
-    order = await _svc().cancel_current_order(user_id)
+    order = await _svc().cancel_current_order(user_id, dry_run=dry_run)
     if order is None:
         logger.info("[MCP-SERVER] cancel_order user=%s has no draft order", user_id)
         return {
@@ -941,8 +958,8 @@ async def cancel_order(user_id: str = "anonymous") -> dict[str, Any]:
 
     items_removed = [item.product_name for item in order.items]
     logger.info(
-        "[MCP-SERVER] cancel_order user=%s order_id=%d cancelled items=%s",
-        user_id, order.order_id, items_removed,
+        "[MCP-SERVER] %scancel_order user=%s order_id=%d cancelled items=%s",
+        "[DRY-RUN] " if dry_run else "", user_id, order.order_id, items_removed,
     )
     return {
         "cancelled": True,
@@ -952,18 +969,22 @@ async def cancel_order(user_id: str = "anonymous") -> dict[str, Any]:
 
 
 @mcp.tool()
-async def confirm_order(order_id: int) -> dict[str, Any]:
+async def confirm_order(order_id: int, dry_run: bool = False) -> dict[str, Any]:
     """Confirm a draft order and finalise it.
 
     Args:
         order_id: The draft order to confirm.
+        dry_run: Internal/agent-only flag — see ``place_order``.
 
     Returns:
         Confirmed order with status="confirmed" and the order_id, or an error dict.
     """
     try:
-        order = await _svc().confirm_order(order_id)
-        logger.info("[MCP-SERVER] confirm_order order_id=%d user=%s total=%.2f ✓", order_id, order.user_id, order.total)
+        order = await _svc().confirm_order(order_id, dry_run=dry_run)
+        logger.info(
+            "[MCP-SERVER] %sconfirm_order order_id=%d user=%s total=%.2f ✓",
+            "[DRY-RUN] " if dry_run else "", order_id, order.user_id, order.total,
+        )
         return order.model_dump(mode="json")
     except ValueError as exc:
         logger.warning("[MCP-SERVER] confirm_order order_id=%d rejected: %s", order_id, exc)

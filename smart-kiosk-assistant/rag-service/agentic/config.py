@@ -15,6 +15,10 @@ Environment variables:
     AGENT_TOP_P        Nucleus sampling cutoff (default: 1.0)
     AGENT_SEED         Sampling seed forwarded to OVMS (default: 42)
     AGENT_MAX_TOKENS   Max generated tokens per LLM round-trip (default: 320)
+    AGENT_COMPACT_TOOL_DESCRIPTIONS
+                       Strip "Returns:"/"Raises:"/"Example:" sections from MCP
+                       tool docstrings before they are sent as tool schemas
+                       (default: true — saves ~428 prefill tokens per call)
     AGENT_RETRY_ON_MISSING_TOOL_CALL
                        Retry a turn once when the model promises a lookup but
                        calls no tool (default: true)
@@ -62,6 +66,28 @@ SEED: int = int(os.getenv("AGENT_SEED", "42"))
 # bounds worst-case latency without truncating legitimate answers (the longest
 # valid reply, a full product listing, is ~300 chars).
 MAX_TOKENS: int = int(os.getenv("AGENT_MAX_TOKENS", "320"))
+
+# Strip the trailing reference sections ("Returns:", "Raises:", "Example:", …)
+# from every MCP tool docstring before it becomes the tool's LLM-facing
+# description.
+#
+# The MCP tool docstrings are Google-style and written for humans reading
+# kiosk_core/ordering/mcp_server.py: they document the return payload shape in
+# detail. That payload never influences *which* tool the model picks or *how* it
+# fills the arguments — the model sees the real result after the call — but the
+# text is re-sent as part of the tool schema on every LLM round-trip.
+#
+# Measured with the Qwen3-4B tokenizer across all 12 kiosk tools: 1,627 →
+# 1,199 docstring tokens, a 428-token (26%) cut of prefill on each of the two
+# LLM calls an ADK tool-calling turn makes. The summary line and the whole
+# "Args:" block — which do steer tool choice and argument filling — are kept
+# verbatim.
+#
+# Set AGENT_COMPACT_TOOL_DESCRIPTIONS=false to send the full docstrings again
+# with a restart, no rebuild.
+COMPACT_TOOL_DESCRIPTIONS: bool = os.getenv(
+    "AGENT_COMPACT_TOOL_DESCRIPTIONS", "true"
+).lower() in ("true", "1", "yes")
 
 # Retry a turn once when the model announces a lookup ("let me check that")
 # but emits no tool call, leaving the customer with no answer.

@@ -157,3 +157,86 @@ def test_call_tool_returns_error_payload_on_transport_failure(monkeypatch, reset
     assert _run(mcp_client.call_tool("confirm_order", {"order_id": "ORD-1"})) == {
         "error": "MCP unavailable"
     }
+
+
+# ---------------------------------------------------------------------------
+# Tool description compaction (prefill reduction)
+# ---------------------------------------------------------------------------
+
+_REAL_DOCSTRING = """List the menu categories available, with how many items each holds.
+
+    Use this when the customer asks what the restaurant serves in general
+    ("what do you have?", "show me the menu") without naming a category.
+
+    Args:
+        category: One of: burgers, pizza, wraps, sides, beverages, desserts.
+
+    Returns:
+        One ``{category, item_count}`` entry per category, alphabetically.
+    """
+
+
+def test_compact_drops_returns_section_and_keeps_args(monkeypatch) -> None:
+    """The Args block steers argument filling and must survive compaction."""
+    monkeypatch.setattr(mcp_client.agent_cfg, "COMPACT_TOOL_DESCRIPTIONS", True)
+    out = mcp_client.compact_tool_description(_REAL_DOCSTRING)
+    assert "Returns:" not in out
+    assert "item_count} entry per category" not in out
+    assert "Args:" in out
+    assert "burgers, pizza, wraps" in out
+    assert out.startswith("List the menu categories available")
+    assert len(out) < len(_REAL_DOCSTRING)
+
+
+def test_compact_strips_every_trailing_section_kind(monkeypatch) -> None:
+    """Raises/Yields/Example/Note headings are dropped like Returns."""
+    monkeypatch.setattr(mcp_client.agent_cfg, "COMPACT_TOOL_DESCRIPTIONS", True)
+    for heading in ("Returns", "Return", "Raises", "Yields", "Example",
+                    "Examples", "Note", "Notes"):
+        doc = f"Do the thing.\n\n    {heading}:\n        Something verbose.\n"
+        assert mcp_client.compact_tool_description(doc) == "Do the thing."
+
+
+def test_compact_is_a_noop_without_a_section_heading(monkeypatch) -> None:
+    """A docstring with no trailing section is returned unchanged."""
+    monkeypatch.setattr(mcp_client.agent_cfg, "COMPACT_TOOL_DESCRIPTIONS", True)
+    doc = "Confirm the customer's active order."
+    assert mcp_client.compact_tool_description(doc) == doc
+
+
+def test_compact_does_not_match_inline_prose(monkeypatch) -> None:
+    """'Returns:' only counts as a heading on its own line."""
+    monkeypatch.setattr(mcp_client.agent_cfg, "COMPACT_TOOL_DESCRIPTIONS", True)
+    doc = "Cancel an order. Returns: nothing useful when already cancelled."
+    assert mcp_client.compact_tool_description(doc) == doc
+
+
+def test_compact_keeps_original_when_truncation_would_empty_it(monkeypatch) -> None:
+    """A docstring that is only a Returns block still has to describe the tool."""
+    monkeypatch.setattr(mcp_client.agent_cfg, "COMPACT_TOOL_DESCRIPTIONS", True)
+    doc = "Returns:\n    The order id.\n"
+    assert mcp_client.compact_tool_description(doc) == doc
+
+
+def test_compact_disabled_returns_full_docstring(monkeypatch) -> None:
+    """The flag falls back to the previous behaviour with no rebuild."""
+    monkeypatch.setattr(mcp_client.agent_cfg, "COMPACT_TOOL_DESCRIPTIONS", False)
+    assert mcp_client.compact_tool_description(_REAL_DOCSTRING) == _REAL_DOCSTRING
+
+
+def test_compact_handles_empty_description(monkeypatch) -> None:
+    """Tools may legitimately carry no description at all."""
+    monkeypatch.setattr(mcp_client.agent_cfg, "COMPACT_TOOL_DESCRIPTIONS", True)
+    assert mcp_client.compact_tool_description("") == ""
+
+
+def test_function_schema_uses_the_compacted_description(monkeypatch) -> None:
+    """to_function_schema is the path that reaches the LLM tool schema."""
+    monkeypatch.setattr(mcp_client.agent_cfg, "COMPACT_TOOL_DESCRIPTIONS", True)
+    tool = mcp_client.MCPTool(
+        name="list_categories", server="core", description=_REAL_DOCSTRING
+    )
+    schema = tool.to_function_schema()
+    assert schema["description"].startswith("[MCP:core] List the menu categories")
+    assert "Returns:" not in schema["description"]
+    assert tool.description == _REAL_DOCSTRING  # source of truth untouched

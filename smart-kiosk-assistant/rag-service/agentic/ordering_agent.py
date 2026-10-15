@@ -1,5 +1,18 @@
 """OrderingAgent — Google ADK LlmAgent for the kiosk ordering flow.
 
+.. warning::
+
+   **This module is not the live agent.** Nothing imports it. rag-service
+   loads its agent through ``agentic.plugin_loader.load_agent_factory()``,
+   which resolves to ``plugins.kiosk.ordering_agent`` (see ``_FALLBACK_MODULE``
+   there and the ``agent_module`` key in the domain config). That is where the
+   live system prompt and tool wiring live, and where any change intended to
+   affect behaviour or latency must go.
+
+   This copy is retained as the domain-agnostic reference implementation the
+   plugin was derived from. A prompt rewrite was once made here in the belief
+   that it was the live prompt; it had no effect on anything.
+
 The agent:
   1. Answers menu/FAQ questions via the ``knowledge_lookup`` tool (RAG pipeline).
   2. Places, updates, gets, and confirms orders via MCP tools on kiosk-core.
@@ -897,7 +910,7 @@ class OrderingAgent:
             return result
 
         _mcp_fn.__name__ = tool_name
-        _mcp_fn.__doc__ = mcp_tool.description or tool_name
+        _mcp_fn.__doc__ = mcp_tool.prompt_description or tool_name
 
         # Build an explicit signature from the MCP JSON input schema so ADK
         # introspection produces a correct function-call declaration.

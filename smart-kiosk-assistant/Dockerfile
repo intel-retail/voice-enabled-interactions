@@ -17,9 +17,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # libportaudio2 is required by the sounddevice wheel at import time even
-# when no mic device is used (Gradio file-upload mode).
+# when no mic device is used (Gradio file-upload mode). git is required by
+# pip to install the vlm_metrics_logger dependency straight from
+# performance-tools' git repo (see requirements.txt).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libportaudio2 curl \
+    && apt-get install -y --no-install-recommends libportaudio2 curl git \
     && groupadd --gid ${APP_GID} appuser \
     && useradd --uid ${APP_UID} --gid ${APP_GID} --create-home --home-dir /app appuser \
     && rm -rf /var/lib/apt/lists/*

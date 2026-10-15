@@ -38,6 +38,7 @@ guards in this package.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -269,6 +270,72 @@ def speak_removal(payload: dict[str, Any]) -> str | None:
     return f"I've removed {names}. Your new total is {currency}{_money(total)}."
 
 
+def speak_current_order(payload: dict[str, Any]) -> str | None:
+    """Template a reply for a ``get_current_order`` cart read.
+
+    "What's in my cart" / "what's my total" is the most common read in the
+    ordering flow, and every field needed to answer it is already present in
+    the tool result. Narrating it with a second LLM call costs a full
+    ~1.2 s round-trip to restate data the template can copy verbatim — which
+    is also strictly more faithful, since a template cannot drop a line,
+    rename an item, or mis-add a total.
+
+    Args:
+        payload: The tool's own JSON result (already unwrapped from the MCP
+            transport envelope) — an ``Order`` dump with ``items``/``total``,
+            or ``None`` when the customer has no open order.
+
+    Returns:
+        A spoken sentence, or ``None`` to defer to normal LLM narration when
+        the payload is not a recognisable order shape.
+    """
+    currency = domain_config.get_currency_symbol()
+
+    # A transport-level failure is surfaced by ``unwrap`` as ``{"error": ...}``.
+    # It must NOT fall through to the empty-cart reply below: "your cart is
+    # empty" would be a false claim about a cart we simply failed to read,
+    # and the customer's real items would silently vanish from the
+    # conversation. Defer to the model, which will report the failure.
+    if isinstance(payload, dict) and "error" in payload:
+        return None
+
+    # No open draft at all. ``get_current_order`` returns null here, which
+    # ``unwrap`` surfaces as None, so this is reached via the explicit
+    # empty-cart call in ``speak()`` rather than through this branch alone.
+    if payload is None or (isinstance(payload, dict) and not payload.get("items")):
+        return domain_config.get_reply_template("cart_empty") or (
+            "Your cart is empty at the moment. What would you like to order?"
+        )
+    if not isinstance(payload, dict):
+        return None
+
+    total = payload.get("total")
+    if total is None:
+        return None
+
+    # Speak quantities only when there is more than one, so a single item
+    # reads "a Classic Chicken Burger" rather than the robotic "1 Classic
+    # Chicken Burger".
+    parts: list[str] = []
+    for item in payload["items"]:
+        if not isinstance(item, dict):
+            return None
+        name = str(item.get("product_name") or "").strip()
+        if not name:
+            return None
+        quantity = item.get("quantity") or 1
+        parts.append(f"{quantity} {name}" if quantity > 1 else name)
+
+    names = _join_names(parts)
+    if not names:
+        return None
+
+    tpl = domain_config.get_reply_template("cart_summary")
+    if tpl:
+        return tpl.format(items=names, total=_money(total), currency=currency)
+    return f"Sure. You have {names}. Your total is {currency}{_money(total)}."
+
+
 # Dispatch table used by ordering_agent.py — keeps the "which tools are
 # speakable" decision in one place, next to the templates themselves.
 _TEMPLATES = {
@@ -279,6 +346,10 @@ _TEMPLATES = {
     "remove_from_order": speak_removal,
     "list_products": speak_catalogue,
     "list_categories": speak_catalogue,
+    # Returns the same [{product_id, name, category, price}, ...] shape as
+    # list_products, so it reuses the catalogue templater verbatim.
+    "get_popular_products": speak_catalogue,
+    "get_current_order": speak_current_order,
 }
 
 # Public: which tools this module can ever speak for. Checked by
@@ -286,20 +357,34 @@ _TEMPLATES = {
 # doesn't know about is never a candidate for skipping narration.
 SPEAKABLE_TOOLS = frozenset(_TEMPLATES)
 
-# Catalogue tools are speakable only when the customer was actually browsing.
+# Read-only tools are speakable only when the customer was actually browsing.
 #
 # Templating sets ``skip_summarization``, which ADK treats as the END of the
 # turn. For a mutating tool that is safe — the mutation already happened and
-# the template describes it. For a *read* like ``list_products`` it is only
-# safe if the read was the customer's goal. Were the model to use
-# ``list_products`` as an intermediate lookup before ``place_order``, ending
-# the turn at the lookup would drop the order.
+# the template describes it. For a *read* like ``list_products`` or
+# ``get_current_order`` it is only safe if the read was the customer's goal.
+# Were the model to use one as an intermediate lookup before ``place_order``,
+# ending the turn at the lookup would drop the order.
 #
 # Measured across the 234-turn replay corpus that has never happened (zero
 # multi-tool turns; 56 single catalogue turns), and the failure mode is a
 # stale menu recital rather than a false claim, so no truthfulness invariant
 # rests on this. It is still gated, because the gate is free.
-_CATALOGUE_TOOLS = frozenset({"list_products", "list_categories"})
+_READ_TOOLS = frozenset({
+    "list_products",
+    "list_categories",
+    "get_popular_products",
+    "get_current_order",
+})
+
+# Tools whose result is a top-level JSON *array*. The mutation tools and
+# ``get_current_order`` all return an object, so they use the dict-narrowing
+# ``unwrap`` that the guards expect; these need the list-preserving decoder.
+_LIST_RESULT_TOOLS = frozenset({
+    "list_products",
+    "list_categories",
+    "get_popular_products",
+})
 
 # Explicit cart-mutation intent. Deliberately narrow: a false NEGATIVE here
 # just costs one LLM call (today's behaviour), while a false POSITIVE could
@@ -327,6 +412,35 @@ def is_browse_intent(utterance: str) -> bool:
     return not _MUTATION_INTENT_RE.search(utterance or "")
 
 
+# Single-item price/cost questions only — deliberately narrow. General
+# catalogue browsing ("what desserts do you have") still needs the
+# authoritative list_products tool-calling path (see _CATALOGUE_QUERY_RE in
+# ordering_agent.py); only a "how much does X cost" style lookup is safe to
+# answer from directive mode's cached catalogue, because that lookup is a
+# single exact-name match against the same static menu already trusted for
+# <act> item names (see directive_mode._execute_price).
+_PRICE_QUERY_RE = re.compile(
+    r"\bhow\s+much\s+(?:does|is|for|would|are)\b|"
+    r"\bwhat(?:'s|s| is| does)\b.{0,40}\b(?:cost|costs|price)\b|"
+    r"\b(?:price|cost)\s+of\b",
+    re.IGNORECASE,
+)
+
+
+def is_price_query_intent(utterance: str) -> bool:
+    """Return True when the utterance is a single-item price/cost question.
+
+    Args:
+        utterance: The customer's raw message for this turn.
+
+    Returns:
+        ``True`` for "how much does the brownie cost?" style questions, which
+        directive mode may answer via a fast cached-catalogue lookup instead
+        of falling through to the slower tool-calling path.
+    """
+    return bool(_PRICE_QUERY_RE.search(utterance or ""))
+
+
 def speak(tool_name: str, raw_result: Any, utterance: str = "") -> str | None:
     """Return a spoken reply for ``tool_name``'s result, or None to defer to the LLM.
 
@@ -335,7 +449,7 @@ def speak(tool_name: str, raw_result: Any, utterance: str = "") -> str | None:
         raw_result: The raw value returned by ``mcp_client.call_tool`` (the
             MCP transport envelope, not yet decoded).
         utterance: The customer's raw message this turn. Only consulted for
-            catalogue reads — see ``_CATALOGUE_TOOLS``. Defaults to empty,
+            catalogue reads — see ``_READ_TOOLS``. Defaults to empty,
             which is treated as browse intent, so existing callers and the
             mutation templates are unaffected.
 
@@ -346,16 +460,52 @@ def speak(tool_name: str, raw_result: Any, utterance: str = "") -> str | None:
     template = _TEMPLATES.get(tool_name)
     if template is None:
         return None
-    if tool_name in _CATALOGUE_TOOLS and not is_browse_intent(utterance):
+    if tool_name in _READ_TOOLS and not is_browse_intent(utterance):
         return None
-    # Catalogue tools return a top-level JSON array; the mutation tools all
-    # return an object. ``unwrap`` narrows to dict for the guards' benefit,
-    # so catalogue reads need the list-preserving decoder.
-    decode = unwrap_any if tool_name in _CATALOGUE_TOOLS else unwrap
+    decode = unwrap_any if tool_name in _LIST_RESULT_TOOLS else unwrap
     payload = decode(raw_result)
     if payload is None:
+        # For every other tool a null result means "no usable data, let the
+        # model narrate". For get_current_order it is the answer itself:
+        # the tool returns null precisely when the customer has no open
+        # order, so this is an empty cart, not a decode failure.
+        #
+        # But unwrap() collapses FOUR cases to None: a genuine JSON null, a
+        # non-dict envelope, an empty/missing result, and a JSONDecodeError.
+        # Speaking "your cart is empty" for a decode failure would be a false
+        # statement about order state — the exact failure this deterministic
+        # path exists to prevent — and skip_summarization means the model never
+        # gets to correct it. So require positive evidence of a successful call
+        # that really returned null before speaking the empty-cart line.
+        if tool_name == "get_current_order" and _is_successful_null(raw_result):
+            return speak_current_order(None)
         return None
     return template(payload)
+
+
+def _is_successful_null(raw_result: Any) -> bool:
+    """True when the envelope reports success and its payload is literally null.
+
+    Args:
+        raw_result: The raw ``call_tool`` envelope, before unwrapping.
+
+    Returns:
+        True only for a well-formed success envelope whose ``result`` decodes
+        to JSON ``null`` — never for a malformed, errored, or undecodable one.
+    """
+    if not isinstance(raw_result, dict) or "error" in raw_result:
+        return False
+    if raw_result.get("status") not in (None, "success"):
+        return False
+    result = raw_result.get("result")
+    if result is None:
+        return True
+    if not isinstance(result, str):
+        return False
+    try:
+        return json.loads(result) is None
+    except (json.JSONDecodeError, TypeError):
+        return False
 
 
 # ── Structured root-fact answers ─────────────────────────────────────────
