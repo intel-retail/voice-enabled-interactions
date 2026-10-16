@@ -350,6 +350,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Overrides the session's silence_timeout_seconds (defaults to kiosk-core's own configured value)",
     )
     parser.add_argument("--session-timeout", type=float, default=60.0, help="Max seconds to wait per turn")
+    parser.add_argument(
+        "--uplink",
+        choices=("ws", "rest"),
+        default=os.getenv("V2V_UPLINK", "ws"),
+        help=(
+            "Audio transport to kiosk-core: 'ws' replays each line over the "
+            "hands-free WebSocket uplink (raw PCM frames); 'rest' uses the "
+            "legacy chunked WAV POST. Default: ws (override with V2V_UPLINK)."
+        ),
+    )
     parser.add_argument("--lead-pad-seconds", type=float, default=DEFAULT_LEAD_PAD_SECONDS)
     parser.add_argument("--trail-pad-seconds", type=float, default=DEFAULT_TRAIL_PAD_SECONDS)
     parser.add_argument(
@@ -469,6 +479,7 @@ def main(argv: list[str] | None = None) -> int:
                     session_timeout=args.session_timeout,
                     push_chunk_seconds=args.push_chunk_seconds,
                     explicit_end_mark=args.explicit_end_mark,
+                    uplink=args.uplink,
                 )
                 turn.fixture = f"{script_name}:line{i}"
                 report.turns.append(turn)

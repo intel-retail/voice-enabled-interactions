@@ -89,6 +89,37 @@ export async function endAudioStream(sessionId: string): Promise<void> {
   if (!res.ok) throw new Error(`Failed to end stream: ${res.status}`);
 }
 
+/**
+ * Build the hands-free start payload sent as the first WebSocket message.
+ * Mirrors startStreamSession's body (hands-free is never single-chunk, so it
+ * keeps the tuned chunk/silence values and the adaptive pre-warm flush).
+ */
+export function buildStreamStartPayload(
+  sampleRate: number,
+  history: HistoryTurn[],
+  conversationId?: string,
+): Record<string, unknown> {
+  return {
+    sample_rate: sampleRate,
+    chunk_seconds: tuning.asrChunkSeconds,
+    silence_timeout_seconds: tuning.silenceTimeoutSeconds,
+    max_session_seconds: 60.0,
+    silence_threshold: 900,
+    language: 'en',
+    temperature: 0.0,
+    tts_language: 'English',
+    history,
+    ...(conversationId ? { conversation_id: conversationId } : {}),
+    ...BACKEND_SERVICE_URLS,
+  };
+}
+
+/** Resolve the hands-free WebSocket URL against the current page origin. */
+export function buildStreamSocketUrl(): string {
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${proto}//${window.location.host}${endpoints.streamSocket}`;
+}
+
 /** Poll the current session snapshot (transcript, response, tts segments, status). */
 export async function pollSession(sessionId: string): Promise<SessionSnapshot> {
   const res = await fetch(endpoints.pollSession(sessionId));

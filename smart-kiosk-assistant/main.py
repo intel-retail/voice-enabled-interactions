@@ -1,9 +1,10 @@
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager, AsyncExitStack
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 
@@ -250,6 +251,77 @@ def end_audio_stream(session_id: str) -> dict[str, str]:
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"status": "eos_accepted"}
+
+
+@app.websocket("/api/v1/sessions/stream")
+async def stream_session_ws(websocket: WebSocket) -> None:
+    """Persistent full-duplex uplink for hands-free browser conversations.
+
+    Protocol (one session per turn, results still polled over REST):
+      1. client -> ``{"type": "start", ...SessionStartRequest fields}``
+         server -> ``{"type": "started", "session_id": ...}``
+      2. client -> binary frames of raw little-endian int16 mono PCM
+      3. client -> ``{"type": "playback_started"}`` when the first answer
+         segment actually begins playing (stops the honest v2v clock)
+      4. client -> ``{"type": "end"}`` (end-of-turn) or ``{"type": "cancel"}``
+
+    Push-to-talk and the benchmark keep the REST chunk path; this endpoint is
+    gated by ``KIOSK_CORE_HANDSFREE_WS_ENABLED`` so it is fully reversible.
+    """
+    if not cfg.DEFAULT_HANDSFREE_WS_ENABLED:
+        await websocket.close(code=1008, reason="hands-free websocket disabled")
+        return
+
+    await websocket.accept()
+    session_id: str | None = None
+    try:
+        start_msg = await websocket.receive_json()
+        if not isinstance(start_msg, dict) or start_msg.get("type") != "start":
+            await websocket.close(code=1008, reason="expected a start message")
+            return
+        fields = {k: v for k, v in start_msg.items() if k != "type"}
+        try:
+            request = SessionStartRequest(**fields)
+        except Exception as exc:  # pydantic ValidationError and friends
+            await websocket.send_json({"type": "error", "detail": f"invalid start: {exc}"})
+            await websocket.close(code=1008)
+            return
+
+        await _clear_stale_cart_for_new_session(request.history)
+        snapshot = service.start_stream_session(request)
+        session_id = str(snapshot["session_id"])
+        await websocket.send_json({"type": "started", "session_id": session_id})
+
+        while True:
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                break
+            data = message.get("bytes")
+            if data is not None:
+                service.push_pcm(session_id, data)
+                continue
+            text = message.get("text")
+            if not text:
+                continue
+            try:
+                event = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            event_type = event.get("type") if isinstance(event, dict) else None
+            if event_type == "playback_started":
+                service.mark_playback_started(session_id)
+            elif event_type in ("end", "cancel"):
+                service.signal_stream_end(session_id)
+    except WebSocketDisconnect:
+        pass
+    except Exception:  # noqa: BLE001 — never leak a traceback onto the socket
+        logger.exception("[WS] stream session failed (session=%s)", session_id)
+    finally:
+        if session_id is not None:
+            try:
+                service.signal_stream_end(session_id)
+            except Exception:  # noqa: BLE001 — already ended / unknown
+                pass
 
 
 @app.post("/api/v1/sessions/start", response_model=None)

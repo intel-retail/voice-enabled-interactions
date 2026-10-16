@@ -33,6 +33,15 @@ DEFAULT_ANALYZER_STREAMING_ENABLED = os.getenv(
     "KIOSK_CORE_ANALYZER_STREAMING_ENABLED", "false"
 ).lower() not in ("false", "0", "no")
 
+# Hands-free browser sessions stream raw int16 PCM frames over a persistent
+# WebSocket (`/api/v1/sessions/stream`) instead of posting WAV chunks over
+# separate REST requests. Additive and reversible: push-to-talk and the
+# benchmark keep the REST chunk path, and with this off the WebSocket endpoint
+# simply refuses the upgrade so clients fall back to REST.
+DEFAULT_HANDSFREE_WS_ENABLED = os.getenv(
+    "KIOSK_CORE_HANDSFREE_WS_ENABLED", "true"
+).lower() not in ("false", "0", "no")
+
 # Cadence of non-blocking "preview" commits while streaming is active. Each
 # commit only tells the analyzer "transcribe what's buffered so far" -- it
 # never blocks the frame-capture loop. Matches the kiosk-voice-lab reference

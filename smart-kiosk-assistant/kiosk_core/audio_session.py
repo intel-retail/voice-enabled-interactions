@@ -808,6 +808,16 @@ class BaseAudioSession:
         # speech ends (see tests/benchmarks/v2v_fixture_benchmark.py). None
         # for microphone/browser-stream sessions.
         self._t_playback_start: float | None = None
+        # Honest speaker-playback anchor: the instant the browser reported (over
+        # the hands-free WebSocket, from its onFirstPlay) that the first answer
+        # segment actually began playing. Set once per turn in
+        # mark_speaker_playback(); used as the voice_to_voice_speaker_ms end so
+        # the clock stops at the speaker rather than at the on-disk WAV write.
+        self._t_speaker_playback: float | None = None
+        # Set True once _record_turn_trace has appended this turn's trace, so a
+        # playback report that lands afterwards amends the stored trace instead
+        # of being lost.
+        self._turn_trace_recorded: bool = False
         self._asr_ms_total: float = 0.0             # summed transcribe_file time
         self._asr_chunks: int = 0                   # number of transcribe calls
         self._t_turn_start: float | None = None     # start of _finalize_run
@@ -2025,6 +2035,23 @@ class BaseAudioSession:
             _mcp_ms, _mcp_calls, _guard_ms, _template_ms,
         )
 
+    def mark_speaker_playback(self) -> None:
+        """Record the instant the client reported first-answer-audio playback.
+
+        Called from the hands-free WebSocket handler when the browser's
+        ``onFirstPlay`` fires, so the honest voice-to-voice clock stops at the
+        speaker rather than at the on-disk WAV write. Idempotent per turn: only
+        the first report for a turn is kept. If the turn trace was already
+        recorded (a short turn finished synthesising before playback started),
+        the stored trace is amended in place.
+        """
+        if self._t_speaker_playback is not None:
+            return
+        self._t_speaker_playback = time.monotonic()
+        if self._turn_trace_recorded and self._t_last_word is not None:
+            ms = round(max(0.0, (self._t_speaker_playback - self._t_last_word) * 1000), 1)
+            pipeline_store.amend_speaker_v2v(self.session_id, ms)
+
     def _record_turn_trace(
         self,
         tool_calls: list[str],
@@ -2102,6 +2129,9 @@ class BaseAudioSession:
         processing_latency_answer_ms = _ms(t_decision, t_answer_audio)
         voice_to_voice_ms = _ms(t_last_word, t_first_audio)
         voice_to_voice_answer_ms = _ms(t_last_word, t_answer_audio)
+        # Honest "at the speaker" span — only populated when a client reported
+        # playback over the hands-free WebSocket (None otherwise).
+        voice_to_voice_speaker_ms = _ms(t_last_word, self._t_speaker_playback)
 
         # Diagnostics backing the two spans above.
         endpoint_silence_run_ms = (
@@ -2155,6 +2185,7 @@ class BaseAudioSession:
                 processing_latency_ms=processing_latency_ms,
                 voice_to_voice_answer_ms=voice_to_voice_answer_ms,
                 processing_latency_answer_ms=processing_latency_answer_ms,
+                voice_to_voice_speaker_ms=voice_to_voice_speaker_ms,
                 first_audio_was_opener=self._first_audio_was_opener,
                 opener_failed=self._opener_failed,
                 endpoint_silence_run_ms=endpoint_silence_run_ms,
@@ -2199,6 +2230,7 @@ class BaseAudioSession:
             ),
         )
         pipeline_store.record(trace)
+        self._turn_trace_recorded = True
         # Published to performance-tools as THE voice-to-voice number for this
         # turn. Anchored on the first sound carrying the ANSWER, not on the
         # cached opener: with the opener enabled (the default) the opener stamp
@@ -3721,10 +3753,27 @@ class BrowserStreamSession(BaseAudioSession):
             audio = np.frombuffer(wav_bytes, dtype=np.int16)
 
         # Split into frame-sized pieces so _process_frame_stream sees uniform frames
+        self._enqueue_pcm_frames(audio)
+
+    def _enqueue_pcm_frames(self, audio: np.ndarray) -> None:
+        """Split a mono int16 PCM array into uniform frames for the pipeline."""
         for start in range(0, len(audio), self._frame_samples):
             frame = audio[start : start + self._frame_samples]
             if len(frame) > 0:
                 self._push_queue.put(frame.copy())
+
+    def push_pcm(self, pcm_bytes: bytes) -> None:
+        """Feed raw little-endian int16 mono PCM straight into the pipeline.
+
+        The decode-less twin of :meth:`push_audio`: the hands-free WebSocket
+        uplink sends bare PCM frames (no WAV container), so there is no RIFF
+        header to strip. Shares the same ``_t_playback_start`` anchor and the
+        same frame-split into ``_push_queue``.
+        """
+        if self._t_playback_start is None:
+            self._t_playback_start = time.monotonic()
+        audio = np.frombuffer(pcm_bytes, dtype=np.int16)
+        self._enqueue_pcm_frames(audio)
 
     def signal_end(self) -> None:
         """Signal that the browser has stopped recording (enqueue sentinel).
