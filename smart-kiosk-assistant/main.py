@@ -298,7 +298,22 @@ async def stream_session_ws(websocket: WebSocket) -> None:
                 break
             data = message.get("bytes")
             if data is not None:
-                service.push_pcm(session_id, data)
+                # The backend endpoint detector may close the turn (silence
+                # timeout) while the browser is still sending its last few
+                # captured frames. Those late frames are expected in hands-free
+                # mode, not an error: swallow them and tell the client the turn
+                # ended so it can finalise/re-arm, rather than tearing the
+                # socket down with a traceback.
+                try:
+                    service.push_pcm(session_id, data)
+                except ValueError:
+                    try:
+                        await websocket.send_json(
+                            {"type": "turn_ended", "session_id": session_id}
+                        )
+                    except Exception:  # noqa: BLE001 — client already gone
+                        pass
+                    break
                 continue
             text = message.get("text")
             if not text:

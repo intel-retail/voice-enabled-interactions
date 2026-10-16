@@ -52,7 +52,6 @@ export async function startStreamSession(
       // exceed one chunk (see tuning.singleChunkMaxSeconds).
       max_session_seconds: singleChunk ? tuning.singleChunkMaxSeconds : 60.0,
       silence_threshold: 900,
-      language: 'en',
       temperature: 0.0,
       // tts_model intentionally omitted: kiosk-core's SessionStartRequest
       // defaults it to config.DEFAULT_TTS_MODEL (server-side, currently
@@ -105,7 +104,6 @@ export function buildStreamStartPayload(
     silence_timeout_seconds: tuning.silenceTimeoutSeconds,
     max_session_seconds: 60.0,
     silence_threshold: 900,
-    language: 'en',
     temperature: 0.0,
     tts_language: 'English',
     history,
