@@ -513,9 +513,9 @@ def build_summary(turns: list[TurnResult]) -> dict[str, Any]:
     opener_flags = [t.first_audio_was_opener for t in ok]
     summary["first_audio_was_opener_count"] = sum(1 for f_ in opener_flags if f_)
     summary["first_audio_turn_count"] = len(opener_flags)
-    # A TTS TTFB of ~1 ms is a cache hit, not a fast synthesiser. Report how
-    # many turns it applied to so the TTFB percentiles above can be read
-    # correctly instead of looking like a broken metric.
+    # A first-sentence time of ~1 ms is a cache hit, not a fast synthesiser.
+    # Report how many turns it applied to so the tts_ttfb_ms percentiles above
+    # can be read correctly instead of looking like a broken metric.
     cached = [
         t.tts_first_segment_cached for t in ok
         if t.tts_first_segment_cached is not None
@@ -670,9 +670,11 @@ def build_kpi_vocabulary(summary: dict[str, Any]) -> dict[str, Any]:
             "LLM TTFT", "agent_ttft_ms",
             "prompt in", "first token out",
         ),
-        "tts_time_to_first_byte": _kpi(
-            "TTS TTFB", "tts_ttfb_ms",
-            "first sentence handed to synthesizer", "first audio byte on disk",
+        "tts_time_to_first_sentence": _kpi(
+            "TTS time to first sentence", "tts_ttfb_ms",
+            "first sentence handed to synthesizer", "first full sentence WAV on disk",
+            "Runs until sentence 1's WAV is finished, so it measures time to the "
+            "first whole sentence, not the first audio byte out of the synthesizer.",
         ),
         "customer_experience_band": {
             "voice_to_voice_p50_ms": v2v_p50,
@@ -755,7 +757,7 @@ def build_latency_breakdown(summary: dict[str, Any]) -> list[dict[str, Any]]:
     )
     _row(
         "tts_ttfb",
-        "TTS TTFB (first sentence -> first audio byte on disk)",
+        "TTS time to first sentence (first sentence -> first full sentence WAV on disk)",
         tts_ttfb_ms, processing_ms,
     )
     _row(
@@ -803,7 +805,7 @@ def _print_kpi_vocabulary(kpi: dict[str, Any] | None) -> None:
     order = (
         "voice_to_voice_latency", "voice_to_voice_answer_latency",
         "endpointing_delay", "processing_latency", "processing_latency_answer",
-        "transcription_latency", "llm_time_to_first_token", "tts_time_to_first_byte",
+        "transcription_latency", "llm_time_to_first_token", "tts_time_to_first_sentence",
     )
     print(f"\n{'-' * 78}\nCANONICAL KPI VOCABULARY\n{'-' * 78}")
     print(f"{'KPI':<34}{'p50 ms':>10}{'p95 ms':>10}")
@@ -861,10 +863,31 @@ def print_report(report: BenchmarkReport) -> None:
         f"{report.summary.get('endpoint_shortcut_eligible_count')} eligible turns "
         f"(the rest fell back to the full silence_timeout_seconds wait)"
     )
-    print(
-        "\nCustomer-facing number: voice_to_voice_ms p95 = "
-        f"{(report.summary.get('voice_to_voice_ms') or {}).get('p95', 'n/a')} ms"
-    )
+    # Headline: the clip-anchored number. The customer's last word is taken
+    # from the test clip itself (where speech ends in the WAV), independent of
+    # the kiosk's own endpoint detector. Endpointing is part of what we measure,
+    # so the clip anchor is the honest customer-facing figure; the
+    # detector-anchored number is shown below it only as a secondary
+    # cross-check. Live-mic runs have no clip ground truth, so they fall back to
+    # the detector-anchored number as the headline.
+    gt_stats = report.summary.get("voice_to_voice_ground_truth_ms")
+    det_stats = report.summary.get("voice_to_voice_ms") or {}
+    if gt_stats:
+        print(
+            "\nCustomer-facing number (clip-anchored): voice_to_voice "
+            f"p95 = {gt_stats.get('p95', 'n/a')} ms  "
+            f"median = {gt_stats.get('median', 'n/a')} ms"
+        )
+        print(
+            "  secondary (detector-anchored, kiosk VAD): voice_to_voice_ms "
+            f"p95 = {det_stats.get('p95', 'n/a')} ms  "
+            f"median = {det_stats.get('median', 'n/a')} ms"
+        )
+    else:
+        print(
+            "\nCustomer-facing number (detector-anchored, kiosk VAD; no clip "
+            f"ground truth): voice_to_voice_ms p95 = {det_stats.get('p95', 'n/a')} ms"
+        )
     answer_stats = report.summary.get("voice_to_voice_answer_ms")
     if answer_stats:
         print(
@@ -878,12 +901,6 @@ def print_report(report: BenchmarkReport) -> None:
         print(
             "Processing latency (turn-end decision -> first sound at speaker): "
             f"median = {processing_stats['median']} ms  p95 = {processing_stats['p95']} ms"
-        )
-    gt_stats = report.summary.get("voice_to_voice_ground_truth_ms")
-    if gt_stats:
-        print(
-            "Ground-truth v2v (independent silence-detector EOS, kiosk-voice-lab "
-            f"method) median = {gt_stats['median']} ms  p95 = {gt_stats['p95']} ms"
         )
     print_breakdown(report)
 
@@ -1324,7 +1341,7 @@ def main(argv: list[str] | None = None) -> int:
                     f"opener={turn.first_audio_was_opener}  "
                     f"final_flush_wait={turn.final_flush_wait_ms} ms  "
                     f"shortcut_fired={turn.endpoint_shortcut_fired}  "
-                    f"tts_ttfb={turn.tts_ttfb_ms} ms{gt}  "
+                    f"tts_first_sentence={turn.tts_ttfb_ms} ms{gt}  "
                     f"transcript={turn.transcript[:80]!r}"
                 )
 

@@ -17,7 +17,7 @@ incomparable.
 | **Processing latency** | Turn-end decision → first sound at the speaker |
 | **Transcription latency** | Last word → final transcript available |
 | **LLM TTFT** | Time to first token |
-| **TTS TTFB** | Time to first byte of synthesized audio |
+| **TTS time to first sentence** | Time until sentence 1's synthesized audio WAV is on disk (not the first audio byte) |
 
 The two parts reconcile exactly:
 
@@ -69,6 +69,14 @@ pipeline alone.
 
 Report the **median and p95**, never the mean — the distribution has a
 long tail and the mean hides it.
+
+The headline voice-to-voice number the benchmark prints is **clip-anchored**:
+the customer's last word is taken from the test clip itself (where speech ends
+in the WAV), not from the kiosk's own voice activity detector. Endpointing is
+part of what is being measured, so the clip anchor is the honest customer-facing
+figure. The detector-anchored number (`voice_to_voice_ms`, started at the
+kiosk's VAD) is printed below it only as a secondary cross-check. Live-mic runs
+have no clip ground truth and fall back to the detector number as the headline.
 
 ### `run_manifest.json`
 

@@ -501,7 +501,7 @@ def main(argv: list[str] | None = None) -> int:
                         f"opener={turn.first_audio_was_opener}  "
                         f"final_flush_wait={turn.final_flush_wait_ms} ms  "
                         f"shortcut_fired={turn.endpoint_shortcut_fired}  "
-                        f"tts_ttfb={turn.tts_ttfb_ms} ms{gt}  "
+                        f"tts_first_sentence={turn.tts_ttfb_ms} ms{gt}  "
                         f"transcript={turn.transcript[:80]!r}"
                     )
 
