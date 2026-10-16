@@ -127,6 +127,10 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
       // hands-free socket so the voice-to-voice clock stops at the speaker
       // (not at the on-disk WAV write). No-op on the REST push-to-talk path.
       voiceSocketRef.current?.playbackStarted();
+      // The socket's only remaining job for this turn was to carry that stamp;
+      // close it now so it doesn't linger across the (new-socket-per-turn)
+      // re-arm. kiosk-core finalises the turn on disconnect.
+      closeSocket();
     },
     onAllDone: () => {
       // After the assistant finishes speaking, allow a KPI/order refresh.
@@ -213,16 +217,26 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
     }
   }, []);
 
-  const teardownCapture = useCallback(() => {
-    recordingRef.current = false;
-    // Close the hands-free uplink socket if one is open (the server's silence
-    // endpoint has already ended the turn; closing is idempotent).
+  // Close the hands-free uplink socket, if one is open. Kept separate from
+  // teardownCapture on purpose: the socket must OUTLIVE the mic teardown at
+  // turn-end so the browser can still report `playback_started` once the
+  // answer audio actually reaches the speaker (~2 s after the silence
+  // endpoint). Closing it inside teardownCapture would null the ref before
+  // onFirstPlay fires, silently dropping the speaker-anchored v2v stamp.
+  const closeSocket = useCallback(() => {
     try {
       voiceSocketRef.current?.close();
     } catch {
       /* already closing */
     }
     voiceSocketRef.current = null;
+  }, []);
+
+  const teardownCapture = useCallback(() => {
+    recordingRef.current = false;
+    // NOTE: the uplink socket is intentionally NOT closed here — it lives until
+    // playback is reported (onFirstPlay) or the turn produced no audio. See
+    // closeSocket() above.
     try {
       workletRef.current?.disconnect();
       sourceRef.current?.disconnect();
@@ -259,10 +273,11 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
     sessionIdRef.current = null;
     stopPolling();
     teardownCapture();
+    closeSocket();
     setPartialUser('');
     setPartialAssistant('');
     setPhase('idle');
-  }, [stopPolling, teardownCapture]);
+  }, [stopPolling, teardownCapture, closeSocket]);
 
   // ── Single poll loop: drives partial transcript, response, TTS, completion ──
   const pollLoop = useCallback(async () => {
@@ -355,12 +370,17 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
       }
       // onTurnComplete also fires when TTS finishes (onAllDone); fire here too
       // in case there was no audio to play.
-      if (segs.length === 0) onTurnComplete?.();
+      if (segs.length === 0) {
+        // No answer audio will play, so onFirstPlay never fires to close the
+        // uplink socket — close it here so it doesn't linger into the re-arm.
+        closeSocket();
+        onTurnComplete?.();
+      }
       return;
     }
 
     pollTimerRef.current = window.setTimeout(pollLoop, tuning.pollIntervalMs);
-  }, [audioQueue, onTurnComplete, stopPolling, teardownCapture]);
+  }, [audioQueue, onTurnComplete, stopPolling, teardownCapture, closeSocket]);
 
   // ── Public: start recording ───────────────────────────────────────────────
   const start = useCallback(async () => {
@@ -455,6 +475,10 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
         // acknowledges with a session id (onStarted), at which point the poll
         // loop begins — mirroring the REST branch below. Frames captured
         // before the ack are queued inside the socket, so nothing is lost.
+        // Defensively close any socket left over from a previous turn (the
+        // normal close paths are onFirstPlay / the no-audio branch) so we
+        // never leak a connection by overwriting the ref.
+        closeSocket();
         voiceSocketRef.current = new VoiceStreamSocket(
           TARGET_RATE,
           buildHistory(),
@@ -473,6 +497,7 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
               // push-to-talk path is unaffected and the next tap can retry.
               recordingRef.current = false;
               teardownCapture();
+              closeSocket();
               setPhase('idle');
               setPartialUser('');
               conversationModeRef.current = false;
@@ -503,6 +528,7 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
       if (myGen !== startGenRef.current) return;
       recordingRef.current = false;
       teardownCapture();
+      closeSocket();
       setPhase('idle');
       setPartialUser('');
       // A failed start must also drop hands-free mode. Leaving it on rendered
@@ -525,6 +551,7 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
     pollLoop,
     stopPolling,
     teardownCapture,
+    closeSocket,
   ]);
 
   // ── Public: stop recording → finalise ─────────────────────────────────────
@@ -549,8 +576,10 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
       return;
     }
     // Hands-free (WebSocket) turns are ended by the `end` event above plus the
-    // socket close in teardownCapture, so the REST end-of-stream call would
-    // only redundantly re-signal the same turn.
+    // backend silence endpoint. The uplink socket is kept open past this point
+    // so onFirstPlay can report playback back to kiosk-core; it is closed by
+    // onFirstPlay (or the no-audio branch in pollLoop). The REST end-of-stream
+    // call would only redundantly re-signal the same turn.
     if (!wasWs) {
       try {
         await endAudioStream(sid);
@@ -627,6 +656,7 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
       conversationModeRef.current = false;
       stopPolling();
       teardownCapture();
+      closeSocket();
       audioQueue.stop();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
