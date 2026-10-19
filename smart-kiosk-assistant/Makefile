@@ -504,8 +504,20 @@ build: check-env ## Pull images (default with .env); REGISTRY=false builds local
 			REGISTRY_REPO=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) build identity-service; \
 		fi; \
 	fi; \
-	echo "$(YELLOW)  Pulling audio-analyzer, text-to-speech, and metrics-collector from registry (image-only; built once from the edge-ai-libraries fork)...$(NC)"; \
-	REGISTRY_REPO=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull audio-analyzer text-to-speech; \
+	if [ "$(REGISTRY)" = "false" ] || [ "$(REGISTRY)" = "FALSE" ]; then \
+		for svc in audio-analyzer text-to-speech; do \
+			img="$(_DOCKER_REGISTRY)/$$svc:$(RELEASE_TAG)"; \
+			if docker image inspect "$$img" >/dev/null 2>&1; then \
+				echo "$(YELLOW)  REGISTRY=false → keeping local $$img (not pulling; it may be a source build from edge-ai-libraries)$(NC)"; \
+			else \
+				echo "$(YELLOW)  REGISTRY=false but $$img is missing locally → pulling it from the registry$(NC)"; \
+				REGISTRY_REPO=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull $$svc; \
+			fi; \
+		done; \
+	else \
+		echo "$(YELLOW)  Pulling audio-analyzer and text-to-speech from registry (image-only; built once from the edge-ai-libraries fork)...$(NC)"; \
+		REGISTRY_REPO=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull audio-analyzer text-to-speech; \
+	fi; \
 	REGISTRY_REPO=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull metrics-collector || \
 		echo "$(YELLOW)  ⚠ Could not pull metrics-collector (intel/hl-ai-metrics-collector) from registry -- using locally cached image if present. Build it from edge-ai-suites/health-and-life-sciences-ai-suite/multi_modal_patient_monitoring/services/metrics-collector if missing.$(NC)"
 	@echo "$(GREEN)✓ Images ready$(NC)"
