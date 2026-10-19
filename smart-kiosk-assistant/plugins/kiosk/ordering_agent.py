@@ -278,6 +278,41 @@ _tool_call_count_ctx: contextvars.ContextVar[_ToolCallCounter] = contextvars.Con
     "tool_call_count_ctx", default=None
 )
 
+# Per-turn dispatch cache keyed by (tool_name, canonical kwargs). The int4
+# model intermittently emits the SAME function call many times in one turn —
+# observed live as ``get_popular_products`` ×7 and ``place_order`` ×22 in a
+# single benchmark turn. ADK executes every emitted call, so without this each
+# duplicate is a real MCP round-trip (and, for a write tool, a real repeated
+# cart mutation the customer never asked for). ``_mcp_fn`` coalesces identical
+# calls within a turn onto the first one's result via the stored future, so a
+# storm costs one dispatch instead of N. Bound to a fresh ``dict`` once per turn
+# by ``chat()`` BEFORE any ADK sibling task exists, so every parallel task
+# shares the same cache (same rationale as ``_ToolCallCounter``). Default None
+# means "no turn in flight" (e.g. a unit test invoking the callable directly),
+# in which case dispatch is unchanged.
+_tool_dispatch_cache_ctx: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "tool_dispatch_cache_ctx", default=None
+)
+
+
+def _dispatch_key(tool_name: str, kwargs: dict[str, Any]) -> str:
+    """Build a stable per-turn dedup key for a tool call.
+
+    Args:
+        tool_name: The MCP tool being invoked.
+        kwargs: The model-supplied call arguments (before server-side
+            injection, which is deterministic within a turn and so identical
+            for identical model calls).
+
+    Returns:
+        A hashable string uniquely identifying this ``(tool, args)`` pair.
+    """
+    try:
+        return f"{tool_name}:{json.dumps(kwargs, sort_keys=True, default=str)}"
+    except (TypeError, ValueError):
+        return f"{tool_name}:{sorted(kwargs.items(), key=lambda kv: kv[0])!r}"
+
+
 # Qwen3 hybrid-reasoning models wrap chain-of-thought in explicit <think> tags.
 # Match them precisely rather than guessing from paragraph structure.
 #
@@ -731,6 +766,27 @@ _CATEGORY_KEYWORDS = domain_config.get_category_names() or (
 # customer is merely wrapping up a browse turn.
 _CONFIRM_INTENT_RE = re.compile(
     r"\b(?:confirm|confirmed|checkout|check out|finali[sz]e|place (?:the |my )?order)\b",
+    re.IGNORECASE,
+)
+
+# A turn whose WHOLE content is a polite decline of anything further. After the
+# assistant's "Would you like anything else?" this means "I'm done — finalise my
+# order", never "start over". Observed defect: the model answered "No, thank
+# you." with "Got it — what can I get you?", re-opening ordering instead of
+# closing. The pattern is anchored to the entire utterance so it can never fire
+# on a decline embedded in a real request ("no burger, just fries"). ``_close``
+# in chat() additionally gates this on there being an active cart with items, so
+# a bare "no thanks" with no order simply falls through to the normal path.
+_DECLINE_CLOSE_RE = re.compile(
+    r"^\s*(?:(?:no|nope|nah)[,.!\s]*)?"
+    r"(?:thank(?:s| you| you very much)|thanks a lot|"
+    r"i'?m (?:good|done|fine|all set)|we'?re (?:good|done|all set)|"
+    r"all (?:good|done|set)|that'?s (?:all|it|everything)|"
+    r"that'?ll be all|that will be all|nothing (?:else|more)|"
+    r"no(?:thing)? (?:thanks|thank you)|i'?m ok(?:ay)?)"
+    r"(?:[,.!\s]+(?:thank(?:s| you)|please))?"
+    r"[\s,.!]*$"
+    r"|^\s*(?:no|nope|nah)[,.!\s]*$",
     re.IGNORECASE,
 )
 
@@ -2102,7 +2158,7 @@ class OrderingAgent:
         """
         from google.adk.tools import ToolContext
 
-        async def _mcp_fn(tool_context: ToolContext | None = None, **kwargs: Any) -> Any:
+        async def _dispatch(tool_context: "ToolContext | None", kwargs: dict[str, Any]) -> Any:
             cart_state = _cart_state_ctx.get()
             # Inject user_id from turn context — it is stripped from the
             # model-visible schema so the model never generates it, saving
@@ -2289,6 +2345,38 @@ class OrderingAgent:
             result = _compress_tool_result(tool_name, result)
             logger.debug("[AGENT→MCP] tool=%s compressed_result=%s", tool_name, str(result)[:200])
             return result
+
+        async def _mcp_fn(tool_context: ToolContext | None = None, **kwargs: Any) -> Any:
+            # Coalesce duplicate tool calls within a single turn. ADK runs every
+            # function_call the model emits, and the int4 model intermittently
+            # emits the same call many times at once (seen: place_order ×22 in
+            # one turn). Routing identical calls through one dispatch keeps the
+            # cart correct (no repeated adds) and collapses a storm's N network
+            # round-trips into one. Concurrent siblings await the first call's
+            # future; later repeats return its already-computed result. When no
+            # turn is in flight (direct invocation in a unit test) the cache is
+            # None and dispatch is unchanged.
+            cache = _tool_dispatch_cache_ctx.get()
+            if cache is None:
+                return await _dispatch(tool_context, kwargs)
+            key = _dispatch_key(tool_name, kwargs)
+            inflight = cache.get(key)
+            if inflight is not None:
+                logger.info(
+                    "[AGENT→MCP] duplicate call coalesced within turn tool=%s", tool_name
+                )
+                return await inflight
+            fut: "asyncio.Future[Any]" = asyncio.get_event_loop().create_future()
+            cache[key] = fut
+            try:
+                value = await _dispatch(tool_context, kwargs)
+            except BaseException as exc:
+                if not fut.done():
+                    fut.set_exception(exc)
+                raise
+            if not fut.done():
+                fut.set_result(value)
+            return value
 
         _mcp_fn.__name__ = tool_name
         _mcp_fn.__doc__ = _scrub_injected_args(
@@ -2623,6 +2711,61 @@ class OrderingAgent:
             # unavailable) — fall through to the normal pre-grounded path
             # below rather than speak an incomplete answer.
 
+        # ── Decline-to-close fast path ──────────────────────────────────
+        # "No, thank you." / "That's all." after the assistant's "anything
+        # else?" means the customer is done — finalise the order. The model
+        # instead re-opened ordering ("Got it — what can I get you?"), looping
+        # the customer back to the start. When the utterance is a pure decline
+        # AND there is an active cart with items, confirm the order in code:
+        # deterministic, grounded in the real confirm_active_order result, and
+        # zero extra inference. Gated hard — any catalogue/order/knowledge
+        # intent, an empty cart, or a speculative draft all fall through to the
+        # normal path, so a bare "no thanks" with nothing pending never
+        # accidentally places an order.
+        cart_now = _cart_state_ctx.get()
+        if (
+            not speculative
+            and _DECLINE_CLOSE_RE.match(message)
+            and not _CATALOGUE_QUERY_RE.search(message)
+            and not _ORDER_ACTION_RE.search(message)
+            and not _KNOWLEDGE_QUERY_RE.search(message)
+            and cart_now is not None
+            and cart_now.known_items
+        ):
+            _tpl_start = time.monotonic()
+            spoken = await self._force_confirm(user_id, session_id)
+            if spoken:
+                llm_metrics.reset()
+                llm_metrics.record_template((time.monotonic() - _tpl_start) * 1000)
+                template = llm_metrics.template_snapshot()
+                logger.info(
+                    "[AGENT] Decline-to-close — confirmed order deterministically | "
+                    "session=%s", session_id,
+                )
+                _dietary_ctx.reset(dietary_token)
+                _user_id_ctx.reset(user_id_token)
+                _utterance_ctx.reset(utterance_token)
+                _cart_state_ctx.reset(cart_state_token)
+                _speculative_ctx.reset(speculative_token)
+                _tool_call_log_ctx.reset(tool_call_log_token)
+                return {
+                    "reply": spoken,
+                    "tool_calls": ["confirm_active_order"],
+                    "tool_call_detail": [],
+                    "llm_ms": None,
+                    "llm_ttft_ms": None,
+                    "llm_calls": 0,
+                    "retrieval_ms": None,
+                    "mcp_ms": None,
+                    "mcp_calls": 1,
+                    "guard_ms": None,
+                    "template_ms": template["ms"],
+                    "templated": True,
+                    "streamed": "",
+                }
+            # Nothing to confirm (order already closed, or confirm failed) —
+            # fall through to the normal path rather than speaking a guess.
+
         # ── Pre-grounding ────────────────────────────────────────────────
         # For an unambiguous outlet question, retrieve the facts BEFORE the
         # model speaks rather than hoping it chooses knowledge_lookup and
@@ -2682,6 +2825,9 @@ class OrderingAgent:
         confirm_guard.begin_turn()
         price_guard.begin_turn()
         _tool_call_count_ctx.set(_ToolCallCounter())
+        # Fresh per-turn dispatch cache, bound before any ADK sibling task is
+        # created so a duplicate-call storm is coalesced onto one dispatch.
+        _tool_dispatch_cache_ctx.set({})
 
         try:
             gate = (
