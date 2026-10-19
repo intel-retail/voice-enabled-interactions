@@ -35,7 +35,7 @@ Legend: ✅ addressed · ⚠️ partial / needs decision · ❌ regressed or ope
 | 8 | Opener edge cases (plays on agent fail; `None`-cached forever; skips trim/gain) | ✅ | `d78d440` |
 | 9 | Silero VAD falls back to RMS silently; trace doesn't record which ran | ✅ | `5e281ec` |
 | 10 | `ADAPTIVE_FLUSH_PAUSE_SECONDS=0.30` below the documented 0.50 floor | ✅ | `52426c2` |
-| 11 | Hands-free mode unwired; keep it supported & measure latency in it | ⚠️ (by decision) | Push-to-talk kept deliberately; hands-free dropped for now (see §3) |
+| 11 | Hands-free mode unwired; keep it supported & measure latency in it | ✅ | `d65f25a` (hands-free restored as the default on both screens); latency measured via the speaker clock (#2) |
 | 12 | Conflicting defaults (`ASR_DEVICE`, `ENDPOINT_STABLE_SECONDS`, `RELEASE_TAG`) | ✅ | `88bf6e5` |
 
 ### Benchmark harness (13–21)
@@ -63,7 +63,7 @@ Legend: ✅ addressed · ⚠️ partial / needs decision · ❌ regressed or ope
 | 26 | Dashboard TTS card reads 0 ms; "p95" is the max over a short tail | ✅ | `099e099`, `1f70eae` |
 | 27 | Document host prereqs (`python3-venv`, `ffmpeg`) and `--recurse-submodules` | ✅ | `37996ed`, `da475ee` |
 
-**Score: 24 ✅ addressed · 1 ⚠️ decision (19) · 2 by product decision (4 registry images, 11 push-to-talk).**
+**Score: 25 ✅ addressed · 1 ⚠️ decision (19 device-matrix split) · 1 by product decision (4 registry images).**
 
 ---
 
@@ -157,14 +157,16 @@ floor config.py documents as validated; `0.30` clears the chunk mid-phrase and W
 hallucinates/truncates the tail. Restored to `0.50`. Confirmed on the 88-turn sweep: a turn that
 transcribed as "Wait, actually." at `0.30` returns the full sentence at `0.50`, V2V p95 5618 → 5417 ms.
 
-**#11 — hands-free mode (`fe22572` then `c62c251`) — PUSH-TO-TALK KEPT BY DECISION.** `fe22572`
-rebound both screens to hands-free, but the later `c62c251` deliberately rebound them to push-to-talk
-(`start`/`stop`). **This is intentional:** hands-free did not give good results in testing (the ~1 s
-post-speech silence wait before each turn ends hurt the experience), so push-to-talk is the shipped
-mode for now. The hands-free primitives (`startConversation`/`endConversation`, barge-in, "End
-conversation" control) remain implemented and exported, so the mode can be re-enabled later without
-new work. We should note this explicitly to Josh, since item #11 asked us to keep hands-free — the
-response is that it's retained in code but not the default pending better endpointing.
+**#11 — hands-free mode (`fe22572`, briefly reverted by `c62c251`, restored by `d65f25a`) — RESOLVED.**
+Hands-free is the default conversation mode on both the customer kiosk screen (`CustomerApp` →
+`AskBar`, `onStart={startConversation}`) and the chat screen. Tapping the mic opens a persistent
+full-duplex WebSocket (`voiceSocket.ts`): the browser streams binary PCM frames and the turn ends on
+server-side endpointing, with a barge-in tap and an explicit "End conversation" control. The ~1 s
+post-speech wait that previously hurt the experience is no longer hidden from the headline number —
+the speaker clock (#2) now stops voice-to-voice at the first sound at the speaker and splits the total
+into *endpointing delay* vs *processing latency*, so hands-free latency is measured honestly in the
+benchmark (which drives the same WebSocket path). Josh's request — keep hands-free supported and
+measure latency in it — is satisfied.
 
 **#12 — conflicting defaults (`88bf6e5`).** `ASR_DEVICE` (compose CPU vs. config.yaml GPU) → GPU
 everywhere (GPU is the only device `distil-small.en` is confirmed correct on).
@@ -265,11 +267,17 @@ cutting customers off.**
 
 ## 3. Product decisions (closed) and the one remaining choice
 
-1. **#11 hands-free → push-to-talk (decided).**
-   Hands-free is **intentionally not the default**: in testing it did not give good results (the ~1 s
-   post-speech silence wait before each turn hurt the experience), so push-to-talk is shipped. The
-   hands-free code paths remain in place and exported, so the mode can return later once endpointing is
-   good enough. We'll state this plainly in the PR reply to Josh's #11 (retained in code, not default).
+**Heads-up:** the subsections below are kept for history. Since this file was first written, **#11
+has been resolved in code** — hands-free is the shipped default again (`d65f25a`) and its latency is
+measured via the speaker clock (#2). The only genuinely open item is **#19** (device-matrix split).
+
+1. **#11 hands-free → restored as default (`d65f25a`).**
+   Hands-free is now the **default** conversation mode on both screens, over a persistent full-duplex
+   WebSocket (binary PCM uplink; server-side endpointing; barge-in + explicit "End conversation").
+   The ~1 s post-speech wait that previously made hands-free feel slow is no longer charged to the
+   headline — the speaker clock (#2) splits voice-to-voice into *endpointing delay* vs *processing
+   latency*, so the mode is measured honestly. This closes Josh's #11 (keep hands-free supported and
+   measure latency in it).
 
 2. **#4 upstream dependency → registry images (decided).**
    audio-analyzer and text-to-speech are merging to upstream `main`; Smart Kiosk will consume them as
@@ -313,18 +321,25 @@ cutting customers off.**
 | `7f39c6c` | 10-06 | test: cover directive parsing, for_speech, realtime ASR | 25 |
 | `da475ee` | 10-06 | docs: add a latency measurement guide | 2, 27 |
 | `c62c251` | 10-09 | review comment fix (opener off; **push-to-talk rebind**) | 2; **re-reverts 11** |
+| `9c0f11c` | 10-15 | fix(latency): stop V2V clock at first sound at the speaker | 2 (speaker clock) |
+| `479d477` | 10-15 | fix(benchmark): clip-anchored headline + TTS TTFB rename | 2 |
+| `d65f25a` | 10-15 | fix(ui): hands-free as the default conversation mode | 11 (restored) |
 
 ---
 
 ## 5. Summary for the standup
 
-- **24 of 26 numbered items are fully addressed**, each with tests or measured evidence.
+- **25 of 26 numbered items are fully addressed**, each with tests or measured evidence; only #19
+  (device-matrix split) remains as a process choice.
 - The central narrative: the PR's headline latency looked great because it was **cutting customers
   off** (first-word anchor, opener-as-finish, single-confirmation endpointing). We fixed the
   measurement to stop at the speaker on the real answer, and fixed the endpointing to wait for the
   customer — so the honest number is ~1.4 s, not sub-second. A correct order at 1.4 s beats a wrong
   order at 0.76 s.
-- **Two closed product decisions to communicate to Josh:** (1) **push-to-talk, not hands-free** —
-  hands-free stays in code but isn't the default (didn't test well); (2) **#4 is not a blocker** —
-  audio-analyzer/TTS will ship as registry images, not a source-build reference.
+- **One closed product decision + two code resolutions to communicate to Josh:** (1) **hands-free is
+  now the default again** (`d65f25a`) over a persistent WebSocket, with its latency measured honestly
+  by the speaker clock — #11 resolved; (2) **the speaker clock stops voice-to-voice at the first
+  sound at the speaker** (`9c0f11c`, `479d477`) and the benchmark headline is clip-anchored with TTS
+  reported as time-to-first-byte — #2 resolved; (3) **#4 is not a blocker** — audio-analyzer/TTS will
+  ship as registry images, not a source-build reference.
 - Optional: split the device-matrix harness into its own PR (#19).
