@@ -1056,9 +1056,16 @@ def replay_fixture(
     push_chunk_seconds: float = 0.5,
     explicit_end_mark: bool = False,
     uplink: str = "ws",
+    conversation_id: str | None = None,
 ) -> TurnResult:
     result = TurnResult(fixture=fixture.name, run=run)
-    conversation_id = f"v2v-bench-{uuid.uuid4().hex[:8]}"
+    # A multi-turn scripted conversation must thread ONE conversation_id across
+    # all of its turns: kiosk-core clears the draft cart whenever a turn arrives
+    # under a new conversation (see _clear_stale_cart_for_new_session), so a
+    # per-turn id makes the closing "confirm my order" turn hit an empty cart and
+    # fail. Callers that genuinely want an isolated single turn simply omit it
+    # and get a fresh conversation per replay, as before.
+    conversation_id = conversation_id or f"v2v-bench-{uuid.uuid4().hex[:8]}"
 
     # Same session parameters start-file used to send, minus the file itself
     # and realtime_factor (which is now purely a client-side push-pacing
