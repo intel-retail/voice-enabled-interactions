@@ -180,6 +180,25 @@ def collect(results_root: Path) -> list[dict[str, Any]]:
         run = manifest.get("run", {})
         vcs = manifest.get("vcs", {})
 
+        # A profile directory keeps the previous run's v2v result JSON until a
+        # new run overwrites it, but the manifest is rewritten up front. If the
+        # run aborted (crash, failed bring-up, validation reject), scripts/
+        # finish_run_manifest.py never flips run.status to "completed", so the
+        # newest v2v JSON here belongs to an *earlier* run. Emitting it would
+        # report stale latency against the current manifest's devices/SHA. Skip
+        # any profile whose run did not complete rather than publish a number
+        # that looks current but isn't. Directories with no manifest at all
+        # (hand-placed or pre-status runs) keep the legacy best-effort behaviour.
+        run_status = run.get("status")
+        if manifest and run_status and run_status != "completed":
+            print(
+                f"[compare_profiles] skipping '{manifest.get('profile') or d.name}': "
+                f"run.status={run_status!r} (did not complete); its latency JSON is "
+                f"from an earlier run and would be stale.",
+                file=sys.stderr,
+            )
+            continue
+
         row: dict[str, Any] = {
             "profile": manifest.get("profile") or d.name,
             "asr_device": devices.get("asr", ""),
@@ -203,6 +222,7 @@ def collect(results_root: Path) -> list[dict[str, Any]]:
                 "diarization_enabled": run.get("diarization_enabled", ""),
                 "v2v_runs": run.get("v2v_runs", ""),
                 "valid": manifest.get("valid", ""),
+                "run_status": run_status or "",
                 "git_sha": vcs.get("git_sha", ""),
                 "git_dirty": vcs.get("git_dirty", ""),
                 "started_at": run.get("started_at", ""),

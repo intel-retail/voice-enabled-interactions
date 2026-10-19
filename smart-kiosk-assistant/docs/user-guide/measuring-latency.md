@@ -120,11 +120,20 @@ Two settings keep it at zero:
 
 ### Run size
 
-A p95 over four turns is just the slowest of the four. The defaults run
-enough varied turns — single items, multi-item orders, changes, removals,
-confirmations, mid-sentence pauses, several voices — for the median to be
-stable and the p95 not to be a single outlier. Warm-up turns are pruned
-before the percentiles are computed.
+A p95 over four turns is just the slowest of the four. The default
+benchmark runs `order-fastpath`: six single-intent ordering turns (one
+clean mutation each, ending in a confirm) across several voices, repeated
+`V2V_RUNS` times — 48 measured turns at the default `V2V_RUNS=8`, enough
+for a stable median and a p95 that is not a single outlier. This is the
+clean-ordering voice-to-voice number; **quote it with the scenario named
+next to it** (`order-fastpath`), because it deliberately stays on the fast
+path and is faster than a mixed workload.
+
+For the broader workload — single items, multi-item orders, changes,
+removals, confirmations, mid-sentence pauses and a price-question + upsell
+journey — run `make benchmark V2V_SCRIPT=all` (88 measured turns per run)
+and report that number under its own name (`all`). Warm-up turns are pruned
+before the percentiles are computed in either case.
 
 ## Hardware counters
 

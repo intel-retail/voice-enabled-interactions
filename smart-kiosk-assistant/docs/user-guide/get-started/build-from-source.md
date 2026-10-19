@@ -147,34 +147,44 @@ HuggingFace Hub and updates `OVMS_MODEL_NAME`, `TARGET_DEVICE`, and
 ## Build All Images With Compose
 
 The top-level [docker-compose.yml](https://github.com/intel-retail/voice-enabled-interactions/blob/main/smart-kiosk-assistant/docker-compose.yml)
-declares both `image:` and `build:` for each of the five services: `audio-analyzer`,
-`text-to-speech`, `rag-service`, `kiosk-core`, and `kiosk-ui`. Both
-`REGISTRY_REPO` and `RELEASE_TAG` are read from `.env` (created in
+declares both `image:` and `build:` for the three services whose source lives in
+this repository: `rag-service`, `kiosk-core`, and `kiosk-ui`. `audio-analyzer`
+and `text-to-speech` are declared `image:`-only — their source lives in the
+sibling `edge-ai-libraries` repo, so `docker compose build` in this repo does
+**not** build them (see
+[Build the speech-service images](#build-a-single-service-image-directly)
+below). Both `REGISTRY_REPO` and `RELEASE_TAG` are read from `.env` (created in
 [Create the Environment File](#create-the-environment-file) above;
 defaults: `REGISTRY_REPO=intel`, `RELEASE_TAG` pins the current release).
 
-`docker compose build` rebuilds each service from source and tags the
-result as the same `${REGISTRY_REPO}/<svc>:${RELEASE_TAG}` reference used by
+`docker compose build` rebuilds the three in-repo services from source and tags
+each result as the same `${REGISTRY_REPO}/<svc>:${RELEASE_TAG}` reference used by
 the pull flow, so subsequent `docker compose up` calls reuse the local
-build until you `docker compose pull` again.
+build until you `docker compose pull` again. Build the two speech-service images
+separately (next-but-one section) before the first `up`.
 
 ```bash
-docker compose build
+docker compose build          # rag-service, kiosk-core, kiosk-ui
 docker compose up -d
 ```
 
-All five services run as UID/GID `1000:1000` (baked into each image),
+All services run as UID/GID `1000:1000` (baked into each image),
 and runtime data lives in named Docker volumes initialized with that
 ownership, so no host UID/GID configuration is needed.
 
 ## Rebuild A Single Service
 
-Rebuild only the service whose source you changed:
+Rebuild only the in-repo service whose source you changed (`rag-service`,
+`kiosk-core`, or `kiosk-ui`):
 
 ```bash
-docker compose build audio-analyzer
-docker compose up -d audio-analyzer
+docker compose build kiosk-core
+docker compose up -d kiosk-core
 ```
+
+`docker compose build audio-analyzer` / `text-to-speech` prints
+`No services to build` and exits 0 — those images are built directly from the
+`edge-ai-libraries` sources (next section), not from this compose file.
 
 ## Build A Single Service Image Directly
 

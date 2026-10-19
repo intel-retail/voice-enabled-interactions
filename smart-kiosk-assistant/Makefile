@@ -850,21 +850,23 @@ sync-metrics-into-results: setup-dirs ## Copy OS-level hardware counters from ./
 	@cp -pf $(METRICS_DIR)/cpu_usage.log $(METRICS_DIR)/memory_usage.log $(METRICS_DIR)/npu_usage.csv \
 		$(RESULTS_DIR)/ 2>/dev/null || true
 	@cp -pf $(METRICS_DIR)/qmassa*-tool-generated.json $(RESULTS_DIR)/ 2>/dev/null || true
+	@# qmassa rewrites its whole JSON document from scratch on every sample
+	@# rather than appending; a container killed mid-write (or -- observed in
+	@# practice -- CPU/IO contention while `docker compose down` tears down
+	@# the whole stack in parallel, even with metrics-collector's own
+	@# stop_grace_period) can leave this file truncated mid-object. The
+	@# utilisation trim below parses the same qmassa JSON to anchor its
+	@# window, so a truncated file would abort the trim with a decode error.
+	@# Repair any truncation in place *before* the trim (and before
+	@# parse_qmassa_metrics_to_json.py) ever reads the file -- see
+	@# tests/benchmarks/repair_qmassa_json.py's docstring for the approach.
+	@python3 tests/benchmarks/repair_qmassa_json.py --dir $(RESULTS_DIR) --keyword qmassa
 	@# The collector samples for the whole time the stack is up -- image
 	@# pulls, the health wait, the discarded warmup, teardown -- so averaging
 	@# the raw files describes a mostly-idle stack rather than the measured
 	@# turns. Narrow them to the window the benchmark recorded. A no-op when
 	@# results/measured_window.json is absent, i.e. outside a benchmark run.
 	@python3 scripts/trim_metrics_to_window.py --results-dir $(RESULTS_DIR)
-	@# qmassa rewrites its whole JSON document from scratch on every sample
-	@# rather than appending; a container killed mid-write (or -- observed in
-	@# practice -- CPU/IO contention while `docker compose down` tears down
-	@# the whole stack in parallel, even with metrics-collector's own
-	@# stop_grace_period) can leave this file truncated mid-object, which
-	@# parse_qmassa_metrics_to_json.py then rejects outright. Repair any
-	@# truncation in place before that parser ever sees the file -- see
-	@# tests/benchmarks/repair_qmassa_json.py's docstring for the approach.
-	@python3 tests/benchmarks/repair_qmassa_json.py --dir $(RESULTS_DIR) --keyword qmassa
 
 parse-qmassa-metrics: sync-metrics-into-results ## Parse raw qmassa*-tool-generated.json into qmassa*-parsed.json
 	@# consolidate-metrics and plot-metrics only match *parsed*.json, not the
