@@ -263,6 +263,21 @@ called a finished turn (early commits 8/88 → 0/88, p50 unchanged within noise)
 reason the headline V2V moved from sub-second to ~1.4 s: **the old number was fast because it was
 cutting customers off.**
 
+### Bonus benchmark correctness — per-session harness (2026-10-15 fresh-machine finding)
+
+**`a08c9b8`** — the scripted-conversation benchmark replayed each turn under a **fresh**
+`conversation_id` (`replay_fixture` minted a new one on every call). kiosk-core clears the draft cart
+whenever a turn arrives under a new conversation (`_clear_stale_cart_for_new_session`), so a script
+that builds a cart over several turns and then says *"please confirm my order"* always confirmed an
+**empty** cart — the premature-confirm contradiction Josh saw on the fresh machine ("Your order is
+confirmed … Sorry, I couldn't confirm your order just now"). `replay_fixture` now accepts an optional
+`conversation_id`; the harness threads **one id per scenario per run**, so the cart accumulates and
+the confirm turn acts on the real order, while a fresh id each run keeps `--runs` repetitions
+independent. `--script all` keeps each scenario its own conversation rather than bleeding one cart
+across four unrelated journeys. (The kiosk side already refused to *speak* a "confirmed" claim before
+the confirm tool succeeds — streaming `_SentenceGate._is_safe` + `_strip_false_confirmation` on the
+final reply — so this was purely a harness defect.)
+
 ---
 
 ## 3. Product decisions (closed) and the one remaining choice
@@ -324,6 +339,7 @@ measured via the speaker clock (#2). The only genuinely open item is **#19** (de
 | `9c0f11c` | 10-15 | fix(latency): stop V2V clock at first sound at the speaker | 2 (speaker clock) |
 | `479d477` | 10-15 | fix(benchmark): clip-anchored headline + TTS TTFB rename | 2 |
 | `d65f25a` | 10-15 | fix(ui): hands-free as the default conversation mode | 11 (restored) |
+| `a08c9b8` | 10-15 | fix(benchmark): thread one conversation per scripted scenario | per-session harness |
 
 ---
 
