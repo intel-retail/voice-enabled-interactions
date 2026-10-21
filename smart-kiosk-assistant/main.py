@@ -265,8 +265,11 @@ async def stream_session_ws(websocket: WebSocket) -> None:
          segment actually begins playing (stops the honest v2v clock)
       4. client -> ``{"type": "end"}`` (end-of-turn) or ``{"type": "cancel"}``
 
-    Push-to-talk and the benchmark keep the REST chunk path; this endpoint is
-    gated by ``KIOSK_CORE_HANDSFREE_WS_ENABLED`` so it is fully reversible.
+    Push-to-talk keeps the REST chunk path. The V2V benchmark now defaults to
+    this WebSocket uplink (``v2v_scripted_conversation_benchmark.py
+    --uplink ws``); pass ``--uplink rest`` to exercise the chunked REST path
+    instead. This endpoint is gated by ``KIOSK_CORE_HANDSFREE_WS_ENABLED`` so
+    it is fully reversible.
     """
     if not cfg.DEFAULT_HANDSFREE_WS_ENABLED:
         await websocket.close(code=1008, reason="hands-free websocket disabled")
@@ -292,6 +295,7 @@ async def stream_session_ws(websocket: WebSocket) -> None:
         session_id = str(snapshot["session_id"])
         await websocket.send_json({"type": "started", "session_id": session_id})
 
+        turn_ended_notified = False
         while True:
             message = await websocket.receive()
             if message["type"] == "websocket.disconnect":
@@ -302,18 +306,29 @@ async def stream_session_ws(websocket: WebSocket) -> None:
                 # timeout) while the browser is still sending its last few
                 # captured frames. Those late frames are expected in hands-free
                 # mode, not an error: swallow them and tell the client the turn
-                # ended so it can finalise/re-arm, rather than tearing the
-                # socket down with a traceback.
+                # ended so it can finalise/re-arm. Crucially we must NOT break
+                # here — the browser sends its ``playback_started`` control
+                # message *after* these trailing mic frames (its poll only sees
+                # the turn end once the first audio segment is ready), so
+                # tearing the read loop down on a late frame drops that message
+                # and loses ``voice_to_voice_speaker_ms``. This was observed on
+                # single-TTS-segment replies ("How can I assist you today?"),
+                # where the first segment and completion arrive in the same
+                # poll. Keep reading until the client closes the socket; only
+                # announce the turn end once to avoid flooding the client with
+                # a ``turn_ended`` per trailing frame.
                 try:
                     service.push_pcm(session_id, data)
                 except ValueError:
-                    try:
-                        await websocket.send_json(
-                            {"type": "turn_ended", "session_id": session_id}
-                        )
-                    except Exception:  # noqa: BLE001 — client already gone
-                        pass
-                    break
+                    if not turn_ended_notified:
+                        turn_ended_notified = True
+                        try:
+                            await websocket.send_json(
+                                {"type": "turn_ended", "session_id": session_id}
+                            )
+                        except Exception:  # noqa: BLE001 — client already gone
+                            pass
+                    continue
                 continue
             text = message.get("text")
             if not text:
