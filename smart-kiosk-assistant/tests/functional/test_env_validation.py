@@ -43,13 +43,33 @@ def _parse_env_example() -> dict[str, str | None]:
     return result
 
 
+def _strip_yaml_comment(line: str) -> str:
+    """Drop the trailing YAML comment from a line.
+
+    A ``#`` starts a comment only at the start of the line or when preceded by
+    whitespace (matching YAML's own rule), so values like ``color: '#fff'`` are
+    left intact. This keeps documentation that spells out compose syntax — e.g.
+    ``# Uses ${VAR-} (no colon)`` — from being mistaken for a real reference.
+    """
+    for idx, ch in enumerate(line):
+        if ch == "#" and (idx == 0 or line[idx - 1].isspace()):
+            return line[:idx]
+    return line
+
+
 def _docker_compose_env_keys() -> set[str]:
-    """Return all env var names referenced in docker-compose.yml."""
+    """Return all env var names referenced in docker-compose.yml.
+
+    Comments are stripped first so that ``${VAR}`` placeholders used purely as
+    documentation in comments are not counted as live references.
+    """
     with open(_DOCKER_COMPOSE) as fh:
         compose = yaml.safe_load(fh)
     keys: set[str] = set()
     import re
-    text = _DOCKER_COMPOSE.read_text()
+    text = "\n".join(
+        _strip_yaml_comment(line) for line in _DOCKER_COMPOSE.read_text().splitlines()
+    )
     # Match ${VAR_NAME} and ${VAR_NAME:-default} patterns
     for match in re.finditer(r"\$\{([A-Z_][A-Z0-9_]*)(?::?[^}]*)?\}", text):
         keys.add(match.group(1))
@@ -246,6 +266,10 @@ class TestDockerComposeEnvCompleteness:
         "IDENTITY",              # optional feature flag, default false
         "TAG",                   # derived from RELEASE_TAG in Makefile
         "RTSP_CAMERA_DEVICE",    # computed by Makefile based on RTSP_SOURCE_MODE and CAMERA_DEVICE
+        "ASR_PREVIEW_DEVICE",     # optional override; compose supplies a safe default
+                                  # (${ASR_PREVIEW_DEVICE:-${ASR_DEVICE:-CPU}}). Left commented
+                                  # in .env.example because a .env file cannot expand the nested
+                                  # ${ASR_DEVICE:-CPU} fallback (see item 5 / validate_device_profile).
     }
 
     @pytest.mark.tier1

@@ -86,6 +86,9 @@ async def lifespan(app: FastAPI):
             warmup_task.cancel()
             with suppress(asyncio.CancelledError):
                 await warmup_task
+        if ORDERING_AGENT_ENABLED:
+            from plugins.kiosk.directive_mode import close_http_client
+            await close_http_client()
         close_shared_pipeline()
 
 

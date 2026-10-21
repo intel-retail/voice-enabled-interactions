@@ -1,9 +1,10 @@
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager, AsyncExitStack
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 
@@ -78,6 +79,19 @@ async def lifespan(app: FastAPI):
             )
         else:
             logger.info("[STARTUP] Identity feature disabled (KIOSK_CORE_IDENTITY_ENABLED=false)")
+
+        # ── Benchmark metrics pre-flight ─────────────────────────────────────
+        # Checked once, loudly. The per-turn metrics write is best-effort by
+        # design, so an unwritable results/ bind mount used to produce a run
+        # that looked healthy but reported zero transactions.
+        if cfg.VLM_METRICS_ENABLED:
+            problem = cfg.check_vlm_metrics_results_dir()
+            if problem:
+                logger.error("[STARTUP] Benchmark metrics will not be recorded: %s", problem)
+            else:
+                logger.info(
+                    "[STARTUP] Benchmark metrics -> %s ✓", cfg.VLM_METRICS_RESULTS_DIR
+                )
 
         yield  # application runs
 
@@ -237,6 +251,107 @@ def end_audio_stream(session_id: str) -> dict[str, str]:
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"status": "eos_accepted"}
+
+
+@app.websocket("/api/v1/sessions/stream")
+async def stream_session_ws(websocket: WebSocket) -> None:
+    """Persistent full-duplex uplink for hands-free browser conversations.
+
+    Protocol (one session per turn, results still polled over REST):
+      1. client -> ``{"type": "start", ...SessionStartRequest fields}``
+         server -> ``{"type": "started", "session_id": ...}``
+      2. client -> binary frames of raw little-endian int16 mono PCM
+      3. client -> ``{"type": "playback_started"}`` when the first answer
+         segment actually begins playing (stops the honest v2v clock)
+      4. client -> ``{"type": "end"}`` (end-of-turn) or ``{"type": "cancel"}``
+
+    Push-to-talk keeps the REST chunk path. The V2V benchmark now defaults to
+    this WebSocket uplink (``v2v_scripted_conversation_benchmark.py
+    --uplink ws``); pass ``--uplink rest`` to exercise the chunked REST path
+    instead. This endpoint is gated by ``KIOSK_CORE_HANDSFREE_WS_ENABLED`` so
+    it is fully reversible.
+    """
+    if not cfg.DEFAULT_HANDSFREE_WS_ENABLED:
+        await websocket.close(code=1008, reason="hands-free websocket disabled")
+        return
+
+    await websocket.accept()
+    session_id: str | None = None
+    try:
+        start_msg = await websocket.receive_json()
+        if not isinstance(start_msg, dict) or start_msg.get("type") != "start":
+            await websocket.close(code=1008, reason="expected a start message")
+            return
+        fields = {k: v for k, v in start_msg.items() if k != "type"}
+        try:
+            request = SessionStartRequest(**fields)
+        except Exception as exc:  # pydantic ValidationError and friends
+            await websocket.send_json({"type": "error", "detail": f"invalid start: {exc}"})
+            await websocket.close(code=1008)
+            return
+
+        await _clear_stale_cart_for_new_session(request.history)
+        snapshot = service.start_stream_session(request)
+        session_id = str(snapshot["session_id"])
+        await websocket.send_json({"type": "started", "session_id": session_id})
+
+        turn_ended_notified = False
+        while True:
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                break
+            data = message.get("bytes")
+            if data is not None:
+                # The backend endpoint detector may close the turn (silence
+                # timeout) while the browser is still sending its last few
+                # captured frames. Those late frames are expected in hands-free
+                # mode, not an error: swallow them and tell the client the turn
+                # ended so it can finalise/re-arm. Crucially we must NOT break
+                # here — the browser sends its ``playback_started`` control
+                # message *after* these trailing mic frames (its poll only sees
+                # the turn end once the first audio segment is ready), so
+                # tearing the read loop down on a late frame drops that message
+                # and loses ``voice_to_voice_speaker_ms``. This was observed on
+                # single-TTS-segment replies ("How can I assist you today?"),
+                # where the first segment and completion arrive in the same
+                # poll. Keep reading until the client closes the socket; only
+                # announce the turn end once to avoid flooding the client with
+                # a ``turn_ended`` per trailing frame.
+                try:
+                    service.push_pcm(session_id, data)
+                except ValueError:
+                    if not turn_ended_notified:
+                        turn_ended_notified = True
+                        try:
+                            await websocket.send_json(
+                                {"type": "turn_ended", "session_id": session_id}
+                            )
+                        except Exception:  # noqa: BLE001 — client already gone
+                            pass
+                    continue
+                continue
+            text = message.get("text")
+            if not text:
+                continue
+            try:
+                event = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            event_type = event.get("type") if isinstance(event, dict) else None
+            if event_type == "playback_started":
+                service.mark_playback_started(session_id)
+            elif event_type in ("end", "cancel"):
+                service.signal_stream_end(session_id)
+    except WebSocketDisconnect:
+        pass
+    except Exception:  # noqa: BLE001 — never leak a traceback onto the socket
+        logger.exception("[WS] stream session failed (session=%s)", session_id)
+    finally:
+        if session_id is not None:
+            try:
+                service.signal_stream_end(session_id)
+            except Exception:  # noqa: BLE001 — already ended / unknown
+                pass
 
 
 @app.post("/api/v1/sessions/start", response_model=None)

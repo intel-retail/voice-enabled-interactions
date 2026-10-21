@@ -38,6 +38,7 @@ export default defineConfig({
     port: PORT,
     strictPort: true,
     proxy: {
+      '/api/v1/sessions/stream': { target: KIOSK_CORE, changeOrigin: true, ws: true },
       '/api':     { target: KIOSK_CORE, changeOrigin: true },
       '/rag':     { target: RAG,     changeOrigin: true, rewrite: (p) => p.replace(/^\/rag/, '') },
       '/tts':     { target: TTS,     changeOrigin: true, rewrite: (p) => p.replace(/^\/tts/, '') },

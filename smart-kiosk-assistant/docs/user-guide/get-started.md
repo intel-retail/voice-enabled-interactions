@@ -75,7 +75,7 @@ Skip this block and set `TARGET_DEVICE=CPU` in `.env` if no Intel GPU is availab
 ## Step 2: Clone the Repository
 
 ```bash
-git clone -b <release-or-tag> --single-branch https://github.com/intel-retail/voice-enabled-interactions.git  #e.g. v4.0.0
+git clone --recurse-submodules -b <release-or-tag> --single-branch https://github.com/intel-retail/voice-enabled-interactions.git  #e.g. v4.0.0
 cd voice-enabled-interactions/smart-kiosk-assistant
 ```
 
@@ -205,7 +205,7 @@ rtsp://rtsp-streamer:8554/queue
 ## Step 6: Build Images and Start the Stack
 
 ```bash
-make build           # build local images (or `make build REGISTRY=true` to pull)
+make build           # pull released images (shipped .env has REGISTRY=true)
 make up              # start the stack (runs check-env first)
 ```
 
@@ -216,26 +216,32 @@ docker compose build
 docker compose up -d
 ```
 
-`make build` compiles the local service images from source; `ovms-llm` uses a
-pre-built upstream image and is pulled automatically. First build takes
-10–20 minutes.
+With the shipped `.env` (`REGISTRY=true`), `make build` **pulls** the released
+service images from the registry rather than compiling them. To build the local
+service images from source instead, set `REGISTRY=false` (`make build
+REGISTRY=false`); `ovms-llm` always uses a pre-built upstream image and is pulled
+automatically. A from-source build takes 10–20 minutes the first time.
 
-The default stack starts nine containers:
+The default stack starts ten containers (`QUEUE=true` by default; identity is
+off):
 
 | Container | Port | Role |
 |---|---|---|
 | `ovms-llm` | 8000 (REST), 9001 (gRPC) | Serves Qwen3-4B via OpenAI-compatible API |
 | `metrics-collector` | 9000 | Hardware utilization metrics |
 | `audio-analyzer` | 8010 | Whisper ASR + speaker diarization |
-| `text-to-speech` | 8011 | SpeechT5 TTS synthesis |
+| `text-to-speech` | 8011 | Kokoro TTS synthesis |
 | `rag-service` | 8020 | RAG pipeline + ordering agent |
 | `kiosk-core` | 8012 | Session API + product ordering |
-| `kiosk-ui` | 7860 | Voice kiosk React UI |
+| `kiosk-ui` | 7860 | Voice kiosk React UI (operator view) |
+| `kiosk-ui-customer` | 7861 | Voice kiosk React UI (customer view) |
 | `rtsp-streamer` | 8554 | Publishes sample clips as an RTSP stream |
 | `queue-service` | 8090 | Person detection + queue counting |
 
-The optional `identity-service` (port `8013`, face + voice authentication)
-starts only when identity is enabled:
+`rtsp-streamer` and `queue-service` start only while `QUEUE=true` (the shipped
+default); set `QUEUE=false` to leave them out and free CPU for voice runs. The
+optional `identity-service` (port `8013`, face + voice authentication) starts
+only when identity is enabled:
 
 ```bash
 make up IDENTITY=true

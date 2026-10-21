@@ -28,11 +28,13 @@ export default function App() {
     partialUser,
     partialAssistant,
     statusText,
+    error: voiceError,
     playbackState,
     conversationMode,
     startConversation,
     endConversation,
     interruptSpeaking,
+    reset: resetVoice,
   } = useVoiceSession({ deviceId: selectedId, enabled: !ingestBusy, onTurnComplete });
 
   const orderActive = phase === 'listening' || phase === 'processing' || playbackState !== 'idle';
@@ -111,6 +113,28 @@ export default function App() {
                     <p className="text-xs text-kiosk-textlo text-center min-h-[1rem] max-w-sm">
                       {statusText}
                     </p>
+                    {/* Microphone failures used to be invisible here: only the
+                        terse statusText line was rendered, so a blocked or
+                        unresponsive mic looked identical to an idle kiosk.
+                        Surface the real reason plus a way out of any latched
+                        state. */}
+                    {(voiceError || micError) && (
+                      <div
+                        role="alert"
+                        className="w-full max-w-sm rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-center"
+                      >
+                        <p className="text-xs font-medium text-red-700">
+                          {voiceError ?? micError}
+                        </p>
+                        <button
+                          type="button"
+                          onClick={resetVoice}
+                          className="mt-1 text-xs font-medium text-red-600 underline hover:text-red-800 focus:outline-none"
+                        >
+                          Reset microphone
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>

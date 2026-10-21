@@ -13,15 +13,25 @@ interface MicButtonProps {
 }
 
 /**
- * Hands-free conversation control. One tap starts continuous listening: the
- * kiosk auto-sends after a pause in speech, speaks the reply, then re-arms
- * the mic automatically — no further taps — until "End" is pressed. Disabled
+ * Hands-free conversation control (default): one tap starts continuous
+ * listening, the kiosk ends each turn itself when it detects a natural pause
+ * (backend endpointing), speaks the reply, then re-arms the mic automatically
+ * until "End conversation" is pressed or the session times out. This is the
+ * mode kiosk customers and hardware partners expect — a session begins with a
+ * tap, but no further taps are needed to complete an order, and touch and
+ * voice stay usable together throughout.
+ *
+ * The mic is fully torn down before each reply is spoken and only re-created
+ * after playback finishes, so the kiosk never hears its own voice. Disabled
  * (locked) while a knowledge-base ingest is in progress.
  *
  * While the kiosk is speaking, a tap is treated as a barge-in ("stop talking,
  * I have another question") rather than ending the conversation — it silences
- * the reply and starts listening right away. Use the separate "End
- * conversation" link to actually exit hands-free mode.
+ * the reply and starts listening right away.
+ *
+ * The underlying push-to-talk primitives (`start`/`stop` in useVoiceSession)
+ * remain available for callers that want an explicit tap-to-send control;
+ * passing them as onStart/onStop turns this button back into one.
  */
 export function MicButton({
   phase,
@@ -46,7 +56,10 @@ export function MicButton({
   const handleClick = () => {
     if (disabled) return;
     if (showInterrupt) onInterrupt();
-    else if (showEnd) onStop();
+    // Push-to-talk: a tap while actively recording must stop (and send) the
+    // utterance even outside hands-free mode — `showEnd` alone only covers
+    // the conversation-mode case.
+    else if (showEnd || recording) onStop();
     else onStart();
   };
 
@@ -77,7 +90,7 @@ export function MicButton({
           ? 'Processing...'
           : recording
             ? 'Recording... (tap to stop)'
-            : 'Tap to start conversation';
+            : 'Tap to start recording';
 
   const statusColor = recording
     ? 'text-red-500'
@@ -100,7 +113,7 @@ export function MicButton({
         disabled={disabled}
         aria-pressed={recording || showEnd || showInterrupt}
         aria-label={
-          showInterrupt ? 'Interrupt and ask something else' : showEnd ? 'End conversation' : 'Start hands-free conversation'
+          showInterrupt ? 'Interrupt and ask something else' : showEnd ? 'End conversation' : recording ? 'Stop recording' : 'Start recording'
         }
         title={statusText}
       >

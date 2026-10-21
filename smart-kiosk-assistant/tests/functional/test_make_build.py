@@ -206,7 +206,9 @@ class TestRegistryRepoSubstitution:
     # ovms-llm uses a fixed, externally-published image
     # (openvino/model_server) that is intentionally NOT prefixed by
     # REGISTRY_REPO — it is not one of this repo's own built/pulled images.
-    _REGISTRY_REPO_EXEMPT_SERVICES = {"ovms-llm"}
+    # ovms-cache-init is a one-shot init container on the public `busybox`
+    # image for the same reason, so it is exempt on the same grounds.
+    _REGISTRY_REPO_EXEMPT_SERVICES = {"ovms-llm", "ovms-cache-init"}
 
     @staticmethod
     def _compose_config_images(env_overrides: dict[str, str]) -> dict[str, str]:

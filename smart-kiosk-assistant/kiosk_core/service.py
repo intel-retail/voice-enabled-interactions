@@ -225,6 +225,20 @@ class SessionService:
             raise ValueError("Session is not active")
         session.push_audio(wav_bytes)
 
+    def push_pcm(self, session_id: str, pcm_bytes: bytes) -> None:
+        """Feed raw int16 PCM from the hands-free WebSocket uplink to a session."""
+        session = self._get_session_obj(session_id)
+        if not isinstance(session, BrowserStreamSession):
+            raise ValueError("Session is not a browser stream session")
+        if session.snapshot()["status"] not in {"running", "stopping"}:
+            raise ValueError("Session is not active")
+        session.push_pcm(pcm_bytes)
+
+    def mark_playback_started(self, session_id: str) -> None:
+        """Record the client's first-answer-audio playback report for a session."""
+        session = self._get_session_obj(session_id)
+        session.mark_speaker_playback()
+
     def signal_stream_end(self, session_id: str) -> None:
         session = self._get_session_obj(session_id)
         if not isinstance(session, BrowserStreamSession):

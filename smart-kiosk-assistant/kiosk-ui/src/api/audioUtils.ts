@@ -49,6 +49,15 @@ function floatTo16BitPCM(input: Float32Array): DataView {
   return view;
 }
 
+/**
+ * Encode mono Float32 PCM into a raw little-endian int16 ArrayBuffer — no WAV
+ * container. Used for the hands-free WebSocket uplink, whose binary frames are
+ * bare PCM16 (see kiosk-core BrowserStreamSession.push_pcm).
+ */
+export function encodePcm16(samples: Float32Array): ArrayBuffer {
+  return floatTo16BitPCM(samples).buffer as ArrayBuffer;
+}
+
 function writeString(view: DataView, offset: number, str: string): void {
   for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
 }

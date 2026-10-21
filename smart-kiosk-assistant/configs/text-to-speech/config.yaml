@@ -6,19 +6,42 @@
 # version regardless of changes in edge-ai-libraries.
 app:
   name: Text To Speech
-  clear_storage_on_startup: true  # true | false — delete all session folders under storage/ at startup
+  # Must stay false while TEXT_TO_SPEECH_WORKERS > 1 (the kiosk default is 2).
+  # The startup wipe runs once per uvicorn worker PROCESS and rmtree's every
+  # session folder under the SHARED storage root. Workers finish startup at
+  # different times (each does its own model load + GPU warmup synth), and
+  # uvicorn respawns a crashed worker at any moment — so a late-starting
+  # worker would delete the persisted speech.wav of sessions another worker
+  # is actively serving. Storage is disposable per-session output, so simply
+  # not wiping it is safe; it is cleaned per session by the service instead.
+  clear_storage_on_startup: false  # true | false — delete all session folders under storage/ at startup
 
 models:
   tts:
     # Model id. Permitted values:
     #   SpeechT5: microsoft/speecht5_tts
     #   Qwen:     Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
-    name: microsoft/speecht5_tts
-    # Inference runtime backend. Permitted values: openvino | pytorch
-    runtime: openvino
+    #   Kokoro:   kokoro (or any name containing "kokoro" — matched by
+    #             components/tts/kokoro/kokoro_tts.py::matches_model_name)
+    #
+    # Switched from SpeechT5 (microsoft/speecht5_tts, openvino, int8, CPU) to
+    # Kokoro-82M per the kiosk-voice-lab-main reference prototype: measured
+    # there at roughly 1/3 SpeechT5's first-phrase synthesis cost on CPU
+    # (~280ms vs ~2100ms) using kokoro-onnx with 4 intra-op threads. Kokoro
+    # is MIT-licensed (package) / Apache-2.0 (model weights), same choice
+    # the lab made over Piper (GPL) and MeloTTS (broken packaging).
+    #
+    # If reverting: name=microsoft/speecht5_tts, runtime=openvino,
+    # device=CPU, dtype=int8, model_variant=custom_voice,
+    # default_speaker=Ryan.
+    name: kokoro
+    # Inference runtime backend. Permitted values: openvino | pytorch | kokoro
+    runtime: kokoro
     # Inference device. Permitted values: CPU | GPU
     #   SpeechT5: CPU or GPU
     #   Qwen:     CPU or GPU
+    #   Kokoro:   CPU only (kokoro-onnx CPU execution provider; not wired
+    #             for GPU/NPU in components/tts/kokoro/kokoro_tts.py)
     #
     # Tried GPU to free CPU headroom for a bigger Whisper model during
     # noisy-demo tuning — reverted immediately. Measured with dtype=int8 on
@@ -32,21 +55,35 @@ models:
     device: CPU
     # Model precision. Permitted values: int8 | int4 | fp16 | fp32
     # NOTE: int4 on iGPU produces noise; GPU fp16 works great post-warmup
+    # Kokoro ignores dtype (kokoro-onnx ships a single fp32/int8-mixed
+    # ONNX graph) — left populated only because config_loader requires it.
     dtype: int8
     # Model variant. Permitted values:
     #   SpeechT5: default
     #   Qwen:     custom_voice | voice_design
+    #   Kokoro:   default (unused; voice is selected via default_speaker)
     model_variant: custom_voice
     # Default speaker/voice. Permitted values:
     #   SpeechT5: Ryan | Miles | Aaron | Nora | Elena | Kabir | Angus
     #             (CMU Arctic ids bdl/jmk/rms/clb/slt/ksp/awb are accepted as aliases)
     #   Qwen custom_voice example: Ryan
     #   Qwen voice_design: speaker can be omitted
+    #   Kokoro: af_heart | af_alloy | af_aoede | af_bella | af_jessica |
+    #           af_kore | af_nicole | af_nova | af_river | af_sarah | af_sky |
+    #           am_adam | am_echo | am_eric | am_fenrir | am_liam |
+    #           am_michael | am_onyx | am_puck | am_santa | bf_alice |
+    #           bf_emma | bf_isabella | bf_lily | bm_daniel | bm_fable |
+    #           bm_george | bm_lewis
+    #           (see components/tts/kokoro/kokoro_tts.py::SUPPORTED_VOICES)
     #
-    # Ryan (CMU Arctic "bdl", US male) is the kiosk default: measured ~3.8 dB
-    # louder and ~13% faster to synthesize than the previous implicit voice
-    # ("Elena"/slt), which sounded feeble over kiosk speakers.
-    default_speaker: Ryan
+    # am_michael (US male) is the kiosk default for Kokoro — closest timbre
+    # match to the previous SpeechT5 "Ryan" voice.
+    #
+    # Ryan (CMU Arctic "bdl", US male) was the kiosk default for SpeechT5:
+    # measured ~3.8 dB louder and ~13% faster to synthesize than the
+    # previous implicit voice ("Elena"/slt), which sounded feeble over
+    # kiosk speakers.
+    default_speaker: am_michael
     # Default language. Permitted values: English (the service currently supports English only)
     default_language: English
     models_base_path: models           # directory for downloaded/exported model assets

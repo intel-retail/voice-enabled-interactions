@@ -6,8 +6,8 @@
       "name": "kiosk-core",
       "enabled": true,
       "transport": "http",
-      "url": "http://kiosk-core:8012/mcp/mcp",
-      "description": "Kiosk ordering tools — list products, place/update/confirm orders, get upsell suggestions",
+      "url": "http://kiosk-core:8012/mcp/mcp/",
+      "description": "Kiosk ordering tools — list products, place/update/confirm orders, get upsell suggestions. NOTE: the trailing slash is required — without it the MCP mount answers every request with a 307 redirect to the canonical slashed path, so each tool call paid two round trips instead of one (visible as paired '307 Temporary Redirect' + '200 OK' lines in the rag-service logs).",
       "timeout": 30.0
     }
   ]

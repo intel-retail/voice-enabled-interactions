@@ -11,11 +11,57 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from agentic import config as agent_cfg
+
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Tool description compaction
+# ---------------------------------------------------------------------------
+
+# Google-style docstring sections that describe the *result* of a call rather
+# than how to choose or invoke the tool. Everything from the first such heading
+# to the end of the docstring is dropped; the summary and the "Args:" block
+# (which do steer tool selection and argument filling) are always kept.
+_TRAILING_DOC_SECTION_RE = re.compile(
+    r"^[ \t]*(?:Returns|Return|Raises|Yields|Example|Examples|Note|Notes)"
+    r"[ \t]*:[ \t]*$",
+    re.MULTILINE,
+)
+
+
+def compact_tool_description(description: str) -> str:
+    """Drop result-describing sections from an MCP tool docstring.
+
+    The LLM only needs to know *when* to call a tool and *how* to fill its
+    arguments; it receives the actual payload after the call, so the docstring's
+    ``Returns:``/``Raises:`` prose is dead prefill weight re-sent on every LLM
+    round-trip.
+
+    Args:
+        description: The raw tool description (a Google-style docstring).
+
+    Returns:
+        The description truncated at the first result-describing section
+        heading, with trailing whitespace removed. Returned unchanged when
+        ``AGENT_COMPACT_TOOL_DESCRIPTIONS`` is disabled, when no such heading is
+        present, or when truncation would leave nothing behind.
+    """
+    if not agent_cfg.COMPACT_TOOL_DESCRIPTIONS or not description:
+        return description
+    match = _TRAILING_DOC_SECTION_RE.search(description)
+    if match is None:
+        return description
+    trimmed = description[: match.start()].rstrip()
+    # A docstring that is *only* a "Returns:" block still has to describe the
+    # tool somehow; keep the original rather than hand the model an empty string.
+    return trimmed or description
 
 
 # ---------------------------------------------------------------------------
@@ -30,10 +76,15 @@ class MCPTool:
     description: str = ""
     input_schema: dict = field(default_factory=dict)
 
+    @property
+    def prompt_description(self) -> str:
+        """The description as the LLM should see it, minus result prose."""
+        return compact_tool_description(self.description)
+
     def to_function_schema(self) -> dict:
         return {
             "name": self.name,
-            "description": f"[MCP:{self.server}] {self.description}",
+            "description": f"[MCP:{self.server}] {self.prompt_description}",
             "parameters": self.input_schema or {"type": "object", "properties": {}},
         }
 
