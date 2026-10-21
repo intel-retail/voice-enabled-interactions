@@ -261,3 +261,81 @@ def test_act_directive_with_no_total_has_empty_tail(monkeypatch):
     # scrubbed prose.
     assert "Your total" not in result["reply"]
     assert "Removed." in result["reply"]
+
+
+# ── Confirmation claim is held until the confirm tool commits ─────────────────
+def test_confirmation_claim_held_until_confirm_commits(monkeypatch):
+    # Directive mode streams prose before the <act> directive runs, so a
+    # "Your order is confirmed." sentence must NOT reach TTS until
+    # confirm_active_order has actually committed.
+    monkeypatch.setattr(
+        directive_mode,
+        "stream_completion",
+        _make_fake_stream("Got it. Your order is confirmed. <act>confirm</act>"),
+    )
+    monkeypatch.setattr(
+        directive_mode,
+        "_execute",
+        AsyncMock(return_value=({"total": 189.0}, ["confirm_active_order"], ["confirm_active_order"])),
+    )
+
+    spoken: list[str] = []
+    result = _run_turn("confirm my order", spoken)
+
+    assert result is not None
+    # "Got it." streams immediately; the claim is held, then released only
+    # after the commit — so by the end of the turn both have reached TTS.
+    assert "Got it." in spoken
+    assert "Your order is confirmed." in spoken
+    assert spoken.index("Got it.") < spoken.index("Your order is confirmed.")
+    assert "Your order is confirmed." in result["reply"]
+
+
+def test_confirmation_claim_dropped_when_confirm_does_not_commit(monkeypatch):
+    # The model hallucinates a confirmation on a turn that did NOT confirm
+    # (here the directive is an add, not a confirm). The claim must never be
+    # synthesised, and must not appear in the streamed prose or the reply.
+    monkeypatch.setattr(
+        directive_mode,
+        "stream_completion",
+        _make_fake_stream(
+            "Sure. Your order is confirmed. <act>add|Classic Chicken Burger|1</act>"
+        ),
+    )
+    monkeypatch.setattr(
+        directive_mode,
+        "_execute",
+        AsyncMock(return_value=({"total": 189.0}, ["add_to_order"], ["add_to_order"])),
+    )
+
+    spoken: list[str] = []
+    result = _run_turn("add a burger", spoken)
+
+    assert result is not None
+    assert "Sure." in spoken
+    assert "Your order is confirmed." not in spoken
+    assert "confirmed" not in result["reply"].lower()
+
+
+def test_confirmation_claim_not_spoken_when_confirm_fails(monkeypatch):
+    # confirm_active_order fails (empty/stale cart): _execute returns
+    # executed=None with nothing committed, so the turn falls back to the
+    # tool path — and the held claim is dropped, never spoken.
+    monkeypatch.setattr(
+        directive_mode,
+        "stream_completion",
+        _make_fake_stream("Got it. Your order is confirmed. <act>confirm</act>"),
+    )
+    monkeypatch.setattr(
+        directive_mode,
+        "_execute",
+        AsyncMock(return_value=(None, ["confirm_active_order"], [])),
+    )
+
+    spoken: list[str] = []
+    result = _run_turn("confirm my order", spoken)
+
+    assert result is None
+    assert "Got it." in spoken
+    assert "Your order is confirmed." not in spoken
+

@@ -486,6 +486,24 @@ _FACTS_TAIL_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# A sentence that claims the order is confirmed/placed, or states an order id.
+# Directive mode streams prose *before* the <act> directive runs, so the model
+# can narrate "Your order is confirmed." to TTS before confirm_active_order has
+# actually executed — and on an empty/stale cart that call fails. Speaking the
+# claim first and apologising afterwards is the single worst thing this kiosk
+# can do, and the ordering_agent guards (_CONFIRM_CLAIM_RE / confirm_guard)
+# never run on this fast path. Such sentences are therefore HELD during
+# streaming and only released once _execute() reports a successful confirm.
+# Kept in sync with ordering_agent._CONFIRM_CLAIM_RE (a copy, not an import, to
+# avoid an import cycle — ordering_agent imports this module).
+_CONFIRM_CLAIM_RE = re.compile(
+    r"order\b[^.!?]{0,80}?\b(?:is|has been|was)\b[^.!?]{0,15}?\b(?:now\s+)?"
+    r"(?:confirmed|placed|finalis(?:ed)?|finaliz(?:ed)?|complete)\b"
+    r"|confirmed your order"
+    r"|order (?:id|number|#)",
+    re.IGNORECASE,
+)
+
 # Spoken when some cart writes committed but a later one failed. The turn
 # cannot fall back (that would re-apply the committed writes) and cannot claim
 # success either, so it asks the customer to re-state rather than guessing.
@@ -694,6 +712,11 @@ async def run_turn(
         # Sentences pulled off the stream so far (>= len(spoken), because
         # facts-bearing sentences are consumed but never spoken).
         "consumed": 0,
+        # Confirmation-claim sentences pulled off the stream but NOT yet
+        # spoken: they are held until _execute() reports a successful confirm
+        # (see _CONFIRM_CLAIM_RE). Released in turn order after the dispatch
+        # task resolves, or dropped entirely if the confirm did not commit.
+        "held_confirm": [],
         # Set once the model starts narrating prices; all further prose is
         # dropped in favour of the payload-derived tail.
         "prose_closed": False,
@@ -726,6 +749,17 @@ async def run_turn(
                 return
             sentence = scrub_directives(sentence)
             if not sentence:
+                continue
+            # A confirmation claim must not reach the speaker until the confirm
+            # tool has actually succeeded. Hold it; run_turn releases it after
+            # _execute() commits, or drops it if the confirm failed / the turn
+            # falls back. Everything else streams immediately for latency.
+            if _CONFIRM_CLAIM_RE.search(sentence):
+                logger.info(
+                    "[DIRECTIVE] holding confirmation claim until confirm commits: %r",
+                    sentence[:60],
+                )
+                state["held_confirm"].append(sentence)
                 continue
             state["spoken"].append(sentence)
             if on_safe_sentence is not None:
@@ -769,9 +803,17 @@ async def run_turn(
             if leftover and not state["prose_closed"] and not _FACTS_TAIL_RE.match(leftover):
                 leftover = scrub_directives(leftover)
                 if leftover:
-                    state["spoken"].append(leftover)
-                    if on_safe_sentence is not None:
-                        on_safe_sentence(leftover)
+                    if _CONFIRM_CLAIM_RE.search(leftover):
+                        logger.info(
+                            "[DIRECTIVE] holding confirmation claim (leftover) until "
+                            "confirm commits: %r",
+                            leftover[:60],
+                        )
+                        state["held_confirm"].append(leftover)
+                    else:
+                        state["spoken"].append(leftover)
+                        if on_safe_sentence is not None:
+                            on_safe_sentence(leftover)
             state["rest"] = ""
 
             after_open = buf.split(f"<{state['tag']}>", 1)[1]
@@ -864,6 +906,29 @@ async def run_turn(
         logger.info("[DIRECTIVE] tool execution rejected the action — falling back")
         return None
     payload = executed
+
+    # Release any confirmation claim that _emit_prose held back — but only now
+    # that _execute() has reported the confirm actually committed. On a turn
+    # that never confirmed (a hallucinated "your order is confirmed" with no
+    # <act>confirm), the claim is dropped, never synthesised. This is the fix
+    # for the directive-mode path speaking "Your order is confirmed." before
+    # confirm_active_order ran (and then apologising on an empty cart).
+    if state["held_confirm"]:
+        if "confirm_active_order" in committed:
+            for sentence in state["held_confirm"]:
+                state["spoken"].append(sentence)
+                if on_safe_sentence is not None:
+                    on_safe_sentence(sentence)
+            logger.info(
+                "[DIRECTIVE] released %d held confirmation claim(s) after commit",
+                len(state["held_confirm"]),
+            )
+        else:
+            logger.warning(
+                "[DIRECTIVE] dropping %d confirmation claim(s) — confirm did not "
+                "commit (committed=%s)", len(state["held_confirm"]), committed,
+            )
+        state["held_confirm"] = []
 
     # The model spoke a price-free confirmation (a cart-change summary for
     # <act>, a short generic acknowledgement like "Let me check." for
