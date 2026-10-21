@@ -33,8 +33,8 @@ This script instead:
 * Reads kiosk-core's wall-clock latency fields directly from the turn trace.
   The headline identity is now exact per turn:
   ``voice_to_voice_ms == endpointing_delay_ms + processing_latency_ms``.
-  ``voice_to_voice_ms`` stops on the first sound at the speaker, which may be
-  the cached "One moment." opener; therefore the report also surfaces
+  ``voice_to_voice_ms`` stops on the first sound ready for the speaker, which
+  may be the cached "One moment." opener; therefore the report also surfaces
   ``voice_to_voice_answer_ms`` and ``first_audio_was_opener`` so the first
   answer-bearing audio is visible.
 * Reports mean/median/p90/**p95** (p95 is the customer-facing target — a
@@ -346,9 +346,9 @@ class TurnResult:
     error: str | None = None
 
     # Wall-clock spans, never blended with audio-domain diagnostics:
-    #   voice_to_voice_ms          : customer's last word -> first sound at speaker
+    #   voice_to_voice_ms          : customer's last word -> first sound ready for speaker
     #   endpointing_delay_ms       : customer's last word -> turn-end decision
-    #   processing_latency_ms      : turn-end decision -> first sound at speaker
+    #   processing_latency_ms      : turn-end decision -> first sound ready for speaker
     #   voice_to_voice_answer_ms   : customer's last word -> first answer audio
     voice_to_voice_ms: float | None = None
     voice_to_voice_answer_ms: float | None = None
@@ -638,12 +638,12 @@ def build_kpi_vocabulary(summary: dict[str, Any]) -> dict[str, Any]:
     return {
         "voice_to_voice_latency": _kpi(
             "Voice-to-voice latency", v2v_field,
-            "customer's last word", "first sound at speaker",
+            "customer's last word", "first sound ready for speaker",
             "Includes the cached opener when first_audio_was_opener is true.",
         ),
         "voice_to_voice_answer_latency": _kpi(
             "Voice-to-voice answer latency", v2v_answer_field,
-            "customer's last word", "first answer-bearing sound at speaker",
+            "customer's last word", "first answer-bearing sound ready for speaker",
             "Use this as the pipeline figure when the cached opener is enabled.",
         ),
         "endpointing_delay": _kpi(
@@ -654,12 +654,12 @@ def build_kpi_vocabulary(summary: dict[str, Any]) -> dict[str, Any]:
         ),
         "processing_latency": _kpi(
             "Processing latency", processing_field,
-            "turn-end decision", "first sound at speaker",
+            "turn-end decision", "first sound ready for speaker",
             "Pipeline work after endpointing; may stop on the cached opener.",
         ),
         "processing_latency_answer": _kpi(
             "Processing latency to answer", "processing_latency_answer_ms",
-            "turn-end decision", "first answer-bearing sound at speaker",
+            "turn-end decision", "first answer-bearing sound ready for speaker",
             "Pipeline work excluding the cached opener shortcut.",
         ),
         "transcription_latency": _kpi(
@@ -899,7 +899,7 @@ def print_report(report: BenchmarkReport) -> None:
     processing_stats = report.summary.get("processing_latency_ms")
     if processing_stats:
         print(
-            "Processing latency (turn-end decision -> first sound at speaker): "
+            "Processing latency (turn-end decision -> first sound ready for speaker): "
             f"median = {processing_stats['median']} ms  p95 = {processing_stats['p95']} ms"
         )
     print_breakdown(report)

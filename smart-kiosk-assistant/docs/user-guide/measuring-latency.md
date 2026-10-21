@@ -12,9 +12,9 @@ incomparable.
 
 | Term | Definition |
 | --- | --- |
-| **Voice-to-voice latency** | Customer's last word → first sound at the speaker |
+| **Voice-to-voice latency** | Customer's last word → first sound ready for the speaker |
 | **Endpointing delay** | Customer's last word → turn-end decision |
-| **Processing latency** | Turn-end decision → first sound at the speaker |
+| **Processing latency** | Turn-end decision → first sound ready for the speaker |
 | **Transcription latency** | Last word → final transcript available |
 | **LLM TTFT** | Time to first token |
 | **TTS time to first sentence** | Time until sentence 1's synthesized audio WAV is on disk (not the first audio byte) |
@@ -25,8 +25,11 @@ The two parts reconcile exactly:
 voice_to_voice_ms == endpointing_delay_ms + processing_latency_ms
 ```
 
-The clock stops at the **speaker** — when audio is first available for
-playback — not when a WAV is written to disk.
+The clock stops when the first answer audio is **ready for the speaker** —
+the WAV is on disk and queued for playback. `make benchmark` is headless, so
+this is the furthest point it can observe. In the live hands-free UI the
+browser additionally reports when playback actually began, recorded
+separately as `voice_to_voice_speaker_ms`.
 
 > **"Time to first audio" is retired.** It named different spans in
 > different places. Use voice-to-voice latency, and state which of its two
@@ -36,7 +39,7 @@ playback — not when a WAV is written to disk.
 
 By default the kiosk plays a short cached acknowledgement ("One moment.")
 as soon as it decides the turn has ended, before the answer is ready. When
-it does, the first sound at the speaker is the opener, so
+it does, the first sound ready for the speaker is the opener, so
 `voice_to_voice_ms` measures the opener — which is a real thing the
 customer hears, but it is not a measure of the pipeline.
 
@@ -44,7 +47,7 @@ Every turn therefore reports both, and says which it was:
 
 | Field | Meaning |
 | --- | --- |
-| `voice_to_voice_ms` | To the first sound at the speaker, whatever it was |
+| `voice_to_voice_ms` | To the first sound ready for the speaker, whatever it was |
 | `voice_to_voice_answer_ms` | To the first sound **of the answer** |
 | `first_audio_was_opener` | Whether the first sound was the opener |
 | `opener_failed` | Opener was enabled but could not be rendered, so the customer heard nothing until the answer |
@@ -122,7 +125,8 @@ Two settings keep it at zero:
 
 A p95 over four turns is just the slowest of the four. The default
 benchmark runs `order-fastpath`: six single-intent ordering turns (one
-clean mutation each, ending in a confirm) across several voices, repeated
+clean mutation each, ending in a confirm), all synthesised with one TTS
+voice, repeated
 `V2V_RUNS` times — 48 measured turns at the default `V2V_RUNS=8`, enough
 for a stable median and a p95 that is not a single outlier. This is the
 clean-ordering voice-to-voice number; **quote it with the scenario named
