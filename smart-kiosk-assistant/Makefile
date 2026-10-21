@@ -791,6 +791,25 @@ benchmark: check-env validate-profile ## Run the voice-to-voice latency benchmar
 		fi; \
 		exit 1; \
 	fi
+	@# Refuse to run over an already-up stack. The orchestrator brings the
+	@# stack up and down itself, and `make up` wipes ./metrics/ as a
+	@# prerequisite. Over a stack the user already started (e.g. from
+	@# get-started.md) that silently (a) deletes the live collector's
+	@# hardware counters mid-run, so the run ends with no hardware rows and no
+	@# warning, and (b) leaves queue-service/rtsp-streamer running during the
+	@# measured turns while the manifest records the queue as off. Stopping
+	@# with a clear message is safer than tearing down a stack the user may be
+	@# using for something else.
+	@running="$$($(COMPOSE_BASE) --profile identity --profile queue ps -q 2>/dev/null)"; \
+	if [ -n "$$running" ]; then \
+		echo "$(RED)The kiosk stack is already running.$(NC)"; \
+		echo "  make benchmark starts and stops the stack itself and wipes ./metrics/ on start."; \
+		echo "  Running it over an already-up stack deletes the live collector's hardware"; \
+		echo "  metrics with no warning, and leaves queue-service/rtsp-streamer running during"; \
+		echo "  the measured turns while the manifest records the queue as off."; \
+		echo "  Stop the stack first:  $(YELLOW)make down$(NC)"; \
+		exit 1; \
+	fi
 	@$(MAKE) --no-print-directory _write-provenance
 	@echo "$(BLUE)Running voice-to-voice benchmark (profile=$(if $(PROFILE),$(PROFILE),none), script=$(if $(V2V_SCRIPT),$(V2V_SCRIPT),Sample_data/conversation.jsonl), runs=$(V2V_RUNS))...$(NC)"
 	@# Warm-up runs are discarded. Changing an inference device forces an
