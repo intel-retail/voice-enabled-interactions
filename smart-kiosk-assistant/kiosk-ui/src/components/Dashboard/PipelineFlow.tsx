@@ -164,7 +164,7 @@ export function PipelineFlow({ kpis, phase }: PipelineFlowProps) {
           {v2vMs !== null && (
             <span className="rounded-full bg-purple-50 px-2.5 py-0.5 text-[11px] font-semibold text-purple-700 border border-purple-200"
               title={
-                'Voice-to-voice latency — customer\u2019s last word to first sound at the speaker' +
+                'Voice-to-voice latency — customer\u2019s last word to first sound ready for speaker' +
                 (firstAudioWasOpener && v2vAnswerMs !== null
                   ? ` (answer audio: ${latencyLabel(v2vAnswerMs)})`
                   : '')
