@@ -46,6 +46,7 @@ from kiosk_core.queue_client import QueueClient
 from kiosk_core.qsr_mcp import board_state
 from kiosk_core.qsr_mcp.autonomy import AutonomyEventSink
 from kiosk_core.qsr_mcp.delivery import BackgroundDispatcher, Delivery
+from kiosk_core.qsr_mcp import menu, menu_requests
 from kiosk_core.qsr_mcp.event_log import build_log, new_event
 from kiosk_core.qsr_mcp.policy import GateLevel, PolicyGate
 
@@ -61,6 +62,9 @@ SERVICE_NAME = "smart_kiosk"
 _EVENT_TYPES: dict[str, dict[str, str]] = {
     "queue_depth_sample": {"count": "int", "nearby": "int", "status": "str"},
     "board_mode_changed": {"mode": "str", "reason": "str|None"},
+    "menu_item_added": {"product_id": "str", "name": "str", "category": "str", "price": "float"},
+    "menu_item_updated": {"product_id": "str", "changed": "dict", "reason": "str|None"},
+    "menu_change_requested": {"request_id": "str", "action": "str", "reason": "str|None"},
 }
 
 # -- plumbing: durable log, delivery, policy gate (self-contained, no SDK) --
@@ -105,6 +109,7 @@ _policy = PolicyGate()
 _subscriptions: list[dict[str, str]] = []
 
 board_state.configure(cfg.QSR_MCP_BOARD_STATE_PATH)
+menu_requests.configure(cfg.QSR_MENU_REQUESTS_PATH)
 _queue_client = QueueClient() if cfg.QUEUE_SERVICE_ENABLED else None
 
 mcp = FastMCP(SERVICE_NAME)
@@ -349,6 +354,19 @@ def get_board_state() -> dict[str, Any]:
     return board_state.get()
 
 
+@_register_read_tool(
+    "get_menu_requests",
+    description=(
+        "Menu changes awaiting operator approval, newest last. Use this to "
+        "check whether a previously requested change has been actioned."
+    ),
+    schema={"status": "str ('pending'|'approved'|'rejected'|'all')"},
+)
+def get_menu_requests(status: str = "pending") -> dict[str, Any]:
+    requested = None if status == "all" else status
+    return {"status": status, "requests": menu_requests.list_requests(requested)}
+
+
 # ---------------------------------------------------------------------------
 # Act tool — the only actuator this service exposes
 # ---------------------------------------------------------------------------
@@ -397,3 +415,247 @@ def set_board_mode(mode: str, reason: Optional[str] = None) -> dict[str, Any]:
         }
     result = _set_board_mode_impl(mode, reason)
     return {"executed": True, "level": decision.level.value, "result": result}
+
+
+# ---------------------------------------------------------------------------
+# Menu act tools — add_menu_item / update_menu_item
+# ---------------------------------------------------------------------------
+
+def _gate_level(raw: str, fallback: GateLevel) -> GateLevel:
+    """Parse a configured gate level, falling back on an unknown value."""
+    try:
+        return GateLevel(raw)
+    except ValueError:
+        logger.warning(
+            "[QSR-MCP] Unknown gate level %r; falling back to %s", raw, fallback.value
+        )
+        return fallback
+
+
+_ADD_MENU_ITEM_DESCRIPTION = (
+    "Add a new item to the kiosk menu. Fails if the product_id already "
+    "exists — use update_menu_item to change an existing item."
+)
+_ADD_MENU_ITEM_SCHEMA = {
+    "product_id": "str",
+    "name": "str",
+    "category": "str",
+    "price": "float",
+    "is_veg": "bool",
+    "is_bestseller": "bool",
+    "reason": "str|None",
+}
+
+_UPDATE_MENU_ITEM_DESCRIPTION = (
+    "Update an existing menu item's price, availability or details. Set "
+    "is_available=false to take an item off the menu (it is then hidden from "
+    "the menu and refused at order time)."
+)
+_UPDATE_MENU_ITEM_SCHEMA = {
+    "product_id": "str",
+    "price": "float|None",
+    "is_available": "bool|None",
+    "name": "str|None",
+    "category": "str|None",
+    "is_bestseller": "bool|None",
+    "is_veg": "bool|None",
+    "reason": "str|None",
+}
+
+_ADD_GATE = _gate_level(cfg.QSR_MENU_ADD_GATE, GateLevel.NEEDS_APPROVAL)
+_UPDATE_GATE = _gate_level(cfg.QSR_MENU_UPDATE_GATE, GateLevel.AUTOMATIC)
+
+_policy.register(
+    "add_menu_item", _ADD_GATE,
+    max_calls=cfg.QSR_MENU_MAX_CALLS, per_seconds=cfg.QSR_MENU_PER_SECONDS,
+)
+_policy.register(
+    "update_menu_item", _UPDATE_GATE,
+    max_calls=cfg.QSR_MENU_MAX_CALLS, per_seconds=cfg.QSR_MENU_PER_SECONDS,
+)
+_ACT_TOOLS["add_menu_item"] = {
+    "description": _ADD_MENU_ITEM_DESCRIPTION,
+    "schema": _ADD_MENU_ITEM_SCHEMA,
+    "gate": _ADD_GATE.value,
+}
+_ACT_TOOLS["update_menu_item"] = {
+    "description": _UPDATE_MENU_ITEM_DESCRIPTION,
+    "schema": _UPDATE_MENU_ITEM_SCHEMA,
+    "gate": _UPDATE_GATE.value,
+}
+
+
+def _add_menu_item_impl(payload: dict[str, Any], reason: Optional[str] = None) -> dict[str, Any]:
+    """Create the product and emit ``menu_item_added``."""
+    product = menu.add_item(**payload)
+    if MCP_SERVICE_ENABLED:
+        try:
+            emit(
+                "menu_item_added",
+                {
+                    "product_id": product["product_id"],
+                    "name": product["name"],
+                    "category": product["category"],
+                    "price": product["price"],
+                    "reason": reason,
+                },
+                ref_id=product["product_id"],
+            )
+        except Exception:
+            logger.exception("[QSR-MCP] Failed to emit menu_item_added")
+    return product
+
+
+def approve_menu_request(request_id: str) -> dict[str, Any]:
+    """Execute a pending menu request after operator approval.
+
+    Called by the operator REST endpoint, not by the agent — self-approval
+    would defeat the gate. The request is marked resolved *before* the write
+    so two concurrent approvals cannot both execute it.
+
+    Raises:
+        menu.MenuError: If the request is unknown, already resolved, or the
+            underlying write is rejected.
+    """
+    request = menu_requests.get(request_id)
+    if request is None:
+        raise menu.MenuError(f"unknown request: {request_id}")
+    if request["status"] != menu_requests.STATUS_PENDING:
+        raise menu.MenuError(f"request already {request['status']}: {request_id}")
+
+    claimed = menu_requests.resolve(request_id, menu_requests.STATUS_APPROVED)
+    if claimed is None:
+        raise menu.MenuError(f"request already resolved: {request_id}")
+
+    try:
+        if request["action"] == "add_menu_item":
+            result = _add_menu_item_impl(request["payload"], request.get("reason"))
+        else:
+            result = _update_menu_item_impl(
+                request["payload"], request.get("reason")
+            )
+    except Exception as exc:
+        # Hand the request back so a transient failure is retryable rather
+        # than silently consuming the operator's approval.
+        menu_requests.resolve(request_id, menu_requests.STATUS_REJECTED,
+                              {"error": str(exc)})
+        raise
+
+    menu_requests.resolve(request_id, menu_requests.STATUS_APPROVED, result)
+    return {"request_id": request_id, "executed": True, "result": result}
+
+
+def _update_menu_item_impl(payload: dict[str, Any], reason: Optional[str] = None) -> dict[str, Any]:
+    """Apply the update and emit ``menu_item_updated``."""
+    product_id = payload["product_id"]
+    fields = {k: v for k, v in payload.items() if k != "product_id"}
+    outcome = menu.update_item(product_id, **fields)
+    if MCP_SERVICE_ENABLED:
+        try:
+            emit(
+                "menu_item_updated",
+                {
+                    "product_id": product_id,
+                    "changed": outcome["changed"],
+                    "reason": reason,
+                },
+                ref_id=product_id,
+            )
+        except Exception:
+            logger.exception("[QSR-MCP] Failed to emit menu_item_updated")
+    return outcome
+
+
+def _gated_menu_call(
+    action: str, payload: dict[str, Any], reason: Optional[str], impl
+) -> dict[str, Any]:
+    """Run a menu act tool through the policy gate.
+
+    A ``needs_approval`` refusal is not a dead end here: the request is
+    recorded durably and returned with its ``request_id`` so an operator can
+    approve it later, instead of the agent's intent being dropped.
+    """
+    decision = _policy.evaluate(action, {**payload, "reason": reason})
+    if not decision.allowed:
+        response: dict[str, Any] = {
+            "executed": False,
+            "level": decision.level.value,
+            "reason": decision.reason,
+        }
+        if decision.level is GateLevel.NEEDS_APPROVAL:
+            request = menu_requests.create(action, payload, reason)
+            response["request_id"] = request["request_id"]
+            response["status"] = "pending_approval"
+            if MCP_SERVICE_ENABLED:
+                try:
+                    emit(
+                        "menu_change_requested",
+                        {
+                            "request_id": request["request_id"],
+                            "action": action,
+                            "payload": payload,
+                            "reason": reason,
+                        },
+                        ref_id=request["request_id"],
+                    )
+                except Exception:
+                    logger.exception("[QSR-MCP] Failed to emit menu_change_requested")
+        return response
+    try:
+        result = impl(payload, reason)
+    except menu.MenuError as exc:
+        # A caller-fixable rejection (bad price, duplicate id) is a normal
+        # tool outcome, not a transport error — report it so the agent can
+        # correct itself rather than retrying an invalid call.
+        return {"executed": False, "level": decision.level.value, "error": str(exc)}
+    return {"executed": True, "level": decision.level.value, "result": result}
+
+
+@mcp.tool(
+    name="add_menu_item",
+    description=f"[gate={_ADD_GATE.value}] {_ADD_MENU_ITEM_DESCRIPTION}",
+)
+def add_menu_item(
+    product_id: str,
+    name: str,
+    category: str,
+    price: float,
+    is_veg: bool = True,
+    is_bestseller: bool = False,
+    reason: Optional[str] = None,
+) -> dict[str, Any]:
+    """Add a new item to the kiosk menu, through the policy gate."""
+    payload = {
+        "product_id": product_id,
+        "name": name,
+        "category": category,
+        "price": price,
+        "is_veg": is_veg,
+        "is_bestseller": is_bestseller,
+    }
+    return _gated_menu_call("add_menu_item", payload, reason, _add_menu_item_impl)
+
+
+@mcp.tool(
+    name="update_menu_item",
+    description=f"[gate={_UPDATE_GATE.value}] {_UPDATE_MENU_ITEM_DESCRIPTION}",
+)
+def update_menu_item(
+    product_id: str,
+    price: Optional[float] = None,
+    is_available: Optional[bool] = None,
+    name: Optional[str] = None,
+    category: Optional[str] = None,
+    is_bestseller: Optional[bool] = None,
+    is_veg: Optional[bool] = None,
+    reason: Optional[str] = None,
+) -> dict[str, Any]:
+    """Update an existing menu item, through the policy gate."""
+    payload: dict[str, Any] = {"product_id": product_id}
+    for key, value in (
+        ("price", price), ("is_available", is_available), ("name", name),
+        ("category", category), ("is_bestseller", is_bestseller), ("is_veg", is_veg),
+    ):
+        if value is not None:
+            payload[key] = value
+    return _gated_menu_call("update_menu_item", payload, reason, _update_menu_item_impl)

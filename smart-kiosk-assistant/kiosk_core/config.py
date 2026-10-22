@@ -1113,6 +1113,29 @@ QSR_MCP_BOARD_STATE_PATH = os.getenv(
 QSR_MCP_QUEUE_POLL_SECONDS = float(os.getenv("KIOSK_CORE_QSR_MCP_QUEUE_POLL_SECONDS", "30.0"))
 
 # ---------------------------------------------------------------------------
+# QSR menu actuation (add_menu_item / update_menu_item act tools)
+# ---------------------------------------------------------------------------
+# Policy gate level per menu act tool. Updating price/availability is
+# reversible and is AUTOMATIC by default; creating a brand-new catalogue item
+# is not, so it defaults to NEEDS_APPROVAL and lands in the pending-request
+# queue for an operator to approve. Set to "automatic" to let the agent add
+# items outright. Valid: automatic | needs_approval | notify | blocked.
+QSR_MENU_UPDATE_GATE = os.getenv("KIOSK_CORE_QSR_MENU_UPDATE_GATE", "automatic").lower()
+QSR_MENU_ADD_GATE = os.getenv("KIOSK_CORE_QSR_MENU_ADD_GATE", "needs_approval").lower()
+
+# Rate limits for the menu act tools (calls per window), so a looping agent
+# cannot rewrite the catalogue unbounded.
+QSR_MENU_MAX_CALLS = int(os.getenv("KIOSK_CORE_QSR_MENU_MAX_CALLS", "20"))
+QSR_MENU_PER_SECONDS = float(os.getenv("KIOSK_CORE_QSR_MENU_PER_SECONDS", "60.0"))
+
+# Durable file holding menu changes that are awaiting operator approval
+# (kiosk_core/qsr_mcp/menu_requests.py).
+QSR_MENU_REQUESTS_PATH = os.getenv(
+    "KIOSK_CORE_QSR_MENU_REQUESTS_PATH",
+    "./qsr_menu_requests.json",
+)
+
+# ---------------------------------------------------------------------------
 # QSR Agent autonomy event delivery
 # ---------------------------------------------------------------------------
 # Outbound push of kiosk observations to the Central QSR Agent's

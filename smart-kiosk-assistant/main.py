@@ -131,6 +131,11 @@ if cfg.IDENTITY_ENABLED:
     from kiosk_core.identity.api import router as identity_router
     app.include_router(identity_router)
 
+# ── QSR menu approval router (operator-only; never an MCP tool) ──────────────
+if cfg.QSR_MCP_ENABLED:
+    from kiosk_core.qsr_mcp.api import router as qsr_router
+    app.include_router(qsr_router)
+
 
 async def _clear_stale_cart_for_new_session(history: list[dict[str, str]] | None = None) -> None:
     """Clear any abandoned draft cart before a brand-new conversation starts.

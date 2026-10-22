@@ -935,6 +935,9 @@ services:
       # Empty URL => delivery disabled, so the default stack and every
       # benchmark run make no outbound calls. QSR_AUTONOMY_STORE_ID must equal
       # the agent's QSR_RESTAURANT_ID or every event is rejected.
+      KIOSK_CORE_QSR_MENU_ADD_GATE: "${KIOSK_CORE_QSR_MENU_ADD_GATE:-needs_approval}"
+      KIOSK_CORE_QSR_MENU_UPDATE_GATE: "${KIOSK_CORE_QSR_MENU_UPDATE_GATE:-automatic}"
+      KIOSK_CORE_QSR_MENU_REQUESTS_PATH: "${KIOSK_CORE_QSR_MENU_REQUESTS_PATH:-/app/data/qsr_menu_requests.json}"
       KIOSK_CORE_QSR_AUTONOMY_EVENTS_URL:   "${KIOSK_CORE_QSR_AUTONOMY_EVENTS_URL:-}"
       KIOSK_CORE_QSR_AUTONOMY_EVENTS_TOKEN: "${KIOSK_CORE_QSR_AUTONOMY_EVENTS_TOKEN:-}"
       KIOSK_CORE_QSR_AUTONOMY_STORE_ID:     "${KIOSK_CORE_QSR_AUTONOMY_STORE_ID:-qsr-001}"

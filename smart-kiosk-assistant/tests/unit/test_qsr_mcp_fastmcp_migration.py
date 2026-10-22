@@ -40,6 +40,9 @@ def qsr_env(monkeypatch, tmp_path):
     monkeypatch.setenv(
         "KIOSK_CORE_QSR_MCP_BOARD_STATE_PATH", str(tmp_path / "board_state.json")
     )
+    monkeypatch.setenv(
+        "KIOSK_CORE_QSR_MENU_REQUESTS_PATH", str(tmp_path / "menu_requests.json")
+    )
     monkeypatch.setenv("KIOSK_CORE_QUEUE_SERVICE_ENABLED", "false")
     monkeypatch.setenv("KIOSK_CORE_DB_PATH", str(tmp_path / "kiosk.db"))
     # Fresh state per test: mcp_service.py builds its log/policy/app at
@@ -54,6 +57,8 @@ def qsr_env(monkeypatch, tmp_path):
     importlib.reload(cfg_module)
     import kiosk_core.qsr_mcp.board_state as board_state_module
     importlib.reload(board_state_module)
+    import kiosk_core.qsr_mcp.menu_requests as menu_requests_module
+    importlib.reload(menu_requests_module)
     import kiosk_core.qsr_mcp.mcp_service as mcp_service
     importlib.reload(mcp_service)
 
@@ -161,9 +166,15 @@ _EXPECTED_TOOLS = {
 }
 
 
+# Tools added after the migration. Listed explicitly so the assertions below
+# stay exact: a removal or an unintended addition still fails.
+_POST_MIGRATION_TOOLS = {"add_menu_item", "update_menu_item", "get_menu_requests"}
+
+
 def test_tools_list_matches_pre_migration_baseline(qsr_env):
-    """`tools/list` exposes exactly the same 7 tools, with the same
-    descriptions and input schemas, as the mcp_service_sdk-backed server."""
+    """`tools/list` still exposes the original 7 tools unchanged, with the
+    same descriptions and input schemas as the mcp_service_sdk-backed
+    server, plus the explicitly-listed menu tools added since."""
     from fastmcp import Client
 
     async def go():
@@ -172,14 +183,16 @@ def test_tools_list_matches_pre_migration_baseline(qsr_env):
 
     tools = _run(go())
     actual = {t.name: {"description": t.description, "input_schema": t.input_schema} for t in tools}
-    assert set(actual) == set(_EXPECTED_TOOLS)
+    assert set(actual) == set(_EXPECTED_TOOLS) | _POST_MIGRATION_TOOLS
     for name, expected in _EXPECTED_TOOLS.items():
         assert actual[name] == expected, name
 
 
 def test_describe_matches_pre_migration_baseline(qsr_env):
     """`describe()` keeps the exact event_types/read_tools/act_tools shape
-    the SDK's ``ServiceServer.describe()`` produced."""
+    the SDK's ``ServiceServer.describe()`` produced, for every entry that
+    existed then. Entries added since are asserted separately below so this
+    test still fails if a pre-existing one changes or disappears."""
     from fastmcp import Client
 
     async def go():
@@ -187,7 +200,7 @@ def test_describe_matches_pre_migration_baseline(qsr_env):
             return await client.call_tool("describe", {})
 
     result = _run(go())
-    assert result.data == {
+    baseline = {
         "service": "smart_kiosk",
         "store_id": "store-001",
         "event_types": {
@@ -233,6 +246,32 @@ def test_describe_matches_pre_migration_baseline(qsr_env):
             }
         },
     }
+
+    actual = result.data
+    assert actual["service"] == baseline["service"]
+    assert actual["store_id"] == baseline["store_id"]
+
+    # Every pre-existing entry must be byte-identical...
+    for section in ("event_types", "read_tools", "act_tools"):
+        for key, expected in baseline[section].items():
+            assert actual[section][key] == expected, f"{section}.{key}"
+
+    # ...and the only additions are the documented menu ones.
+    assert set(actual["read_tools"]) - set(baseline["read_tools"]) == {
+        "get_menu_requests"
+    }
+    assert set(actual["act_tools"]) - set(baseline["act_tools"]) == {
+        "add_menu_item",
+        "update_menu_item",
+    }
+    assert set(actual["event_types"]) - set(baseline["event_types"]) == {
+        "menu_item_added",
+        "menu_item_updated",
+        "menu_change_requested",
+    }
+    # add_menu_item must stay behind the approval gate by default.
+    assert actual["act_tools"]["add_menu_item"]["gate"] == "needs_approval"
+    assert actual["act_tools"]["update_menu_item"]["gate"] == "automatic"
 
 
 def test_set_board_mode_wire_contract_and_board_state(qsr_env):
