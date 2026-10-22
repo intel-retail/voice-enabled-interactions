@@ -40,11 +40,15 @@ All five services are started by the top-level [docker-compose.yml](./docker-com
 Clone the repository and pull the prebuilt images from Docker Hub:
 
 ```bash
-git clone -b <release-or-tag> --single-branch https://github.com/intel-retail/voice-enabled-interactions.git  #e.g. v4.0.0
+git clone --recurse-submodules -b <release-or-tag> --single-branch https://github.com/intel-retail/voice-enabled-interactions.git  #e.g. v4.0.0
 cd voice-enabled-interactions/smart-kiosk-assistant
 docker compose pull
 docker compose up -d
 ```
+
+`--recurse-submodules` checks out the pinned `performance-tools`
+submodule, which `make benchmark` needs. If you already cloned without
+it, run `make update-submodules` from `smart-kiosk-assistant/`.
 
 Open [http://127.0.0.1:7860](http://127.0.0.1:7860) for the operator
 browser UI (chat + performance dashboard), and

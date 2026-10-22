@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { tuning } from '../constants';
+import { features, tuning } from '../constants';
 import {
   endAudioStream,
   pollSession,
@@ -7,7 +7,8 @@ import {
   startStreamSession,
   ttsAudioUrl,
 } from '../api/kioskApi';
-import { concatFloat32, encodeWav, resampleLinear } from '../api/audioUtils';
+import { concatFloat32, encodePcm16, encodeWav, resampleLinear } from '../api/audioUtils';
+import { VoiceStreamSocket } from '../api/voiceSocket';
 import { useAudioQueue } from './useAudioQueue';
 import type { ChatMessage, HistoryTurn, VoicePhase } from '../types';
 
@@ -121,6 +122,16 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
   const startRef = useRef<(() => Promise<void>) | null>(null);
 
   const audioQueue = useAudioQueue({
+    onFirstPlay: () => {
+      // The first answer segment just began playing: tell kiosk-core over the
+      // hands-free socket so the voice-to-voice clock stops at the speaker
+      // (not at the on-disk WAV write). No-op on the REST push-to-talk path.
+      voiceSocketRef.current?.playbackStarted();
+      // The socket's only remaining job for this turn was to carry that stamp;
+      // close it now so it doesn't linger across the (new-socket-per-turn)
+      // re-arm. kiosk-core finalises the turn on disconnect.
+      closeSocket();
+    },
     onAllDone: () => {
       // After the assistant finishes speaking, allow a KPI/order refresh.
       onTurnComplete?.();
@@ -141,6 +152,9 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
   const framesRef = useRef<Float32Array[]>([]);
   const ctxRateRef = useRef<number>(48000);
   const sessionIdRef = useRef<string | null>(null);
+  // Hands-free uplink socket (conversation mode only). null on the REST
+  // push-to-talk path. Closed in teardownCapture at the end of every turn.
+  const voiceSocketRef = useRef<VoiceStreamSocket | null>(null);
   // Persistent conversation ID — generated once per hook mount and reused
   // across all voice turns so the agent retains order context (cart, order_id).
   const conversationIdRef = useRef<string>(crypto.randomUUID());
@@ -179,8 +193,19 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
     framesRef.current = [];
     const merged = concatFloat32(frames);
     const resampled = resampleLinear(merged, ctxRateRef.current, TARGET_RATE);
-    const wav = encodeWav(resampled, TARGET_RATE);
 
+    const socket = voiceSocketRef.current;
+    if (socket) {
+      // Hands-free uplink: send bare PCM16 frames over the persistent socket
+      // (no WAV container, no per-chunk HTTP round-trip). The socket queues
+      // frames internally until kiosk-core acknowledges the session, so the
+      // opening words are never lost. There is no per-frame failure to retry
+      // the way the REST path does; a dropped socket ends the turn.
+      socket.sendPcm(encodePcm16(resampled));
+      return;
+    }
+
+    const wav = encodeWav(resampled, TARGET_RATE);
     try {
       await pushAudioChunk(sid, wav);
     } catch {
@@ -192,8 +217,26 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
     }
   }, []);
 
+  // Close the hands-free uplink socket, if one is open. Kept separate from
+  // teardownCapture on purpose: the socket must OUTLIVE the mic teardown at
+  // turn-end so the browser can still report `playback_started` once the
+  // answer audio actually reaches the speaker (~2 s after the silence
+  // endpoint). Closing it inside teardownCapture would null the ref before
+  // onFirstPlay fires, silently dropping the speaker-anchored v2v stamp.
+  const closeSocket = useCallback(() => {
+    try {
+      voiceSocketRef.current?.close();
+    } catch {
+      /* already closing */
+    }
+    voiceSocketRef.current = null;
+  }, []);
+
   const teardownCapture = useCallback(() => {
     recordingRef.current = false;
+    // NOTE: the uplink socket is intentionally NOT closed here — it lives until
+    // playback is reported (onFirstPlay) or the turn produced no audio. See
+    // closeSocket() above.
     try {
       workletRef.current?.disconnect();
       sourceRef.current?.disconnect();
@@ -230,10 +273,11 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
     sessionIdRef.current = null;
     stopPolling();
     teardownCapture();
+    closeSocket();
     setPartialUser('');
     setPartialAssistant('');
     setPhase('idle');
-  }, [stopPolling, teardownCapture]);
+  }, [stopPolling, teardownCapture, closeSocket]);
 
   // ── Single poll loop: drives partial transcript, response, TTS, completion ──
   const pollLoop = useCallback(async () => {
@@ -326,12 +370,17 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
       }
       // onTurnComplete also fires when TTS finishes (onAllDone); fire here too
       // in case there was no audio to play.
-      if (segs.length === 0) onTurnComplete?.();
+      if (segs.length === 0) {
+        // No answer audio will play, so onFirstPlay never fires to close the
+        // uplink socket — close it here so it doesn't linger into the re-arm.
+        closeSocket();
+        onTurnComplete?.();
+      }
       return;
     }
 
     pollTimerRef.current = window.setTimeout(pollLoop, tuning.pollIntervalMs);
-  }, [audioQueue, onTurnComplete, stopPolling, teardownCapture]);
+  }, [audioQueue, onTurnComplete, stopPolling, teardownCapture, closeSocket]);
 
   // ── Public: start recording ───────────────────────────────────────────────
   const start = useCallback(async () => {
@@ -420,25 +469,66 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
       // session id exists, so this buffering is safe.
       recordingRef.current = true;
 
-      const { session_id } = await startStreamSession(
-        TARGET_RATE,
-        buildHistory(),
-        conversationIdRef.current,
-        !conversationModeRef.current,
-      );
-      if (myGen !== startGenRef.current) return;
-      sessionIdRef.current = session_id;
+      const useWs = conversationModeRef.current && features.handsfreeWebSocket;
+      if (useWs) {
+        // Hands-free: open the persistent uplink socket. kiosk-core
+        // acknowledges with a session id (onStarted), at which point the poll
+        // loop begins — mirroring the REST branch below. Frames captured
+        // before the ack are queued inside the socket, so nothing is lost.
+        // Defensively close any socket left over from a previous turn (the
+        // normal close paths are onFirstPlay / the no-audio branch) so we
+        // never leak a connection by overwriting the ref.
+        closeSocket();
+        voiceSocketRef.current = new VoiceStreamSocket(
+          TARGET_RATE,
+          buildHistory(),
+          conversationIdRef.current,
+          {
+            onStarted: (sessionId) => {
+              if (myGen !== startGenRef.current) return;
+              sessionIdRef.current = sessionId;
+              setStatusText('🎙 Listening — speak now');
+              stopPolling();
+              pollTimerRef.current = window.setTimeout(pollLoop, tuning.pollIntervalMs);
+            },
+            onError: (message) => {
+              if (myGen !== startGenRef.current) return;
+              // Fail soft: drop to idle and leave conversation mode. The REST
+              // push-to-talk path is unaffected and the next tap can retry.
+              recordingRef.current = false;
+              teardownCapture();
+              closeSocket();
+              setPhase('idle');
+              setPartialUser('');
+              conversationModeRef.current = false;
+              setConversationMode(false);
+              setError(message);
+              setStatusText(`❌ ${message}`);
+            },
+          },
+        );
+      } else {
+        const { session_id } = await startStreamSession(
+          TARGET_RATE,
+          buildHistory(),
+          conversationIdRef.current,
+          !conversationModeRef.current,
+        );
+        if (myGen !== startGenRef.current) return;
+        sessionIdRef.current = session_id;
 
-      // Everything is live — only now is it honest to ask for speech.
-      setStatusText('🎙 Listening — speak now');
+        // Everything is live — only now is it honest to ask for speech.
+        setStatusText('🎙 Listening — speak now');
 
-      // Begin the poll loop (partial transcript while listening).
-      stopPolling();
-      pollTimerRef.current = window.setTimeout(pollLoop, tuning.pollIntervalMs);
+        // Begin the poll loop (partial transcript while listening).
+        stopPolling();
+        pollTimerRef.current = window.setTimeout(pollLoop, tuning.pollIntervalMs);
+      }
     } catch (err) {
       if (myGen !== startGenRef.current) return;
       recordingRef.current = false;
       teardownCapture();
+      closeSocket();
       setPhase('idle');
       setPartialUser('');
       // A failed start must also drop hands-free mode. Leaving it on rendered
@@ -461,6 +551,7 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
     pollLoop,
     stopPolling,
     teardownCapture,
+    closeSocket,
   ]);
 
   // ── Public: stop recording → finalise ─────────────────────────────────────
@@ -472,6 +563,8 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
     setPartialUser((p) => (p === '🎤 Listening…' ? '⏳ Processing…' : p));
 
     // Flush remaining audio, then signal end-of-stream.
+    const wasWs = voiceSocketRef.current !== null;
+    if (wasWs) voiceSocketRef.current?.end();
     await flushChunk(true);
     teardownCapture();
 
@@ -482,16 +575,23 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
       setPartialUser('');
       return;
     }
-    try {
-      await endAudioStream(sid);
-      eosRef.current = true;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setError(msg);
-      setStatusText(`❌ ${msg}`);
-      setPhase('idle');
-      return;
+    // Hands-free (WebSocket) turns are ended by the `end` event above plus the
+    // backend silence endpoint. The uplink socket is kept open past this point
+    // so onFirstPlay can report playback back to kiosk-core; it is closed by
+    // onFirstPlay (or the no-audio branch in pollLoop). The REST end-of-stream
+    // call would only redundantly re-signal the same turn.
+    if (!wasWs) {
+      try {
+        await endAudioStream(sid);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setError(msg);
+        setStatusText(`❌ ${msg}`);
+        setPhase('idle');
+        return;
+      }
     }
+    eosRef.current = true;
     // The poll loop (already running) will detect completion.
   }, [flushChunk, teardownCapture]);
 
@@ -556,6 +656,7 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
       conversationModeRef.current = false;
       stopPolling();
       teardownCapture();
+      closeSocket();
       audioQueue.stop();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

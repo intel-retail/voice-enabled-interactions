@@ -56,6 +56,7 @@ def build_manifest(
     queue_enabled: str,
     results_dir: str,
     metrics_dir: str,
+    forced_off: bool = True,
 ) -> dict:
     """Assemble the manifest dictionary.
 
@@ -64,9 +65,13 @@ def build_manifest(
         release_tag: Image tag the stack runs at.
         v2v_runs: Measured run count.
         v2v_warmup_runs: Discarded warm-up run count.
-        queue_enabled: Whether queue-service was running.
+        queue_enabled: Whether queue-service was *requested*.
         results_dir: Destination results directory.
         metrics_dir: Hardware counter directory.
+        forced_off: True when the V2V orchestrator will override queue-service
+            and diarization to off regardless of what was requested, which is
+            what ``make benchmark`` always does. The manifest then records the
+            effective values, with the requested ones kept alongside.
 
     Returns:
         A JSON-serialisable manifest.
@@ -103,8 +108,31 @@ def build_manifest(
             "release_tag": release_tag,
             "v2v_runs": v2v_runs,
             "v2v_warmup_runs": v2v_warmup_runs,
-            "queue_enabled": queue_enabled,
-            "diarization_enabled": env.get("KIOSK_CORE_DIARIZATION_ENABLED", "true"),
+            # What actually ran, not what was asked for. The V2V orchestrator
+            # (benchmark_smart_kiosk_v2v.py) unconditionally sets
+            # KIOSK_CORE_QUEUE_SERVICE_ENABLED and KIOSK_CORE_DIARIZATION_ENABLED
+            # to false before bringing the stack up, because queue-service alone
+            # costs ~650-750% CPU and would distort the latency figures. A
+            # manifest that echoed the requested values would describe a stack
+            # that never existed.
+            "queue_enabled": "false" if forced_off else queue_enabled,
+            "diarization_enabled": (
+                "false" if forced_off
+                else env.get("KIOSK_CORE_DIARIZATION_ENABLED", "true")
+            ),
+            "queue_enabled_requested": queue_enabled,
+            "diarization_enabled_requested": env.get(
+                "KIOSK_CORE_DIARIZATION_ENABLED", "true"
+            ),
+            "forced_off_by_orchestrator": (
+                ["queue_service", "rtsp_streamer", "diarization"]
+                if forced_off else []
+            ),
+            # Flipped to "completed" by scripts/finish_run_manifest.py once the
+            # measured runs finish. A manifest still reading "started" means the
+            # run died partway, so any result files sitting next to it are left
+            # over from an earlier run and do not belong to this timestamp.
+            "status": "started",
             "results_dir": results_dir,
             "metrics_dir": metrics_dir,
         },
@@ -133,6 +161,15 @@ def main() -> int:
     ap.add_argument("--v2v-runs", default="")
     ap.add_argument("--v2v-warmup-runs", default="")
     ap.add_argument("--queue-enabled", default="")
+    ap.add_argument(
+        "--no-forced-off",
+        action="store_true",
+        help=(
+            "Record the requested queue/diarization values as-is. Only correct "
+            "when the stack is NOT brought up by benchmark_smart_kiosk_v2v.py, "
+            "which always forces both off."
+        ),
+    )
     args = ap.parse_args()
 
     manifest = build_manifest(
@@ -143,6 +180,7 @@ def main() -> int:
         queue_enabled=args.queue_enabled,
         results_dir=args.results_dir,
         metrics_dir=args.metrics_dir,
+        forced_off=not args.no_forced_off,
     )
 
     out = Path(args.results_dir)

@@ -33,6 +33,16 @@ DEFAULT_ANALYZER_STREAMING_ENABLED = os.getenv(
     "KIOSK_CORE_ANALYZER_STREAMING_ENABLED", "false"
 ).lower() not in ("false", "0", "no")
 
+# Hands-free browser sessions stream raw int16 PCM frames over a persistent
+# WebSocket (`/api/v1/sessions/stream`) instead of posting WAV chunks over
+# separate REST requests. Additive and reversible: push-to-talk keeps the REST
+# chunk path, the V2V benchmark now defaults to this WebSocket uplink (its
+# `--uplink rest` flag still exercises the REST path), and with this off the
+# WebSocket endpoint simply refuses the upgrade so clients fall back to REST.
+DEFAULT_HANDSFREE_WS_ENABLED = os.getenv(
+    "KIOSK_CORE_HANDSFREE_WS_ENABLED", "true"
+).lower() not in ("false", "0", "no")
+
 # Cadence of non-blocking "preview" commits while streaming is active. Each
 # commit only tells the analyzer "transcribe what's buffered so far" -- it
 # never blocks the frame-capture loop. Matches the kiosk-voice-lab reference
@@ -220,12 +230,33 @@ DEFAULT_TTS_SPEECH_NORMALIZE_ENABLED = os.getenv(
 # price, or outcome, otherwise it can contradict the menu/removal/confirm
 # guards that rewrite the real reply when a tool fails.
 DEFAULT_OPENER_ENABLED = os.getenv(
-    "KIOSK_CORE_OPENER_ENABLED", "true"
+    "KIOSK_CORE_OPENER_ENABLED", "false"
 ).lower() not in ("false", "0", "no")
 DEFAULT_OPENER_TEXT = os.getenv("KIOSK_CORE_OPENER_TEXT", "One moment.")
 # Rendered opener cache. Synthesised once per (text, voice, language) and
 # reused for every turn and every session, so TTS never sits on the hot path.
 DEFAULT_OPENER_CACHE_DIR = os.getenv("KIOSK_CORE_OPENER_CACHE_DIR", "./storage/openers")
+# How long a failed opener synthesis is remembered before it is retried.
+#
+# A failure used to be cached permanently: one bad TTS round trip at startup
+# disabled the opener for the lifetime of the process, so every later turn
+# silently lost the latency optimisation with nothing to indicate why. A
+# cooldown keeps the original intent (a broken TTS service must not make every
+# turn pay a failed round trip) without making a transient failure permanent.
+DEFAULT_OPENER_RETRY_SECONDS = float(
+    os.getenv("KIOSK_CORE_OPENER_RETRY_SECONDS", "60")
+)
+# Spoken when the agent call fails after the opener has already played.
+#
+# The opener is emitted before the agent call so the customer hears something
+# immediately. If that call then fails there is no reply to speak, so the
+# customer heard "One moment." followed by silence. This is the closing half
+# of that exchange. Like the opener it must stay non-committal: no tool has
+# necessarily run, so it must never imply an order was or was not changed.
+DEFAULT_AGENT_FAILURE_TEXT = os.getenv(
+    "KIOSK_CORE_AGENT_FAILURE_TEXT",
+    "Sorry, I'm having trouble right now. Could you say that again?",
+)
 
 # When list_products is called with no category, return a per-category summary
 # instead of every product. The catalogue is 26 items: reciting it costs ~19 s
@@ -422,7 +453,7 @@ DEFAULT_SILENCE_TIMEOUT_SECONDS = float(os.getenv("KIOSK_CORE_SILENCE_TIMEOUT_SE
 # boundary with tests/benchmarks/v2v_fixture_benchmark.py against rec1_16k.wav
 # and rec2_16k.wav (real recorded speech, 3 runs each):
 #   * 0.50s: transcripts identical/correct vs the 0.70s baseline on both
-#     fixtures, 6/6 runs. endpoint_wait_ms dropped ~150ms (rec1: ~1,000ms ->
+#     fixtures, 6/6 runs. endpoint_silence_run_ms dropped ~150ms (rec1: ~1,000ms ->
 #     ~900ms). SAFE.
 #   * 0.40s: reproduced the same class of hallucination the 0.30s value
 #     caused originally — "Good." became "Good, good, good." (repeated word)
@@ -636,15 +667,49 @@ DEFAULT_ENDPOINT_MIN_WORDS = int(os.getenv("KIOSK_CORE_ENDPOINT_MIN_WORDS", "3")
 # DEFAULT_ADAPTIVE_FLUSH_PAUSE_SECONDS's own real (destructive) commit to the
 # punch, so that commit hasn't cleared the buffer yet and the final flush has
 # to transcribe the whole utterance instead of a short tail — measured
-# final_flush_wait_ms ~420-560ms on turns where endpoint_wait_ms landed at the
+# final_flush_wait_ms ~420-560ms on turns where endpoint_silence_run_ms landed at the
 # ~200ms floor, vs. ~10-70ms on turns where it landed >=600ms (adaptive commit
 # already won). Net effect across 3 full-conversation runs was still a clear
-# win end to end (endpoint_wait_ms + final_flush_wait_ms combined dropped
+# win end to end (endpoint_silence_run_ms + final_flush_wait_ms combined dropped
 # from ~1200-1700ms/turn to ~600-750ms/turn on the turns that fire), but this
 # is why total v2v didn't fall as far as the raw firing-rate jump alone would
 # suggest — see docs/performance-improvements-2026-09.md before tuning either
 # constant further.
-DEFAULT_ENDPOINT_STABLE_SECONDS = float(os.getenv("KIOSK_CORE_ENDPOINT_STABLE_SECONDS", "0"))
+#
+# KNOWN RISK (2026-10, measured on the 88-turn scripted sweep that review
+# item 15 added — the validation above only ever ran 4-10 turns from a single
+# conversation, which was not enough to surface this): single-confirmation
+# mode commits turns mid-utterance on a large fraction of turns. Measured
+# early-commit rate (turn committed before the customer stopped speaking, as
+# reported by the fixture benchmark's clip-anchored early_commit_count):
+#
+#   flush 0.30s, stable 0    64%   <- what compose/.env.example shipped
+#   flush 0.50s, stable 0    55%   <- restoring the documented flush floor
+#   flush 0.30s, stable 0.2   9%
+#
+# The flush floor matters for transcript quality but is NOT the dominant
+# factor here; this constant is. A fixed silence threshold cannot tell a
+# mid-sentence pause from the end of a turn, whereas the stability window
+# detects it directly: when more speech is still arriving, the transcript
+# keeps changing and the window resets. That is why 0.2 outperforms a longer
+# timer, and it costs ~650ms of voice-to-voice p50.
+#
+# Restored to 0.2 (2026-10). At 0 the stack mis-heard order confirmation:
+# "Yes, that is everything. Please confirm my order." committed as "Yes,
+# that is everything." and the customer was told "Sorry, I couldn't confirm
+# your order just now". A correct order at 1.4s beats a wrong one at 0.76s,
+# so the latency cost is accepted deliberately. The firing-rate argument that
+# justified 0 still stands on its own terms; it was measured on 4-10 turns
+# from a single conversation, which could not surface what it traded away.
+#
+# Residual risk at 0.2: a customer who hesitates for longer than the window
+# mid-order ("Um, I think I want... the Spicy Chicken Crunch Burger") would
+# still have the turn committed on the fragment on timing alone. That case is
+# handled lexically instead -- see _INCOMPLETE_TAIL_WORDS in audio_session.py,
+# which refuses to call a transcript finished when it ends on a word that
+# demands a continuation. The fixture benchmark reports early_commit_count so
+# this rate is tracked rather than assumed to be zero.
+DEFAULT_ENDPOINT_STABLE_SECONDS = float(os.getenv("KIOSK_CORE_ENDPOINT_STABLE_SECONDS", "0.2"))
 DEFAULT_MAX_SESSION_SECONDS = float(os.getenv("KIOSK_CORE_MAX_SESSION_SECONDS", "20.0"))
 DEFAULT_SILENCE_THRESHOLD = int(os.getenv("KIOSK_CORE_SILENCE_THRESHOLD", "900"))
 
@@ -1057,3 +1122,58 @@ VLM_METRICS_RESULTS_DIR = os.getenv("CONTAINER_RESULTS_PATH", "./results")
 # previously synthesized by the harness land under the same "application"
 # value and consolidate identically.
 VLM_METRICS_USECASE_ENV_VAR = "USECASE_V2V"
+
+# The "id" vlm_metrics_logger stamps on every start/end pair. The consolidator
+# groups by "{application}_{id}" and averages each group into its own CSV row,
+# so this identifies the *stream* producing turns, not the individual turn.
+#
+# This used to be the per-turn session_id, which gave consolidated_metrics.csv
+# one row per turn, every one of them reading "Based on 1 total calls" against
+# an opaque UUID -- no average, no percentile, nothing to compare between runs
+# (PR #112 review, item 13). A single stable id collapses those into the one
+# aggregate row the consolidator exists to produce. Per-turn detail is not lost:
+# it lives in the benchmark's own JSON report and in GET /api/v1/pipeline/latest.
+#
+# Override only when several kiosks write into one results directory and their
+# turns need telling apart.
+VLM_METRICS_STREAM_ID = os.getenv("KIOSK_CORE_VLM_METRICS_STREAM_ID", "kiosk-voice")
+
+
+def check_vlm_metrics_results_dir() -> str | None:
+    """Return a human-readable reason the results directory is unusable.
+
+    kiosk-core runs as uid 1000 inside the container while ``results/`` is a
+    host bind mount owned by whoever cloned the repo. When those differ the
+    metrics writes fail, and because they are deliberately best-effort the
+    benchmark then reports zero transactions even though every turn
+    succeeded. Checking once at startup turns a silent, confusing result into
+    an actionable message before the run begins.
+
+    Returns:
+        None when the directory is writable, otherwise a message naming the
+        path, the uid in use and the fix.
+    """
+    import os as _os
+    import tempfile
+    from pathlib import Path as _Path
+
+    path = _Path(VLM_METRICS_RESULTS_DIR)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return (
+            f"results directory {path} could not be created ({exc}); "
+            f"process uid is {_os.getuid()}"
+        )
+    try:
+        with tempfile.NamedTemporaryFile(dir=path):
+            pass
+    except OSError as exc:
+        return (
+            f"results directory {path} is not writable ({exc}); process uid "
+            f"is {_os.getuid()}. Benchmark metrics will be silently lost. "
+            f"Fix on the host with: chmod a+rwX <repo>/results (make setup-dirs "
+            f"does this automatically)."
+        )
+    return None
+

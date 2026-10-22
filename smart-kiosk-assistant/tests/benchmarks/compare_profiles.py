@@ -46,15 +46,18 @@ LATENCY_COLUMNS: list[tuple[str, str, str]] = [
     ("v2v_p95_ms", "voice_to_voice_ms", "p95"),
     ("v2v_p50_ms", "voice_to_voice_ms", "median"),
     ("v2v_mean_ms", "voice_to_voice_ms", "mean"),
-    ("v2v_informative_p95_ms", "voice_to_voice_informative_ms", "p95"),
+    ("v2v_answer_p95_ms", "voice_to_voice_answer_ms", "p95"),
+    ("v2v_answer_p50_ms", "voice_to_voice_answer_ms", "median"),
     ("asr_p95_ms", "asr_ms", "p95"),
     ("asr_mean_ms", "asr_ms", "mean"),
     ("agent_ttft_p95_ms", "agent_ttft_ms", "p95"),
     ("agent_ttft_mean_ms", "agent_ttft_ms", "mean"),
+    ("tts_ttfb_p95_ms", "tts_ttfb_ms", "p95"),
     ("tts_p95_ms", "tts_ms", "p95"),
     ("tts_mean_ms", "tts_ms", "mean"),
-    ("endpoint_wait_p95_ms", "endpoint_wait_ms", "p95"),
-    ("time_to_first_audio_p95_ms", "time_to_first_audio_ms", "p95"),
+    ("endpointing_delay_p95_ms", "endpointing_delay_ms", "p95"),
+    ("processing_latency_p95_ms", "processing_latency_ms", "p95"),
+    ("processing_latency_answer_p95_ms", "processing_latency_answer_ms", "p95"),
 ]
 
 # Hardware KPI name substrings -> csv column. consolidate_multiple_run_of_
@@ -117,7 +120,7 @@ def load_v2v(profile_dir: Path) -> tuple[dict[str, Any], str]:
     except Exception:
         return {}, newest.name
 
-    report = data.get("benchmark_report") or {}
+    report = data.get("benchmark_report") or data
     summary = report.get("summary") or {}
     return (summary if isinstance(summary, dict) else {}), newest.name
 
@@ -177,6 +180,25 @@ def collect(results_root: Path) -> list[dict[str, Any]]:
         run = manifest.get("run", {})
         vcs = manifest.get("vcs", {})
 
+        # A profile directory keeps the previous run's v2v result JSON until a
+        # new run overwrites it, but the manifest is rewritten up front. If the
+        # run aborted (crash, failed bring-up, validation reject), scripts/
+        # finish_run_manifest.py never flips run.status to "completed", so the
+        # newest v2v JSON here belongs to an *earlier* run. Emitting it would
+        # report stale latency against the current manifest's devices/SHA. Skip
+        # any profile whose run did not complete rather than publish a number
+        # that looks current but isn't. Directories with no manifest at all
+        # (hand-placed or pre-status runs) keep the legacy best-effort behaviour.
+        run_status = run.get("status")
+        if manifest and run_status and run_status != "completed":
+            print(
+                f"[compare_profiles] skipping '{manifest.get('profile') or d.name}': "
+                f"run.status={run_status!r} (did not complete); its latency JSON is "
+                f"from an earlier run and would be stale.",
+                file=sys.stderr,
+            )
+            continue
+
         row: dict[str, Any] = {
             "profile": manifest.get("profile") or d.name,
             "asr_device": devices.get("asr", ""),
@@ -187,6 +209,8 @@ def collect(results_root: Path) -> list[dict[str, Any]]:
             "tts_dtype": models.get("tts_dtype", ""),
             "turns_ok": summary.get("turns_ok", ""),
             "turns_failed": summary.get("turns_failed", ""),
+            "first_audio_was_opener_count": summary.get("first_audio_was_opener_count", ""),
+            "first_audio_turn_count": summary.get("first_audio_turn_count", ""),
         }
         for col, key, stat in LATENCY_COLUMNS:
             row[col] = _stat(summary, key, stat)
@@ -198,6 +222,7 @@ def collect(results_root: Path) -> list[dict[str, Any]]:
                 "diarization_enabled": run.get("diarization_enabled", ""),
                 "v2v_runs": run.get("v2v_runs", ""),
                 "valid": manifest.get("valid", ""),
+                "run_status": run_status or "",
                 "git_sha": vcs.get("git_sha", ""),
                 "git_dirty": vcs.get("git_dirty", ""),
                 "started_at": run.get("started_at", ""),
@@ -252,8 +277,8 @@ def main() -> int:
 
     # Console table — the headline comparison, p95 first.
     print(f"\n{'profile':<24} {'ASR':<5} {'TTS':<5} {'LLM':<5} "
-          f"{'v2v p95':>9} {'v2v p50':>9} {'asr p95':>8} {'ttft p95':>9} "
-          f"{'tts p95':>8} {'CPU%':>6} {'GPU%':>6} {'NPU%':>6}")
+          f"{'v2v p95':>9} {'ans p95':>9} {'openers':>8} {'asr p95':>8} "
+          f"{'ttft p95':>9} {'ttfb p95':>9} {'CPU%':>6} {'GPU%':>6} {'NPU%':>6}")
     print("-" * 118)
     for r in rows:
         def f(key: str, nd: int = 1) -> str:
@@ -261,11 +286,15 @@ def main() -> int:
             return f"{v:.{nd}f}" if isinstance(v, (int, float)) else "-"
 
         flag = "" if r.get("valid") in (True, "") else " !"
+        openers = "-"
+        if r.get("first_audio_was_opener_count") != "" and r.get("first_audio_turn_count") != "":
+            openers = f"{r['first_audio_was_opener_count']}/{r['first_audio_turn_count']}"
         print(
             f"{str(r['profile'])[:24]:<24} {str(r['asr_device']):<5} "
             f"{str(r['tts_device']):<5} {str(r['llm_device']):<5} "
-            f"{f('v2v_p95_ms'):>9} {f('v2v_p50_ms'):>9} {f('asr_p95_ms'):>8} "
-            f"{f('agent_ttft_p95_ms'):>9} {f('tts_p95_ms'):>8} "
+            f"{f('v2v_p95_ms'):>9} {f('v2v_answer_p95_ms'):>9} {openers:>8} "
+            f"{f('asr_p95_ms'):>8} {f('agent_ttft_p95_ms'):>9} "
+            f"{f('tts_ttfb_p95_ms'):>9} "
             f"{f('cpu_util_pct'):>6} {f('gpu_util_pct'):>6} "
             f"{f('npu_util_pct'):>6}{flag}"
         )

@@ -80,6 +80,12 @@ def _make_session() -> BaseAudioSession:
     session.transcript_parts = []
     session.end_reason = None
     session._endpoint_wait_seconds = None
+    # Voice-to-voice anchors. _t_last_speech_frame is now stamped on
+    # EVERY speech frame (not only while continuous streaming is
+    # active), and _t_endpoint_decision is stamped on every turn-end
+    # path, so both are touched even in this streaming-off harness.
+    session._t_last_speech_frame = None
+    session._t_endpoint_decision = None
     session._flush_queue = Queue()
     return session
 

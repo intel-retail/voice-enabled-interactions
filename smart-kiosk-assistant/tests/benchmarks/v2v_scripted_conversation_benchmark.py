@@ -69,6 +69,7 @@ import os
 import sys
 import tempfile
 import time
+import uuid
 import wave
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -210,7 +211,33 @@ SCRIPTS: dict[str, list[str]] = {
         "Okay, please add one Chocolate Brownie to my order.",
         "That is everything, please confirm my order.",
     ],
+    # Representative single-item ordering KPI: one clean mutation per turn, no
+    # multi-item requests, substitutions, disfluencies or price lookups -- so
+    # every turn stays on the directive fast path instead of falling back to
+    # the slower tool-calling path. Prompts are natural 7-8 word utterances
+    # (not clipped commands), every product is named so it resolves, and the
+    # script ends in a confirm so each --runs repetition starts from an empty
+    # cart. This is the scenario to quote for the ordering voice-to-voice
+    # median; keep multi-item / substitution / Q&A turns in their own KPI.
+    "order-fastpath": [
+        "I would like one Classic Chicken Burger please.",
+        "Please add one regular Classic French Fries too.",
+        "Please add one Pepsi three thirty ml please.",
+        "I will have one Spicy Chicken Crunch Burger.",
+        "Please add one Chocolate Brownie to my order.",
+        "That is everything, please confirm my order now.",
+    ],
 }
+
+# --script value that sweeps every scenario in SCRIPTS in one pass.
+ALL_SCRIPTS = "all"
+
+# Repetitions of the whole script. This used to be 3 here, 1 in the Makefile
+# and 12 in the performance-tools orchestrator -- three different answers to
+# "how many turns does `make benchmark` actually measure?". All three now say
+# 8. With --script all (11 turns per pass) that is 88 measured turns, enough
+# for a median and a p95 that is not simply the single slowest turn.
+DEFAULT_RUNS = 8
 
 DEFAULT_LEAD_PAD_SECONDS = 0.3
 DEFAULT_TRAIL_PAD_SECONDS = 2.5
@@ -285,7 +312,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--script",
-        choices=sorted(SCRIPTS),
+        choices=sorted(SCRIPTS) + [ALL_SCRIPTS],
         default=None,
         help=(
             "Legacy named scripted conversation to replay (hardcoded in this file). "
@@ -304,7 +331,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--list-scripts", action="store_true", help="Print available scripts and exit")
     parser.add_argument("--label", default=None, help="Name for this run, used in the result filename")
-    parser.add_argument("--runs", type=int, default=3, help="Repetitions of the whole script")
+    parser.add_argument(
+        "--runs",
+        type=int,
+        default=DEFAULT_RUNS,
+        help=f"Repetitions of the whole script (default: {DEFAULT_RUNS})",
+    )
     parser.add_argument("--realtime-factor", type=float, default=1.0, help="Playback speed (1.0 = real time)")
     parser.add_argument(
         "--push-chunk-seconds",
@@ -319,6 +351,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Overrides the session's silence_timeout_seconds (defaults to kiosk-core's own configured value)",
     )
     parser.add_argument("--session-timeout", type=float, default=60.0, help="Max seconds to wait per turn")
+    parser.add_argument(
+        "--uplink",
+        choices=("ws", "rest"),
+        default=os.getenv("V2V_UPLINK", "ws"),
+        help=(
+            "Audio transport to kiosk-core: 'ws' replays each line over the "
+            "hands-free WebSocket uplink (raw PCM frames); 'rest' uses the "
+            "legacy chunked WAV POST. Default: ws (override with V2V_UPLINK)."
+        ),
+    )
     parser.add_argument("--lead-pad-seconds", type=float, default=DEFAULT_LEAD_PAD_SECONDS)
     parser.add_argument("--trail-pad-seconds", type=float, default=DEFAULT_TRAIL_PAD_SECONDS)
     parser.add_argument(
@@ -372,16 +414,37 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"    - {line!r}")
         return 0
 
+    # ``segments`` preserves scenario boundaries so each scripted conversation
+    # replays as ONE kiosk-core conversation (shared conversation_id across its
+    # turns). This matters for any script that builds a cart over several turns
+    # and then confirms it: kiosk-core clears the draft whenever a turn arrives
+    # under a new conversation, so a per-turn conversation would make the closing
+    # "please confirm my order" turn hit an empty cart and fail. ``--script all``
+    # keeps each scenario a separate conversation rather than bleeding one cart
+    # across four unrelated journeys.
+    segments: list[tuple[str, list[str]]]
     if args.script:
         script_name = args.script
-        lines = SCRIPTS[args.script]
+        if args.script == ALL_SCRIPTS:
+            # One pass over every scenario: single item, multi-item with an
+            # addition, a hesitant self-correcting customer, and a full
+            # price-question + upsell + confirm journey. The reviewer's point
+            # is that a p95 over one short script is just its slowest turn;
+            # sweeping all four gives a varied turn mix per run, so a given
+            # --runs count buys proportionally more distinct customer
+            # behaviour rather than the same line repeated.
+            segments = [(name, SCRIPTS[name]) for name in SCRIPTS]
+        else:
+            segments = [(args.script, SCRIPTS[args.script])]
     else:
         script_name = args.conversation_file.stem
         try:
-            lines = load_conversation_file(args.conversation_file)
+            segments = [(script_name, load_conversation_file(args.conversation_file))]
         except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
             print(f"[v2v-scripted] {exc}")
             return 1
+
+    lines = [line for _name, seg in segments for line in seg]
 
     label = args.label or f"v2v-scripted-{script_name}"
 
@@ -398,58 +461,70 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="v2v-scripted-") as tmpdir:
         tmp_path = Path(tmpdir)
         for run in range(1, args.runs + 1):
-            for i, line in enumerate(lines, start=1):
-                print(f'[v2v-scripted] {script_name} turn {i}/{len(lines)} run {run}/{args.runs}: "{line}"')
-                try:
-                    trail_pad = (
-                        args.end_mark_trail_pad_seconds if args.explicit_end_mark else args.trail_pad_seconds
+            i = 0
+            for seg_name, seg_lines in segments:
+                # One conversation_id per scenario per run: the cart accumulates
+                # across the scenario's turns so its closing confirm acts on the
+                # real order, and a fresh id each run starts every repetition
+                # from an empty cart.
+                conversation_id = f"v2v-scripted-{uuid.uuid4().hex[:8]}"
+                for line in seg_lines:
+                    i += 1
+                    print(f'[v2v-scripted] {script_name} turn {i}/{len(lines)} run {run}/{args.runs}: "{line}"')
+                    try:
+                        trail_pad = (
+                            args.end_mark_trail_pad_seconds if args.explicit_end_mark else args.trail_pad_seconds
+                        )
+                        wav_bytes, synth_ms = synthesize_padded_line_wav(
+                            line,
+                            args.tts_model,
+                            args.tts_language,
+                            args.lead_pad_seconds,
+                            trail_pad,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[v2v-scripted]   TTS synthesis FAILED: {exc}")
+                        turn = v2v.TurnResult(fixture=f"{script_name}:line{i}", run=run, error=f"tts synth failed: {exc}")
+                        report.turns.append(turn)
+                        continue
+
+                    fixture_path = tmp_path / f"{script_name}-line{i}-run{run}.wav"
+                    fixture_path.write_bytes(wav_bytes)
+
+                    turn = v2v.replay_fixture(
+                        fixture=fixture_path,
+                        run=run,
+                        realtime_factor=args.realtime_factor,
+                        silence_timeout_seconds=args.silence_timeout_seconds,
+                        session_timeout=args.session_timeout,
+                        push_chunk_seconds=args.push_chunk_seconds,
+                        explicit_end_mark=args.explicit_end_mark,
+                        uplink=args.uplink,
+                        conversation_id=conversation_id,
                     )
-                    wav_bytes, synth_ms = synthesize_padded_line_wav(
-                        line,
-                        args.tts_model,
-                        args.tts_language,
-                        args.lead_pad_seconds,
-                        trail_pad,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    print(f"[v2v-scripted]   TTS synthesis FAILED: {exc}")
-                    turn = v2v.TurnResult(fixture=f"{script_name}:line{i}", run=run, error=f"tts synth failed: {exc}")
+                    turn.fixture = f"{script_name}:line{i}"
                     report.turns.append(turn)
-                    continue
 
-                fixture_path = tmp_path / f"{script_name}-line{i}-run{run}.wav"
-                fixture_path.write_bytes(wav_bytes)
-
-                turn = v2v.replay_fixture(
-                    fixture=fixture_path,
-                    run=run,
-                    realtime_factor=args.realtime_factor,
-                    silence_timeout_seconds=args.silence_timeout_seconds,
-                    session_timeout=args.session_timeout,
-                    push_chunk_seconds=args.push_chunk_seconds,
-                    explicit_end_mark=args.explicit_end_mark,
-                )
-                turn.fixture = f"{script_name}:line{i}"
-                report.turns.append(turn)
-
-                if turn.error:
-                    print(f"[v2v-scripted]   FAILED: {turn.error}")
-                else:
-                    gt = (
-                        f"  v2v_ground_truth={turn.voice_to_voice_ground_truth_ms} ms"
-                        if turn.voice_to_voice_ground_truth_ms is not None
-                        else ""
-                    )
-                    print(
-                        f"[v2v-scripted]   tts_synth={round(synth_ms, 1)} ms  "
-                        f"v2v={turn.voice_to_voice_ms} ms  "
-                        f"v2v_post_endpoint={turn.voice_to_voice_post_endpoint_ms} ms  "
-                        f"endpoint_wait={turn.endpoint_wait_ms} ms  "
-                        f"final_flush_wait={turn.final_flush_wait_ms} ms  "
-                        f"shortcut_fired={turn.endpoint_shortcut_fired}  "
-                        f"ttfa={turn.time_to_first_audio_ms} ms{gt}  "
-                        f"transcript={turn.transcript[:80]!r}"
-                    )
+                    if turn.error:
+                        print(f"[v2v-scripted]   FAILED: {turn.error}")
+                    else:
+                        gt = (
+                            f"  v2v_ground_truth={turn.voice_to_voice_ground_truth_ms} ms"
+                            if turn.voice_to_voice_ground_truth_ms is not None
+                            else ""
+                        )
+                        print(
+                            f"[v2v-scripted]   tts_synth={round(synth_ms, 1)} ms  "
+                            f"v2v={turn.voice_to_voice_ms} ms  "
+                            f"v2v_answer={turn.voice_to_voice_answer_ms} ms  "
+                            f"processing={turn.processing_latency_ms} ms  "
+                            f"endpointing={turn.endpointing_delay_ms} ms  "
+                            f"opener={turn.first_audio_was_opener}  "
+                            f"final_flush_wait={turn.final_flush_wait_ms} ms  "
+                            f"shortcut_fired={turn.endpoint_shortcut_fired}  "
+                            f"tts_first_sentence={turn.tts_ttfb_ms} ms{gt}  "
+                            f"transcript={turn.transcript[:80]!r}"
+                        )
 
     report.finished_at = datetime.now(UTC).isoformat()
     report.summary = v2v.build_summary(report.turns)

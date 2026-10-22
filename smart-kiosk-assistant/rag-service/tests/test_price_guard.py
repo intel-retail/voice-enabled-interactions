@@ -156,3 +156,48 @@ class TestTurnIsolation:
         assert price_guard.current_state().total == 169.0
         price_guard.begin_turn()
         assert price_guard.current_state().total is None
+
+
+class TestItemCountIsNotMistakenForTheTotal:
+    """A number between "total" and the real total must not be rewritten.
+
+    _TOTAL_MENTION_RE captured the first number after "total" whatever it
+    meant, so "Your total for 2 burgers is ₹338" matched the item count and
+    validate_reply() rewrote it to "Your total for 338 burgers is ₹338" —
+    the guard against a hallucinated total was itself corrupting the reply.
+    """
+
+    def test_item_count_before_the_total_is_left_alone(self) -> None:
+        price_guard.current_state().total = 338.0
+        reply, corrected = price_guard.validate_reply(
+            "Your total for 2 burgers is ₹338."
+        )
+        assert reply == "Your total for 2 burgers is ₹338."
+        assert corrected is False
+
+    def test_item_count_is_preserved_while_a_wrong_total_is_corrected(self) -> None:
+        price_guard.current_state().total = 338.0
+        reply, corrected = price_guard.validate_reply(
+            "Your total for 2 burgers is ₹300."
+        )
+        assert reply == "Your total for 2 burgers is ₹338."
+        assert corrected is True
+
+    def test_item_count_does_not_trigger_a_mismatch_hold(self) -> None:
+        price_guard.current_state().total = 338.0
+        assert price_guard.mismatched("Your total for 2 burgers is ₹338.") is False
+
+    @pytest.mark.parametrize(
+        "reply,expected",
+        [
+            ("Your total is 169.", "169"),
+            ("Your total is now ₹169.", "169"),
+            ("Your total comes to 169 rupees.", "169"),
+            ("The total's 169.50.", "169.50"),
+            ("Your total will be 169.", "169"),
+        ],
+    )
+    def test_existing_total_phrasings_still_match(self, reply, expected) -> None:
+        match = price_guard._TOTAL_MENTION_RE.search(reply)
+        assert match is not None
+        assert match.group(1) == expected

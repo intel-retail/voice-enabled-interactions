@@ -13,21 +13,25 @@ interface MicButtonProps {
 }
 
 /**
- * Push-to-talk mic control (default): tap to start recording, tap again (or
- * the same button, now showing a stop icon) to stop — nothing is sent to the
- * backend until that second tap. The whole utterance is uploaded as one
- * chunk on stop (see flushChunk(true)/stop() in useVoiceSession); no audio
- * streams to the backend while the button just shows "Recording…".
+ * Hands-free conversation control (default): one tap starts continuous
+ * listening, the kiosk ends each turn itself when it detects a natural pause
+ * (backend endpointing), speaks the reply, then re-arms the mic automatically
+ * until "End conversation" is pressed or the session times out. This is the
+ * mode kiosk customers and hardware partners expect — a session begins with a
+ * tap, but no further taps are needed to complete an order, and touch and
+ * voice stay usable together throughout.
  *
- * Hands-free conversation mode (`conversationMode`) is a separate, currently
- * unused-by-default opt-in: one tap starts continuous listening, the kiosk
- * auto-sends after a pause in speech (backend silence-timeout VAD), speaks
- * the reply, then re-arms the mic automatically until "End conversation" is
- * pressed. Disabled (locked) while a knowledge-base ingest is in progress.
+ * The mic is fully torn down before each reply is spoken and only re-created
+ * after playback finishes, so the kiosk never hears its own voice. Disabled
+ * (locked) while a knowledge-base ingest is in progress.
  *
- * While the kiosk is speaking in hands-free mode, a tap is treated as a
- * barge-in ("stop talking, I have another question") rather than ending the
- * conversation — it silences the reply and starts listening right away.
+ * While the kiosk is speaking, a tap is treated as a barge-in ("stop talking,
+ * I have another question") rather than ending the conversation — it silences
+ * the reply and starts listening right away.
+ *
+ * The underlying push-to-talk primitives (`start`/`stop` in useVoiceSession)
+ * remain available for callers that want an explicit tap-to-send control;
+ * passing them as onStart/onStop turns this button back into one.
  */
 export function MicButton({
   phase,

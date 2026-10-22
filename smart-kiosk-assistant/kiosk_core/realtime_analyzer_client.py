@@ -285,7 +285,7 @@ class RealtimeAnalyzerClient:
         """Diagnostic-only: log wall-clock ms between the request being
         enqueued and this response landing, to separate "analyzer inference
         is slow" from "queueing/network/WS overhead is slow" when chasing
-        asr_last_word_to_transcript_ms.
+        transcription_latency_ms.
         """
         sent_at = self._pending_request_sent_at
         if sent_at is None:

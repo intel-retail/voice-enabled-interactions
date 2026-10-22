@@ -12,6 +12,15 @@
 # Build from src:   docker compose build && docker compose up -d
 # Stop:             docker compose down
 # Logs:             docker compose logs -f
+#
+# Image registry: every `image:` below resolves via REGISTRY_REPO (default:
+# intel), NOT the Makefile's REGISTRY build-mode flag (true/false). Compose
+# does plain string substitution with no notion of booleans, so if `image:`
+# read ${REGISTRY:-intel} directly, a shipped `.env` with REGISTRY=true would
+# resolve to the literal, non-existent "true/<service>" registry and every
+# pull would fail with "access denied" — this hit raw `docker compose
+# pull/up` users who don't go through `make`. Set REGISTRY_REPO in .env only
+# if you publish to a different registry/namespace.
 
 services:
 
@@ -28,7 +37,7 @@ services:
     build:
       context: ./rtsp-streamer
       dockerfile: Dockerfile
-    image: ${REGISTRY:-intel}/rtsp-streamer:${RELEASE_TAG:-latest}
+    image: ${REGISTRY_REPO:-intel}/rtsp-streamer:${RELEASE_TAG:-latest}
     container_name: rtsp-streamer
     # Gated behind the `queue` compose profile (container-layer flag), same
     # pattern as identity-service — ON by default via the Makefile's `up`
@@ -88,7 +97,7 @@ services:
     build:
       context: ./queue-service
       dockerfile: docker/Dockerfile
-    image: ${REGISTRY:-intel}/queue-service:${RELEASE_TAG:-latest}
+    image: ${REGISTRY_REPO:-intel}/queue-service:${RELEASE_TAG:-latest}
     container_name: queue-service
     # Gated behind the `queue` compose profile — see rtsp-streamer above for
     # the full rationale (ON by default; `make up QUEUE=false` disables it).
@@ -183,13 +192,7 @@ services:
     # service can go back to pulling the shared image instead of shadowing it
     # with a locally-built one. Override the tag with METRICS_COLLECTOR_TAG in
     # .env if a newer version is published.
-    # Deliberately NOT ${REGISTRY}: that variable selects where the images we
-    # build locally are tagged/pushed (e.g. REGISTRY=false while iterating), but
-    # this image is only ever pulled from upstream, so following REGISTRY just
-    # produces "pull access denied for false/hl-ai-metrics-collector" and blocks
-    # `docker compose up` for the whole stack. Override the namespace with
-    # METRICS_COLLECTOR_REGISTRY if it is ever mirrored elsewhere.
-    image: ${METRICS_COLLECTOR_REGISTRY:-intel}/hl-ai-metrics-collector:${METRICS_COLLECTOR_TAG:-2026.2.0}
+    image: ${REGISTRY_REPO:-intel}/hl-ai-metrics-collector:${METRICS_COLLECTOR_TAG:-2026.2.0}
     container_name: metrics-collector
     privileged: true
     pid: host
@@ -230,27 +233,13 @@ services:
     stop_grace_period: 30s
 
   audio-analyzer:
-    # Built locally from the sibling edge-ai-libraries checkout, matching the
-    # text-to-speech service above, so local changes to the ASR/diarization
-    # pipeline are picked up. Comment out `build:` and rely on `image:` alone
-    # to go back to pulling the upstream prebuilt image.
-    #
-    # Uses the top-level Dockerfile rather than docker/Dockerfile: the two are
-    # identical except that this one parenthesises the torchcodec uninstall,
-    # so `|| true` applies only to that uninstall instead of swallowing a
-    # failure anywhere in the preceding pip chain (which would silently
-    # produce a broken image).
-    build:
-      context: ../edge-ai-libraries/microservices/audio-analyzer
-      dockerfile: Dockerfile
-      # No HF_TOKEN build arg on purpose. The Dockerfile does
-      # `ENV HF_TOKEN=${HF_TOKEN}`, so passing it at build time bakes the
-      # secret permanently into an image layer (recoverable by anyone who can
-      # inspect or pull the image). It is unnecessary anyway: the token is
-      # already supplied at runtime in the environment block below, and the
-      # service loads pyannote from the pre-cached ./models with
-      # HF_HUB_OFFLINE=1, so nothing gated is fetched during the build.
-    image: ${REGISTRY:-intel}/audio-analyzer:${RELEASE_TAG:-latest}
+    # Consumed as a prebuilt image only. The source lives in the separate
+    # edge-ai-libraries repo (../edge-ai-libraries/microservices/audio-analyzer,
+    # a fork kept in sync with upstream open-edge-platform/edge-ai-libraries);
+    # it is NOT built from this repo. Build the image once from that repo
+    # (`docker compose build` there) or pull it with REGISTRY=true, then it is
+    # reused via the image: tag below.
+    image: ${REGISTRY_REPO:-intel}/audio-analyzer:${RELEASE_TAG:-latest}
     container_name: audio-analyzer
     # Hardcoded to match the image's baked-in app user and the
     # ownership of the named volumes. Do not change.
@@ -270,9 +259,13 @@ services:
       # NPU node is mapped — OpenVINO then reports CPU/GPU only.
       ZE_ENABLE_ALT_DRIVERS: libze_intel_npu.so
       # Whisper mis-detects language on short kiosk chunks and replies in
-      # Spanish; forcing en cut WER 11.0% -> 7.0% on every device. The language
-      # is a per-request parameter, so it is set by kiosk-core
-      # (KIOSK_CORE_ASR_LANGUAGE), not by audio-analyzer config.
+      # Spanish; forcing en cut WER 11.0% -> 7.0% on every device. The
+      # language is a per-request parameter, so it is set by kiosk-core
+      # (KIOSK_CORE_ASR_LANGUAGE, see the kiosk-core service below), not by
+      # audio-analyzer config. NOTE: it must be left EMPTY whenever the ASR
+      # checkpoint is English-only, which the shipped default
+      # (distil-whisper/distil-small.en) is -- such models reject the <|en|>
+      # token outright. See KIOSK_CORE_ASR_LANGUAGE for the full note.
       # Point HF cache under the same parent as ~/.cache/whisper so a single
       # ./.cache mount persists every model cache the service uses
       # (huggingface, openai-whisper, torch hub, etc.).
@@ -306,13 +299,17 @@ services:
       # where no HF_TOKEN/model-licence acceptance is available) also skip that
       # preload, instead of crashing with an unauthenticated 403 download.
       AUDIO_ANALYZER__MODELS__ASR__DIARIZATION: ${KIOSK_CORE_DIARIZATION_ENABLED:-true}
-      # ASR inference device override — config.yaml now pins "GPU" by default
-      # (see its models.asr.device comment: 2026-09-22 switch to
-      # distil-small.en/GPU for the final-commit pool too). Set ASR_DEVICE=CPU
-      # here to compare against GPU without editing the mounted config file.
+      # ASR inference device override — must match config.yaml's own
+      # models.asr.device (GPU), which this fallback exists to reproduce, not
+      # contradict. It previously defaulted to CPU, which silently overrode
+      # the mounted config file: anyone starting the stack without a .env got
+      # CPU while every doc, config.yaml and .env.example said GPU.
+      # Set ASR_DEVICE=CPU to compare against GPU, or if the host has no
+      # usable GPU (also set ACCEL_MOUNT_PATH for GPU/NPU passthrough, or it
+      # silently stays disabled).
       # Do NOT set ASR_DEVICE=NPU while models.asr.name is distil-small.en —
       # that combination is confirmed to corrupt output on this stack.
-      AUDIO_ANALYZER__MODELS__ASR__DEVICE: ${ASR_DEVICE:-CPU}
+      AUDIO_ANALYZER__MODELS__ASR__DEVICE: ${ASR_DEVICE:-GPU}
       # ASR model override — paired with ASR_DEVICE because the two are not
       # independent: distil-small.en corrupts output on NPU (see above), so a
       # device-combination benchmark profile that selects ASR_DEVICE=NPU must
@@ -356,14 +353,13 @@ services:
     restart: unless-stopped
 
   text-to-speech:
-    # Built locally from a sibling edge-ai-libraries checkout so the Kokoro
-    # TTS engine (added there, not upstream) is available. Comment out
-    # `build:` and rely on `image:` alone to go back to pulling the
-    # upstream prebuilt image (SpeechT5/Qwen only, no Kokoro).
-    build:
-      context: ../edge-ai-libraries/microservices/text-to-speech
-      dockerfile: Dockerfile
-    image: ${REGISTRY:-intel}/text-to-speech:${RELEASE_TAG:-latest}
+    # Consumed as a prebuilt image only. The source lives in the separate
+    # edge-ai-libraries repo (../edge-ai-libraries/microservices/text-to-speech,
+    # a fork kept in sync with upstream open-edge-platform/edge-ai-libraries,
+    # which adds the Kokoro TTS engine); it is NOT built from this repo. Build
+    # the image once from that repo (`docker compose build` there) or pull it
+    # with REGISTRY=true, then it is reused via the image: tag below.
+    image: ${REGISTRY_REPO:-intel}/text-to-speech:${RELEASE_TAG:-latest}
     container_name: text-to-speech
     user: "1000:1000"
     ports:
@@ -447,7 +443,7 @@ services:
     build:
       context: ./rag-service
       dockerfile: Dockerfile
-    image: ${REGISTRY:-intel}/rag-service:${RELEASE_TAG:-latest}
+    image: ${REGISTRY_REPO:-intel}/rag-service:${RELEASE_TAG:-latest}
     container_name: rag-service
     # Hardcoded to match the image's baked-in app user and the
     # ownership of the named volumes. Do not change.
@@ -548,9 +544,9 @@ services:
       # pure-RAG deployments (healthcare, education) to skip MCP bootstrap.
       ORDERING_AGENT_ENABLED: ${ORDERING_AGENT_ENABLED:-true}
       # Lab-only ADK vs non-ADK A/B route (/api/v1/agent/chat-no-adk), used
-      # solely by tests/benchmarks/*_no_adk.py. Off by default: it can place
-      # real orders and must never be reachable in a normal deployment. Set
-      # to "true" only when running those specific benchmark scripts.
+      # solely by tests/benchmarks/agent_latency_benchmark.py. Off by default:
+      # it can place real orders and must never be reachable in a normal
+      # deployment. Set to "true" only when running that benchmark.
       AGENT_BENCHMARK_ENDPOINTS_ENABLED: ${AGENT_BENCHMARK_ENDPOINTS_ENABLED:-false}
     volumes:
       - rag_service_models:/app/rag-service/models
@@ -703,39 +699,56 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ${REGISTRY:-intel}/kiosk-core:${RELEASE_TAG:-latest}
+    image: ${REGISTRY_REPO:-intel}/kiosk-core:${RELEASE_TAG:-latest}
     container_name: kiosk-core
     user: "1000:1000"
     ports:
       - "8012:8012"
     environment:
       KIOSK_CORE_ANALYZER_URL: http://audio-analyzer:8010/v1/audio/transcriptions
+      # ASR language hint sent with every file-path transcription request.
+      #
+      # Defaults to EMPTY, deliberately. The default ASR checkpoint is
+      # distil-whisper/distil-small.en (see ASR_MODEL above), which is
+      # English-only: audio-analyzer turns any language value into an <|en|>
+      # token, and an English-only Whisper rejects it with
+      # "Cannot specify 'language' for not multilingual model" -> HTTP 500
+      # and an empty transcript on every single turn. config.py's own
+      # default is "en" (correct for a multilingual checkpoint run outside
+      # Docker), so this line both overrides it to match the shipped model
+      # AND makes the variable settable from .env at all -- compose uses an
+      # explicit environment: allowlist, so without this line
+      # KIOSK_CORE_ASR_LANGUAGE= in .env had no effect whatsoever.
+      #
+      # Uses ${VAR-} (no colon) so an explicitly-empty value in .env is
+      # passed through as empty rather than falling back to a default.
+      # Set to "en" only alongside a multilingual ASR_MODEL.
+      KIOSK_CORE_ASR_LANGUAGE: ${KIOSK_CORE_ASR_LANGUAGE-}
       KIOSK_CORE_RAG_URL:      http://rag-service:8020/api/v1/query
       KIOSK_CORE_TTS_URL:      http://text-to-speech:8011/v1/audio/speech
-      # "Ryan" was the SpeechT5/Qwen-era default (US English male, bright and
-      # projecting). The engine has since moved to Kokoro (see
-      # configs/text-to-speech/config.yaml), which has no "Ryan" voice — this
-      # override was left stale after that migration and made EVERY TTS
-      # request 400 (silent replies) until this fix. am_michael is Kokoro's
-      # closest match to the old Ryan voice and matches config.yaml's own
-      # default_speaker, so this override is now redundant but kept explicit
-      # per the original rationale: visible here, swappable without touching
-      # config.yaml. Full Kokoro voice list is in configs/text-to-speech/config.yaml.
-      KIOSK_CORE_TTS_VOICE:    am_michael
+      # Must track the TTS service's own TTS_SPEAKER (see
+      # TEXT_TO_SPEECH__MODELS__TTS__DEFAULT_SPEAKER above) -- this is the
+      # voice kiosk-core *requests*, and the service only accepts voices that
+      # exist in the engine it was configured with. Hardcoding am_michael
+      # broke 9 of the 10 benchmark profiles in configs/benchmark-profiles/,
+      # which switch the service to SpeechT5 with TTS_SPEAKER=Ryan: the
+      # service came up on SpeechT5 while kiosk-core kept asking for a Kokoro
+      # voice, so every TTS request failed.
+      KIOSK_CORE_TTS_VOICE:    ${TTS_SPEAKER:-am_michael}
       # kiosk_core.config.DEFAULT_TTS_MODEL falls back to "qwen-tts" when this
       # is unset. TtsClient sends whatever this resolves to as the model name
-      # on every request, and the TTS backend now matches by substring on
-      # "kokoro" (components/tts/kokoro/kokoro_tts.py::matches_model_name) —
-      # without this override every request would ask for qwen-tts against a
-      # service now configured for the kokoro runtime.
-      KIOSK_CORE_TTS_MODEL:    kokoro
+      # on every request, and the TTS backend matches by substring (e.g.
+      # components/tts/kokoro/kokoro_tts.py::matches_model_name) -- so this
+      # must name the same model the service was started with. Same
+      # profile-mismatch bug as TTS_VOICE above: parameterised, not pinned.
+      KIOSK_CORE_TTS_MODEL:    ${TTS_MODEL:-kokoro}
       # ── Pre-synthesized opener ────────────────────────────────────────
       # An ordering turn's reply is templated only after the tool returns, so
       # the model emits no prose to stream and the customer hears ~2s of
       # silence while the tool-call JSON is generated. A short, cached phrase
       # is played immediately to fill that window. Must stay non-committal —
       # it is spoken before any tool has run. Set ENABLED=false to disable.
-      KIOSK_CORE_OPENER_ENABLED: ${KIOSK_CORE_OPENER_ENABLED:-true}
+      KIOSK_CORE_OPENER_ENABLED: ${KIOSK_CORE_OPENER_ENABLED:-false}
       KIOSK_CORE_OPENER_TEXT:    ${KIOSK_CORE_OPENER_TEXT:-One moment.}
       # Adaptive endpoint: shorten the end-of-turn wait when the transcript
       # already reads as a finished sentence. Fails closed to
@@ -748,26 +761,42 @@ services:
       KIOSK_CORE_ENDPOINT_SHORT_SECONDS:    ${KIOSK_CORE_ENDPOINT_SHORT_SECONDS:-0.15}
       KIOSK_CORE_ENDPOINT_MIN_WORDS:        ${KIOSK_CORE_ENDPOINT_MIN_WORDS:-3}
       # Same explicit-allowlist gotcha as ADAPTIVE_FLUSH_PAUSE_SECONDS below:
-      # setting this in .env alone does nothing without this line. Trimmed
-      # from the 0.2s code default to 0.15s so short+stable totals ~0.30s
-      # (down from ~0.35s), keeping ~30-50ms of margin above
-      # KIOSK_CORE_ADAPTIVE_FLUSH_PAUSE_SECONDS=0.30 (the real commit must
-      # still win the race -- see that var's comment below).
+      # setting this in .env alone does nothing without this line. The
+      # fallback must match kiosk_core/config.py's own default and
+      # .env.example; all three ship 0.2.
+      #
+      # 0.2 (two-confirmation) rather than 0 (single-confirmation) because
+      # the 88-turn sweep measured 0 committing 55-64% of turns before the
+      # customer had finished speaking, which broke order confirmation:
+      # "Yes, that is everything. Please confirm my order." was committed as
+      # "Yes, that is everything." and answered with "Sorry, I couldn't
+      # confirm your order just now". At 0.2 that drops to ~10%. See
+      # config.py for the full measurement table and the ~650ms
+      # voice-to-voice p50 cost.
       KIOSK_CORE_ENDPOINT_STABLE_SECONDS:  ${KIOSK_CORE_ENDPOINT_STABLE_SECONDS:-0.2}
       # Was previously never actually wired through from .env to the
       # container (only referenced in a comment above) — this compose file
       # uses an explicit environment: allowlist, not a blanket .env
       # passthrough, so every KIOSK_CORE_* override needs its own line here
-      # regardless of what .env sets. Lowered from the 0.50s code default:
-      # in streaming sessions the endpoint-completeness shortcut fires at
-      # ~0.35-0.40s (ENDPOINT_SHORT_SECONDS + ENDPOINT_STABLE_SECONDS),
-      # before the 0.50s adaptive-pause real commit ever got a chance to
-      # run — so the real, diarized commit never fired mid-utterance and
-      # the mandatory final-chunk flush had to transcribe the WHOLE
-      # utterance from scratch every turn (the dominant cost in
-      # WallTimes.final_flush_wait_ms, observed 250-600ms). Set below the
-      # shortcut's firing point so the real commit wins the race instead.
-      KIOSK_CORE_ADAPTIVE_FLUSH_PAUSE_SECONDS: ${KIOSK_CORE_ADAPTIVE_FLUSH_PAUSE_SECONDS:-0.30}
+      # regardless of what .env sets.
+      #
+      # Must not drop below the 0.50s floor that config.py documents. This
+      # shipped 0.30s to make the adaptive-pause real commit win the race
+      # against the endpoint-completeness shortcut (saving 250-600ms of
+      # final_flush_wait_ms), but 0.30s is the value config.py's own
+      # measurements single out as the original source of mid-word flushes:
+      # the chunk is cleared between "chicken" and "burger", so the tail has
+      # no sentence context and Whisper hallucinates or truncates it. 0.40s
+      # reproduced the same class of failure; 0.50s is the validated floor
+      # for this ASR model and hardware.
+      #
+      # Measured on the 88-turn sweep, restoring 0.50s fixed exactly that
+      # class of failure — a turn that had been transcribed "Wait, actually."
+      # came back as the full "Wait, actually. Can you make that the double
+      # chicken tower instead?" — and cut voice-to-voice p95 from 5618ms to
+      # 5417ms. It is not on its own a fix for turns committing early (64% ->
+      # 55%); see KIOSK_CORE_ENDPOINT_STABLE_SECONDS in config.py for that.
+      KIOSK_CORE_ADAPTIVE_FLUSH_PAUSE_SECONDS: ${KIOSK_CORE_ADAPTIVE_FLUSH_PAUSE_SECONDS:-0.50}
       # Tier 2 roadmap item #4 (cumulative-snapshot ASR), adapted: skip the
       # final tail-chunk ASR call when it holds no unflushed speech (pure
       # trailing silence — the adaptive-pause flush already sent every real
@@ -927,7 +956,7 @@ services:
     build:
       context: .
       dockerfile: identity-service/Dockerfile
-    image: ${REGISTRY:-intel}/identity-service:${RELEASE_TAG:-latest}
+    image: ${REGISTRY_REPO:-intel}/identity-service:${RELEASE_TAG:-latest}
     container_name: identity-service
     profiles: ["identity"]
     user: "1000:1000"
@@ -982,7 +1011,7 @@ services:
     build:
       context: ./kiosk-ui
       dockerfile: Dockerfile
-    image: ${REGISTRY:-intel}/kiosk-ui:${RELEASE_TAG:-latest}
+    image: ${REGISTRY_REPO:-intel}/kiosk-ui:${RELEASE_TAG:-latest}
     container_name: kiosk-ui
     ports:
       - "7860:7860"
@@ -1004,7 +1033,7 @@ services:
   # so the two screens can never drift out of sync with each other's backend
   # wiring. No separate build context or Dockerfile.
   kiosk-ui-customer:
-    image: ${REGISTRY:-intel}/kiosk-ui:${RELEASE_TAG:-latest}
+    image: ${REGISTRY_REPO:-intel}/kiosk-ui:${RELEASE_TAG:-latest}
     container_name: kiosk-ui-customer
     ports:
       - "7861:7860"

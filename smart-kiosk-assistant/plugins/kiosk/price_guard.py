@@ -69,8 +69,18 @@ _TOTAL_TOOLS = frozenset(
 # "the total's 169.50". Deliberately anchored on the word "total" so a
 # per-item price mention (already covered by reply_templates' own per-item
 # formatting) is never misread as an order-total claim.
+#
+# The number must be introduced by a connector ("is", "of", "comes to",
+# "'s", ...) or by the currency symbol. Without that requirement the first
+# number after "total" was captured whatever it meant, so "Your total for 2
+# burgers is ₹338" matched the item count and validate_reply() rewrote it to
+# "Your total for 338 burgers is ₹338". The intervening-word allowance is
+# what lets "total" and its connector be separated at all, so it cannot also
+# be allowed to swallow the connector.
 _TOTAL_MENTION_RE = re.compile(
-    r"\btotal\b(?:'s|\s+\w+){0,4}?\s*(?:is|of|comes?\s+to|now)?\s*"
+    r"\btotal\b"
+    r"(?:\s+\w+){0,4}?"
+    r"\s*(?:(?:'s|is|of|comes?\s+to|now|at|be|will\s+be)\s*)+"
     r"₹?\s*(\d[\d,]*(?:\.\d{1,2})?)\s*(?:rupees?)?",
     re.IGNORECASE,
 )
