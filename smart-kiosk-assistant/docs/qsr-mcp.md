@@ -20,7 +20,8 @@ durable SQLite/JSONL log's on-disk format are unchanged by this migration.
 |---|---|
 | `kiosk_core/qsr_mcp/mcp_service.py` | `fastmcp.FastMCP` app, event types, read/act tool implementations |
 | `kiosk_core/qsr_mcp/event_log.py` | Durable event log (SQLite/JSONL), same on-disk format as the former `mcp_service_sdk` log |
-| `kiosk_core/qsr_mcp/delivery.py` | Optional webhook event delivery with retry (off by default) |
+| `kiosk_core/qsr_mcp/delivery.py` | Multi-sink event delivery with retry + ordered background dispatch (off by default) |
+| `kiosk_core/qsr_mcp/autonomy.py` | Outbound **event autonomy** push to the Central QSR Agent's `/autonomy/events` inbox (off by default) |
 | `kiosk_core/qsr_mcp/policy.py` | Action policy gate (`GateLevel`, rate limiting) for `set_board_mode` |
 | `kiosk_core/qsr_mcp/mcp_server.py` | Runs the MCP app + queue-depth sampling poller on background threads |
 | `kiosk_core/qsr_mcp/board_state.py` | Durable (JSON-file) kiosk menu-board mode: `full` / `simplified` |
@@ -60,10 +61,61 @@ and `subscribe(event_type, condition, callback_url)` (records a
 subscription; Kiosk — unlike Order Accuracy's sensor-only services — has no
 restriction against exposing `subscribe`).
 
+## Event autonomy (push to the Central QSR Agent)
+
+The tools above are **pull**: the agent calls the kiosk. Event autonomy adds
+the **push** direction, so the kiosk reports observations without being
+polled. It mirrors the pattern in order-accuracy#214.
+
+The agent's `autonomy` process has no source polling loop — per its
+`SERVICE_OWNER_GUIDE`, **the event producer owns change detection and
+delivery**. The kiosk's queue poller samples on a fixed interval, so
+`AutonomyEventSink` suppresses unchanged samples and only forwards a
+`queue_count_changed` when the count moves by at least
+`KIOSK_CORE_QSR_AUTONOMY_QUEUE_MIN_DELTA`.
+
+**Flow** — `emit()` writes to the durable log first (authoritative), then
+hands the event to a background FIFO worker per destination. Delivery is
+best-effort and never blocks the queue poller or a `set_board_mode` call.
+A single ordered worker (rather than a thread per event) ensures a retrying
+older sample cannot arrive *after* a newer one and leave the agent acting on
+a stale queue depth.
+
+**Envelope** posted to `POST {url}` (the agent replies `202 Accepted`):
+
+```json
+{
+  "event_id": "smart_kiosk-queue_count_changed-<ref_id>",
+  "event_type": "queue_count_changed",
+  "store_id": "qsr-001",
+  "occurred_at": "2025-01-01T12:00:00Z",
+  "data": {"queue_count": 11, "source": "smart_kiosk", "source_event_type": "queue_depth_sample", "...": "original payload"}
+}
+```
+
+`event_id` is stable across retries so the agent can de-duplicate. Internal
+event types map to the agent's vocabulary: `queue_depth_sample` →
+`queue_count_changed`; `board_mode_changed` passes through unchanged (the
+agent's event policy is a wildcard, so unregistered names are safe and
+simply yield a no-action explanation).
+
+A `4xx` other than `429` is treated as a permanent rejection and stops
+retries — resending a payload the agent refuses to parse cannot succeed.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `KIOSK_CORE_QSR_AUTONOMY_EVENTS_URL` | *(empty)* | Agent inbox URL, e.g. `http://<agent-host>:8600/autonomy/events`. **Empty disables the whole feature** — the default stack makes no outbound calls. |
+| `KIOSK_CORE_QSR_AUTONOMY_EVENTS_TOKEN` | *(empty)* | Optional bearer token |
+| `KIOSK_CORE_QSR_AUTONOMY_STORE_ID` | `qsr-001` | Must equal the agent's `QSR_RESTAURANT_ID` or events are rejected. Deliberately separate from `KIOSK_CORE_QSR_MCP_STORE_ID`, which only labels our own durable log. |
+| `KIOSK_CORE_QSR_AUTONOMY_EVENT_TYPES` | `queue_depth_sample,board_mode_changed` | Which internal events to forward |
+| `KIOSK_CORE_QSR_AUTONOMY_QUEUE_MIN_DELTA` | `1` | Minimum queue-count change before forwarding |
+| `KIOSK_CORE_QSR_AUTONOMY_TIMEOUT_SECONDS` | `5.0` | Per-request timeout |
+| `KIOSK_CORE_QSR_EXTRA_NO_PROXY` | *(empty)* | Appended to kiosk-core's `NO_PROXY`. **Required behind a corporate proxy**, since the agent runs on another machine. Python's `urllib` matches `no_proxy` by suffix, *not* CIDR — list the host name or exact IP. |
+
 ## Configuration
 
-See `kiosk_core/config.py` (`QSR_MCP_*` constants) / `.env.example` for all
-`KIOSK_CORE_QSR_MCP_*` environment variables.
+See `kiosk_core/config.py` (`QSR_MCP_*` and `QSR_AUTONOMY_*` constants) /
+`.env.example` for all `KIOSK_CORE_QSR_*` environment variables.
 
 ## Notes / follow-ups
 

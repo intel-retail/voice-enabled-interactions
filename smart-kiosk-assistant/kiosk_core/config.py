@@ -1113,6 +1113,52 @@ QSR_MCP_BOARD_STATE_PATH = os.getenv(
 QSR_MCP_QUEUE_POLL_SECONDS = float(os.getenv("KIOSK_CORE_QSR_MCP_QUEUE_POLL_SECONDS", "30.0"))
 
 # ---------------------------------------------------------------------------
+# QSR Agent autonomy event delivery
+# ---------------------------------------------------------------------------
+# Outbound push of kiosk observations to the Central QSR Agent's
+# ``POST /autonomy/events`` inbox, using the same envelope as the QSR weather
+# service and Order Accuracy (intel-retail/order-accuracy#214). This is the
+# inverse direction of the MCP read tools: the agent pulls via :8014/mcp, and
+# the kiosk pushes events here so Hermes can reason without polling.
+#
+# Disabled unless the URL is set, so the default stack (and every benchmark
+# run) performs no outbound delivery at all.
+QSR_AUTONOMY_EVENTS_URL = os.getenv("KIOSK_CORE_QSR_AUTONOMY_EVENTS_URL", "").strip()
+
+# Optional bearer token, forwarded as an Authorization header. The agent (or a
+# proxy in front of it) must validate it for this to provide authentication.
+QSR_AUTONOMY_EVENTS_TOKEN = os.getenv("KIOSK_CORE_QSR_AUTONOMY_EVENTS_TOKEN", "").strip() or None
+
+# Identifies this restaurant to the agent. MUST equal the agent's
+# QSR_RESTAURANT_ID (default "qsr-001") or every event is rejected. Deliberately
+# separate from QSR_MCP_STORE_ID ("store-001"), which labels our own durable log.
+QSR_AUTONOMY_STORE_ID = os.getenv("KIOSK_CORE_QSR_AUTONOMY_STORE_ID", "qsr-001")
+
+# Which internal event types are eligible for forwarding.
+QSR_AUTONOMY_EVENT_TYPES = tuple(
+    t.strip()
+    for t in os.getenv(
+        "KIOSK_CORE_QSR_AUTONOMY_EVENT_TYPES", "queue_depth_sample,board_mode_changed"
+    ).split(",")
+    if t.strip()
+)
+
+# HTTP timeout (seconds) for a single delivery attempt.
+QSR_AUTONOMY_TIMEOUT_SECONDS = float(
+    os.getenv("KIOSK_CORE_QSR_AUTONOMY_TIMEOUT_SECONDS", "5.0")
+)
+
+# Minimum change in queue depth before a new queue_count_changed event is
+# forwarded. The agent's contract states the producer owns change detection
+# ("The autonomy process has no source polling loop"), but our poller samples
+# on a fixed interval, so without this every QSR_MCP_QUEUE_POLL_SECONDS tick
+# would POST an event. 1 = forward on any change; raise it to suppress
+# single-person jitter on a busy store.
+QSR_AUTONOMY_QUEUE_MIN_DELTA = int(
+    os.getenv("KIOSK_CORE_QSR_AUTONOMY_QUEUE_MIN_DELTA", "1")
+)
+
+# ---------------------------------------------------------------------------
 # Conversation recording (offline analysis)
 # ---------------------------------------------------------------------------
 # Single master switch: when false (default), kiosk_core.conversation_recorder

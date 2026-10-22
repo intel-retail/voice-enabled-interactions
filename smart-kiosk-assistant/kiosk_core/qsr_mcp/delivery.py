@@ -3,17 +3,44 @@
 Self-contained reimplementation of ``mcp_service_sdk.delivery`` (the only
 piece of the SDK ``mcp_service.py``'s ``emit`` depended on beyond the log
 itself). ``emit`` always saves to the durable log first; this module then
-pushes to whichever sink is enabled — ``off`` (default, matches the old
-``Delivery(sinks=[DisabledSink()])``) or a webhook callback, with retries.
-Failed callbacks are retried; nothing is dropped silently.
+pushes to whichever sinks are enabled — none (default), the generic
+``MCP_WEBHOOK_URL`` callback, and/or the QSR Agent autonomy inbox
+(``kiosk_core/qsr_mcp/autonomy.py``) — with retries. Failed callbacks are
+retried; nothing is dropped silently.
+
+A sink may raise ``PermanentDeliveryError`` to stop its own retry loop early
+when the remote rejected the payload itself (e.g. HTTP 400) and resending the
+identical body cannot help.
 """
 from __future__ import annotations
 
+import logging
+import queue
+import threading
 import time
 import urllib.error
 import urllib.request
+from typing import Protocol
 
+from kiosk_core.qsr_mcp.autonomy import PermanentDeliveryError
 from kiosk_core.qsr_mcp.event_log import EventEnvelope
+
+logger = logging.getLogger(__name__)
+
+
+class Sink(Protocol):
+    """A delivery target. ``push`` returns ``True`` when no retry is needed.
+
+    A sink may also expose ``accepts(event) -> bool`` to filter events it does
+    not care about. ``Delivery`` evaluates it exactly once per event, before
+    the retry loop, so a sink may keep state there (e.g. change detection)
+    without a retry being mistaken for a fresh observation.
+    """
+
+    name: str
+
+    def push(self, event: EventEnvelope) -> bool:
+        ...
 
 
 class WebhookSink:
@@ -41,31 +68,124 @@ class WebhookSink:
 
 
 class Delivery:
-    """Dispatches an event to the configured sink (none, or one webhook),
-    with bounded retries."""
+    """Dispatches an event to every configured sink, with bounded retries.
+
+    Args:
+        webhook_url: Generic callback URL; adds a ``WebhookSink`` when set.
+        sinks: Additional pre-built sinks (e.g. ``AutonomyEventSink``).
+        max_retries: Attempts per sink before giving up.
+        backoff_s: Base delay for exponential backoff between attempts.
+    """
 
     def __init__(
         self,
         webhook_url: str | None = None,
+        sinks: tuple[Sink, ...] | list[Sink] | None = None,
         max_retries: int = 3,
         backoff_s: float = 0.5,
     ) -> None:
-        self._sink = WebhookSink(webhook_url) if webhook_url else None
+        resolved: list[Sink] = []
+        if webhook_url:
+            resolved.append(WebhookSink(webhook_url))
+        if sinks:
+            resolved.extend(sinks)
+        self._sinks: tuple[Sink, ...] = tuple(resolved)
         self._max_retries = max_retries
         self._backoff_s = backoff_s
 
-    def dispatch(self, event: EventEnvelope) -> bool:
-        """Deliver to the enabled sink, if any. Returns final success flag
-        (always ``True`` when delivery is off, matching the old
-        ``DisabledSink``)."""
-        if self._sink is None:
-            return True
-        return self._push_with_retry(event)
+    @property
+    def sinks(self) -> tuple[Sink, ...]:
+        return self._sinks
 
-    def _push_with_retry(self, event: EventEnvelope) -> bool:
+    def dispatch(self, event: EventEnvelope) -> bool:
+        """Deliver to every enabled sink, if any.
+
+        Returns:
+            ``True`` when every sink succeeded — including the no-sink case,
+            matching the old ``DisabledSink`` behaviour. One sink's failure
+            never prevents the others from being attempted.
+        """
+        if not self._sinks:
+            return True
+        results = [self._push_with_retry(sink, event) for sink in self._sinks]
+        return all(results)
+
+    def _push_with_retry(self, sink: Sink, event: EventEnvelope) -> bool:
+        accepts = getattr(sink, "accepts", None)
+        # Evaluated once, outside the loop: a sink's filter may be stateful.
+        if accepts is not None and not accepts(event):
+            return True
         for attempt in range(self._max_retries):
-            if self._sink.push(event):
-                return True
+            try:
+                if sink.push(event):
+                    return True
+            except PermanentDeliveryError:
+                # Remote rejected the payload itself; resending is pointless.
+                return False
             if attempt < self._max_retries - 1:
                 time.sleep(self._backoff_s * (2**attempt))
         return False
+
+
+class BackgroundDispatcher:
+    """Runs a ``Delivery`` on one daemon worker thread, preserving order.
+
+    ``emit`` must never block the queue poller or a ``set_board_mode`` tool
+    call on a slow remote, but a thread per event would let a retrying older
+    event arrive *after* a newer one — leaving the agent acting on a stale
+    queue depth. A single FIFO worker keeps emission order intact and bounds
+    thread churn to one thread.
+
+    Args:
+        delivery: The configured ``Delivery`` to run.
+        name: Worker thread name.
+        max_queue: Bound on pending events so an unreachable remote cannot
+            grow memory without limit. Newest events are dropped when full.
+    """
+
+    def __init__(self, delivery: Delivery, name: str, max_queue: int = 1000) -> None:
+        self._delivery = delivery
+        self._name = name
+        self._queue: "queue.Queue[EventEnvelope | None]" = queue.Queue(maxsize=max_queue)
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+
+    def submit(self, event: EventEnvelope) -> bool:
+        """Enqueue an event for delivery. Returns ``False`` if it was dropped."""
+        self._ensure_worker()
+        try:
+            self._queue.put_nowait(event)
+            return True
+        except queue.Full:
+            logger.warning(
+                "[%s] delivery backlog full (%d); dropping event %s",
+                self._name,
+                self._queue.maxsize,
+                event.ref_id,
+            )
+            return False
+
+    def _ensure_worker(self) -> None:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._thread = threading.Thread(
+                target=self._run, daemon=True, name=self._name
+            )
+            self._thread.start()
+
+    def _run(self) -> None:
+        while True:
+            event = self._queue.get()
+            if event is None:
+                return
+            try:
+                self._delivery.dispatch(event)
+            except Exception:
+                logger.exception("[%s] delivery raised unexpectedly", self._name)
+            finally:
+                self._queue.task_done()
+
+    def join(self, timeout: float | None = None) -> None:
+        """Block until the backlog drains. Intended for tests."""
+        self._queue.join()

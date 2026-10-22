@@ -20,6 +20,11 @@ samples are recorded to the durable log by a background poller
 (``start_queue_poller`` in ``mcp_server.py``) so trend/history queries work
 across restarts.
 
+Events are additionally *pushed* to the Central QSR Agent's
+``POST /autonomy/events`` inbox when ``KIOSK_CORE_QSR_AUTONOMY_EVENTS_URL`` is
+configured (see ``autonomy.py``), so Hermes can propose an action without
+polling this service. Delivery is off by default.
+
 The durable event log's on-disk format (SQLite table/columns, JSONL record
 shape) is unchanged from the previous ``mcp_service_sdk``-backed
 implementation — see ``event_log.py`` — so an existing, populated
@@ -39,7 +44,8 @@ from fastmcp import FastMCP
 from kiosk_core import config as cfg
 from kiosk_core.queue_client import QueueClient
 from kiosk_core.qsr_mcp import board_state
-from kiosk_core.qsr_mcp.delivery import Delivery
+from kiosk_core.qsr_mcp.autonomy import AutonomyEventSink
+from kiosk_core.qsr_mcp.delivery import BackgroundDispatcher, Delivery
 from kiosk_core.qsr_mcp.event_log import build_log, new_event
 from kiosk_core.qsr_mcp.policy import GateLevel, PolicyGate
 
@@ -65,6 +71,36 @@ _log = build_log(
     service=SERVICE_NAME,
 )
 _delivery = Delivery(webhook_url=cfg.QSR_MCP_WEBHOOK_URL)
+# Outbound autonomy push to the Central QSR Agent; built only when the URL is
+# configured, so the default stack performs no outbound delivery at all.
+_autonomy_delivery = (
+    Delivery(
+        sinks=[
+            AutonomyEventSink(
+                cfg.QSR_AUTONOMY_EVENTS_URL,
+                store_id=cfg.QSR_AUTONOMY_STORE_ID,
+                token=cfg.QSR_AUTONOMY_EVENTS_TOKEN,
+                event_types=cfg.QSR_AUTONOMY_EVENT_TYPES,
+                queue_min_delta=cfg.QSR_AUTONOMY_QUEUE_MIN_DELTA,
+                timeout_s=cfg.QSR_AUTONOMY_TIMEOUT_SECONDS,
+            )
+        ]
+    )
+    if cfg.QSR_AUTONOMY_EVENTS_URL and MCP_SERVICE_ENABLED
+    else None
+)
+
+# One FIFO worker per destination: emit() stays non-blocking, while delivery
+# order (and therefore the agent's view of "latest queue depth") is preserved.
+_dispatchers = tuple(
+    BackgroundDispatcher(delivery, name)
+    for delivery, name in (
+        (_delivery, "qsr-webhook-delivery"),
+        (_autonomy_delivery, "qsr-autonomy-delivery"),
+    )
+    if delivery is not None and delivery.sinks
+)
+
 _policy = PolicyGate()
 _subscriptions: list[dict[str, str]] = []
 
@@ -81,14 +117,18 @@ _ACT_TOOLS: dict[str, dict[str, Any]] = {}
 
 
 def emit(event_type: str, payload: dict[str, Any], ref_id: str | None = None) -> None:
-    """Durably log one event, then fan out to the configured sink (if any).
+    """Durably log one event, then fan out to the configured sinks (if any).
 
     Emit-to-log-first, then dispatch — same ordering as the old SDK's
-    ``ServiceServer.emit``.
+    ``ServiceServer.emit``. Dispatch is handed to a background FIFO worker per
+    destination, so neither the queue poller nor a ``set_board_mode`` tool call
+    blocks on a slow or unreachable remote: the durable log is the
+    authoritative record and delivery is best-effort.
     """
     event = new_event(event_type, SERVICE_NAME, STORE_ID, payload, ref_id)
     _log.append(event)
-    _delivery.dispatch(event)
+    for dispatcher in _dispatchers:
+        dispatcher.submit(event)
 
 
 def emit_queue_sample(snapshot: dict[str, Any]) -> None:

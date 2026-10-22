@@ -930,6 +930,16 @@ services:
       KIOSK_CORE_QSR_MCP_PORT:       "8014"
       KIOSK_CORE_QSR_MCP_LOG_PATH:   /app/data/qsr_mcp_events.db
       KIOSK_CORE_QSR_MCP_BOARD_STATE_PATH: /app/data/qsr_board_state.json
+      # Outbound autonomy events to the Central QSR Agent's /autonomy/events
+      # inbox (the push direction; the MCP read tools above are the pull one).
+      # Empty URL => delivery disabled, so the default stack and every
+      # benchmark run make no outbound calls. QSR_AUTONOMY_STORE_ID must equal
+      # the agent's QSR_RESTAURANT_ID or every event is rejected.
+      KIOSK_CORE_QSR_AUTONOMY_EVENTS_URL:   "${KIOSK_CORE_QSR_AUTONOMY_EVENTS_URL:-}"
+      KIOSK_CORE_QSR_AUTONOMY_EVENTS_TOKEN: "${KIOSK_CORE_QSR_AUTONOMY_EVENTS_TOKEN:-}"
+      KIOSK_CORE_QSR_AUTONOMY_STORE_ID:     "${KIOSK_CORE_QSR_AUTONOMY_STORE_ID:-qsr-001}"
+      KIOSK_CORE_QSR_AUTONOMY_EVENT_TYPES:  "${KIOSK_CORE_QSR_AUTONOMY_EVENT_TYPES:-queue_depth_sample,board_mode_changed}"
+      KIOSK_CORE_QSR_AUTONOMY_QUEUE_MIN_DELTA: "${KIOSK_CORE_QSR_AUTONOMY_QUEUE_MIN_DELTA:-1}"
       # Conversation recording (offline analysis). Off by default; set to
       # "true" to append every completed voice turn to
       # ./conversations/<conversation_id>.jsonl on the host (bind-mounted
@@ -948,9 +958,12 @@ services:
       KIOSK_CORE_VLM_METRICS_ENABLED: "${KIOSK_CORE_VLM_METRICS_ENABLED:-true}"
       CONTAINER_RESULTS_PATH: /app/results
       USECASE_V2V: smart-kiosk-v2v
-      # Bypass corporate proxy for intra-cluster traffic
-      NO_PROXY: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,queue-service,172.16.0.0/12,10.0.0.0/8"
-      no_proxy: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,queue-service,172.16.0.0/12,10.0.0.0/8"
+      # Bypass corporate proxy for intra-cluster traffic. The Central QSR Agent
+      # runs on a separate machine, so add its host to KIOSK_CORE_QSR_EXTRA_NO_PROXY
+      # when autonomy delivery is enabled, or the POST is sent to the proxy and
+      # rejected. Note: Python's urllib matches no_proxy by suffix, not CIDR.
+      NO_PROXY: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,queue-service,172.16.0.0/12,10.0.0.0/8${KIOSK_CORE_QSR_EXTRA_NO_PROXY:+,${KIOSK_CORE_QSR_EXTRA_NO_PROXY}}"
+      no_proxy: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,queue-service,172.16.0.0/12,10.0.0.0/8${KIOSK_CORE_QSR_EXTRA_NO_PROXY:+,${KIOSK_CORE_QSR_EXTRA_NO_PROXY}}"
     volumes:
       - generated_audio:/app/generated_audio
       - kiosk_db:/app/data
