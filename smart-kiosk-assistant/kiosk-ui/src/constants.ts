@@ -8,6 +8,9 @@ export const constants = {
 export const endpoints = {
   // kiosk-core
   startStream: '/api/v1/sessions/start-stream',
+  // Hands-free persistent uplink (binary PCM16 frames). A relative WS path;
+  // resolved against the current origin by buildStreamSocketUrl().
+  streamSocket: '/api/v1/sessions/stream',
   pushAudio: (sid: string) => `/api/v1/sessions/${sid}/audio`,
   endAudio: (sid: string) => `/api/v1/sessions/${sid}/audio/end`,
   pollSession: (sid: string) => `/api/v1/sessions/${sid}`,
@@ -42,6 +45,16 @@ export const endpoints = {
   identityChallenge: '/api/v1/identity/challenge',
   identityVerify: '/api/v1/identity/verify',
   identityRegister: '/api/v1/identity/register',
+};
+
+// Runtime feature flags (overridable at build time via Vite env vars).
+export const features = {
+  // Hands-free conversation mode streams audio over a persistent WebSocket
+  // (binary PCM16 frames) and reports browser playback back to kiosk-core so
+  // the voice-to-voice clock stops at the speaker. Set VITE_HANDSFREE_WS=false
+  // to fall back to the REST chunked-push path. Push-to-talk always uses REST.
+  handsfreeWebSocket:
+    (import.meta.env?.VITE_HANDSFREE_WS ?? 'true') !== 'false',
 };
 
 // Tuning constants (mirror kiosk_core config defaults).

@@ -52,14 +52,6 @@ export async function startStreamSession(
       // exceed one chunk (see tuning.singleChunkMaxSeconds).
       max_session_seconds: singleChunk ? tuning.singleChunkMaxSeconds : 60.0,
       silence_threshold: 900,
-      // language intentionally omitted (null): kiosk-core's SessionStartRequest
-      // defaults it to config.DEFAULT_ASR_LANGUAGE (server-side). This used to
-      // hardcode 'en', which crashes the currently-deployed English-only ASR
-      // checkpoint (distil-whisper/distil-small.en) — OpenVINO GenAI's Whisper
-      // pipeline rejects ANY language token, including "en", for a
-      // non-multilingual model. Let the server default (empty/None via
-      // KIOSK_CORE_ASR_LANGUAGE) govern instead.
-      language: null,
       temperature: 0.0,
       // tts_model intentionally omitted: kiosk-core's SessionStartRequest
       // defaults it to config.DEFAULT_TTS_MODEL (server-side, currently
@@ -94,6 +86,36 @@ export async function pushAudioChunk(sessionId: string, wav: Blob): Promise<void
 export async function endAudioStream(sessionId: string): Promise<void> {
   const res = await fetch(endpoints.endAudio(sessionId), { method: 'POST' });
   if (!res.ok) throw new Error(`Failed to end stream: ${res.status}`);
+}
+
+/**
+ * Build the hands-free start payload sent as the first WebSocket message.
+ * Mirrors startStreamSession's body (hands-free is never single-chunk, so it
+ * keeps the tuned chunk/silence values and the adaptive pre-warm flush).
+ */
+export function buildStreamStartPayload(
+  sampleRate: number,
+  history: HistoryTurn[],
+  conversationId?: string,
+): Record<string, unknown> {
+  return {
+    sample_rate: sampleRate,
+    chunk_seconds: tuning.asrChunkSeconds,
+    silence_timeout_seconds: tuning.silenceTimeoutSeconds,
+    max_session_seconds: 60.0,
+    silence_threshold: 900,
+    temperature: 0.0,
+    tts_language: 'English',
+    history,
+    ...(conversationId ? { conversation_id: conversationId } : {}),
+    ...BACKEND_SERVICE_URLS,
+  };
+}
+
+/** Resolve the hands-free WebSocket URL against the current page origin. */
+export function buildStreamSocketUrl(): string {
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${proto}//${window.location.host}${endpoints.streamSocket}`;
 }
 
 /** Poll the current session snapshot (transcript, response, tts segments, status). */

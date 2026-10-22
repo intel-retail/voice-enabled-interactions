@@ -75,27 +75,35 @@ COMPOSE_FILE     ?= docker-compose.yml
 # REGISTRY=true   → pull pre-built images from the registry
 #
 # NOTE: `-include .env` above runs BEFORE this assignment, and the shipped
-#       .env sets REGISTRY=intel. Because `?=` does not override an
+#       .env sets REGISTRY=true. Because `?=` does not override an
 #       already-set variable, the effective default when a .env is present is
 #       PULL, not build. Pass REGISTRY=false explicitly to build locally:
 #           make build REGISTRY=false
 #
-# NOTE: "false" and "true" are build-mode flags only. docker-compose always
-#       receives the real registry name (REGISTRY=intel) so image tags are never
-#       "false/<svc>:..." or "true/<svc>:...". Passing an explicit registry name
-#       (e.g. REGISTRY=myrepo.example.com/team) also selects pull mode and is
-#       forwarded to docker-compose verbatim — that registry must mirror every
-#       image, including the upstream audio-analyzer, text-to-speech, and
-#       hl-ai-metrics-collector, since `make up` resolves them the same way.
+# NOTE: "false" and "true" are build-mode flags only, consumed exclusively by
+#       this Makefile. The actual registry/image prefix used to resolve every
+#       `image:` in docker-compose.yml comes from REGISTRY_REPO (set in .env,
+#       default: intel) — docker-compose.yml no longer reads REGISTRY itself,
+#       so raw `docker compose pull/up` (bypassing `make` entirely) resolves
+#       images correctly too, instead of producing a literal, non-existent
+#       "true/<svc>:..." registry. Passing an explicit registry name here
+#       (e.g. REGISTRY=myrepo.example.com/team) still selects pull mode and
+#       is forwarded to docker-compose as REGISTRY_REPO below — that registry
+#       must mirror every image, including the upstream audio-analyzer,
+#       text-to-speech, and hl-ai-metrics-collector, since `make up` resolves
+#       them the same way.
 REGISTRY         ?= false
 
-# _DOCKER_REGISTRY: the actual registry prefix passed to docker-compose.
-# When the user passes REGISTRY=false or REGISTRY=true it is treated as a
-# build-mode switch; the real registry name comes from .env (default: intel).
-_ENV_REGISTRY    ?= intel
+# _DOCKER_REGISTRY: the actual registry prefix forwarded to docker-compose as
+# REGISTRY_REPO. When the user passes REGISTRY=false or REGISTRY=true it is
+# treated as a build-mode switch only; the real registry name comes from
+# .env's REGISTRY_REPO (default: intel). Passing any other value for
+# REGISTRY (e.g. a private registry host) is treated as an explicit registry
+# override and takes precedence over REGISTRY_REPO.
+_ENV_REGISTRY    ?= $(if $(strip $(REGISTRY_REPO)),$(strip $(REGISTRY_REPO)),intel)
 _DOCKER_REGISTRY  = $(if $(filter false FALSE true TRUE,$(REGISTRY)),$(_ENV_REGISTRY),$(REGISTRY))
 
-RELEASE_TAG      ?= 2026.1.0
+RELEASE_TAG      ?= latest
 export TAG       := $(RELEASE_TAG)
 
 TARGET_DEVICE    ?= GPU
@@ -165,11 +173,16 @@ _QUEUE_PROFILE  = $(if $(_QUEUE_ON),--profile queue,)
 export KIOSK_CORE_QUEUE_SERVICE_ENABLED = $(if $(_QUEUE_ON),true,false)
 
 # audio-analyzer and text-to-speech are published to Docker Hub by the
-# edge-ai-libraries CI pipeline and are ALWAYS pulled -- in every mode,
-# including REGISTRY=false. They have no local build context in
-# docker-compose.yml, so `make build` (and `docker compose build`) never
-# rebuild them from source. To change either service, build and push its
-# image from an edge-ai-libraries checkout, then pull it here.
+# audio-analyzer and text-to-speech are consumed as prebuilt images only --
+# this repo no longer carries a build reference to ../edge-ai-libraries.
+# In registry mode (REGISTRY=true or a registry name) they are pulled, like
+# metrics-collector. With REGISTRY=false they are NOT built here; the locally
+# tagged intel/{audio-analyzer,text-to-speech}:${RELEASE_TAG} image is used as
+# is -- build it once directly from the edge-ai-libraries fork
+# (docker compose build in that repo, or `make build` before this split), then
+# it is reused. The fork source lives at
+# ../edge-ai-libraries/microservices/{audio-analyzer,text-to-speech} and must be
+# kept in sync with upstream open-edge-platform/edge-ai-libraries.
 
 # Colors
 RED    := \033[0;31m
@@ -483,18 +496,30 @@ build: check-env ## Pull images (default with .env); REGISTRY=false builds local
 	@set -e; \
 	if [ "$(REGISTRY)" = "false" ] || [ "$(REGISTRY)" = "FALSE" ]; then \
 		echo "$(YELLOW)  REGISTRY=false → Building local services from source$(NC)"; \
-		REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) $(_QUEUE_PROFILE) build $(LOCAL_ONLY_SERVICES) $(_IDENTITY_SVC); \
+		REGISTRY_REPO=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) $(_QUEUE_PROFILE) build $(LOCAL_ONLY_SERVICES) $(_IDENTITY_SVC); \
 	else \
 		echo "$(YELLOW)  REGISTRY=$(REGISTRY) → Pulling images from registry '$(_DOCKER_REGISTRY)'$(NC)"; \
-		REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull $(LOCAL_ONLY_SERVICES); \
+		REGISTRY_REPO=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull $(LOCAL_ONLY_SERVICES); \
 		if [ -n "$(_IDENTITY_SVC)" ]; then \
 			echo "$(YELLOW)  Building identity-service locally (no registry image)...$(NC)"; \
-			REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) build identity-service; \
+			REGISTRY_REPO=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) build identity-service; \
 		fi; \
 	fi; \
-	echo "$(YELLOW)  Pulling audio-analyzer and text-to-speech from registry '$(_DOCKER_REGISTRY)' (always pulled, never built locally)...$(NC)"; \
-	REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull audio-analyzer text-to-speech; \
-	REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull metrics-collector || \
+	if [ "$(REGISTRY)" = "false" ] || [ "$(REGISTRY)" = "FALSE" ]; then \
+		for svc in audio-analyzer text-to-speech; do \
+			img="$(_DOCKER_REGISTRY)/$$svc:$(RELEASE_TAG)"; \
+			if docker image inspect "$$img" >/dev/null 2>&1; then \
+				echo "$(YELLOW)  REGISTRY=false → keeping local $$img (not pulling; it may be a source build from edge-ai-libraries)$(NC)"; \
+			else \
+				echo "$(YELLOW)  REGISTRY=false but $$img is missing locally → pulling it from the registry$(NC)"; \
+				REGISTRY_REPO=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull $$svc; \
+			fi; \
+		done; \
+	else \
+		echo "$(YELLOW)  Pulling audio-analyzer and text-to-speech from registry (image-only; built once from the edge-ai-libraries fork)...$(NC)"; \
+		REGISTRY_REPO=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull audio-analyzer text-to-speech; \
+	fi; \
+	REGISTRY_REPO=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull metrics-collector || \
 		echo "$(YELLOW)  ⚠ Could not pull metrics-collector (intel/hl-ai-metrics-collector) from registry -- using locally cached image if present. Build it from edge-ai-suites/health-and-life-sciences-ai-suite/multi_modal_patient_monitoring/services/metrics-collector if missing.$(NC)"
 	@echo "$(GREEN)✓ Images ready$(NC)"
 
@@ -504,7 +529,7 @@ build: check-env ## Pull images (default with .env); REGISTRY=false builds local
 
 up: check-env setup-dirs clean-metrics ## Start all services
 	@echo "$(BLUE)Starting Smart Kiosk Assistant...$(NC)"
-	REGISTRY=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) $(_QUEUE_PROFILE) up -d
+	REGISTRY_REPO=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) $(_QUEUE_PROFILE) up -d
 	@echo ""
 	@echo "$(GREEN)✓ Stack started$(NC)"
 	@echo "  Kiosk UI        → http://localhost:7860"
@@ -724,19 +749,22 @@ build-benchmark:
 # itself), so do NOT run this against an already-running stack unless you also
 # pass V2V_ARGS="--skip_stack".
 #
-# V2V_SCRIPT defaults to "all": one pass over every scenario in
-# tests/benchmarks/v2v_scripted_conversation_benchmark.py's SCRIPTS -- single
-# item, multi-item with an addition, a hesitant self-correcting customer, and
-# a price-question + upsell + confirm journey (11 turns). At V2V_RUNS=8 that
-# is 88 measured turns, which is what makes the reported p95 mean something:
-# the previous default (one 4-line conversation, V2V_RUNS=1) gave four turns,
-# so "p95" was just the slowest of the four.
+# V2V_SCRIPT defaults to "order-fastpath": six single-intent 7-8 word ordering
+# turns (one clean mutation each, ending in confirm) in
+# tests/benchmarks/v2v_scripted_conversation_benchmark.py's SCRIPTS. This is
+# the representative clean-ordering voice-to-voice KPI and is the number to
+# quote for ordering latency. At V2V_RUNS=8 that is 48 measured turns, enough
+# for a median and a p95 that is not simply the single slowest turn.
 #
-# Set V2V_SCRIPT= (empty) to fall back to Sample_data/conversation.jsonl --
-# edit that one file to script a custom conversation without touching this
-# Makefile or the submodule. Set V2V_SCRIPT=order-simple (or order-multi/
-# order-drift/order-upsell) to run a single named scenario.
-V2V_SCRIPT      ?= all
+# Set V2V_SCRIPT=all for one pass over every scenario (single item, multi-item,
+# a hesitant self-correcting customer, and a price-question + upsell + confirm
+# journey) -- 88 measured turns that keep multi-item / substitution / Q&A in
+# the same report. Set V2V_SCRIPT= (empty) to fall back to
+# Sample_data/conversation.jsonl -- edit that one file to script a custom
+# conversation without touching this Makefile or the submodule. Set
+# V2V_SCRIPT=order-simple (or order-multi/order-drift/order-upsell) to run a
+# single named scenario.
+V2V_SCRIPT      ?= order-fastpath
 V2V_RUNS        ?= 8
 V2V_WARMUP_RUNS ?= 1
 V2V_LABEL       ?= v2v-perf-tools
@@ -762,6 +790,25 @@ benchmark: check-env validate-profile ## Run the voice-to-voice latency benchmar
 			echo "  which does not contain benchmark_smart_kiosk_v2v.py."; \
 			echo "  Restore the commit pinned by this repository with: make update-submodules"; \
 		fi; \
+		exit 1; \
+	fi
+	@# Refuse to run over an already-up stack. The orchestrator brings the
+	@# stack up and down itself, and `make up` wipes ./metrics/ as a
+	@# prerequisite. Over a stack the user already started (e.g. from
+	@# get-started.md) that silently (a) deletes the live collector's
+	@# hardware counters mid-run, so the run ends with no hardware rows and no
+	@# warning, and (b) leaves queue-service/rtsp-streamer running during the
+	@# measured turns while the manifest records the queue as off. Stopping
+	@# with a clear message is safer than tearing down a stack the user may be
+	@# using for something else.
+	@running="$$($(COMPOSE_BASE) --profile identity --profile queue ps -q 2>/dev/null)"; \
+	if [ -n "$$running" ]; then \
+		echo "$(RED)The kiosk stack is already running.$(NC)"; \
+		echo "  make benchmark starts and stops the stack itself and wipes ./metrics/ on start."; \
+		echo "  Running it over an already-up stack deletes the live collector's hardware"; \
+		echo "  metrics with no warning, and leaves queue-service/rtsp-streamer running during"; \
+		echo "  the measured turns while the manifest records the queue as off."; \
+		echo "  Stop the stack first:  $(YELLOW)make down$(NC)"; \
 		exit 1; \
 	fi
 	@$(MAKE) --no-print-directory _write-provenance
@@ -835,21 +882,23 @@ sync-metrics-into-results: setup-dirs ## Copy OS-level hardware counters from ./
 	@cp -pf $(METRICS_DIR)/cpu_usage.log $(METRICS_DIR)/memory_usage.log $(METRICS_DIR)/npu_usage.csv \
 		$(RESULTS_DIR)/ 2>/dev/null || true
 	@cp -pf $(METRICS_DIR)/qmassa*-tool-generated.json $(RESULTS_DIR)/ 2>/dev/null || true
+	@# qmassa rewrites its whole JSON document from scratch on every sample
+	@# rather than appending; a container killed mid-write (or -- observed in
+	@# practice -- CPU/IO contention while `docker compose down` tears down
+	@# the whole stack in parallel, even with metrics-collector's own
+	@# stop_grace_period) can leave this file truncated mid-object. The
+	@# utilisation trim below parses the same qmassa JSON to anchor its
+	@# window, so a truncated file would abort the trim with a decode error.
+	@# Repair any truncation in place *before* the trim (and before
+	@# parse_qmassa_metrics_to_json.py) ever reads the file -- see
+	@# tests/benchmarks/repair_qmassa_json.py's docstring for the approach.
+	@python3 tests/benchmarks/repair_qmassa_json.py --dir $(RESULTS_DIR) --keyword qmassa
 	@# The collector samples for the whole time the stack is up -- image
 	@# pulls, the health wait, the discarded warmup, teardown -- so averaging
 	@# the raw files describes a mostly-idle stack rather than the measured
 	@# turns. Narrow them to the window the benchmark recorded. A no-op when
 	@# results/measured_window.json is absent, i.e. outside a benchmark run.
 	@python3 scripts/trim_metrics_to_window.py --results-dir $(RESULTS_DIR)
-	@# qmassa rewrites its whole JSON document from scratch on every sample
-	@# rather than appending; a container killed mid-write (or -- observed in
-	@# practice -- CPU/IO contention while `docker compose down` tears down
-	@# the whole stack in parallel, even with metrics-collector's own
-	@# stop_grace_period) can leave this file truncated mid-object, which
-	@# parse_qmassa_metrics_to_json.py then rejects outright. Repair any
-	@# truncation in place before that parser ever sees the file -- see
-	@# tests/benchmarks/repair_qmassa_json.py's docstring for the approach.
-	@python3 tests/benchmarks/repair_qmassa_json.py --dir $(RESULTS_DIR) --keyword qmassa
 
 parse-qmassa-metrics: sync-metrics-into-results ## Parse raw qmassa*-tool-generated.json into qmassa*-parsed.json
 	@# consolidate-metrics and plot-metrics only match *parsed*.json, not the

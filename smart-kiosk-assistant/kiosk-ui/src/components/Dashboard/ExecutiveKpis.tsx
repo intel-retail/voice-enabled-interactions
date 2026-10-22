@@ -2,7 +2,7 @@
  * ExecutiveKpis — large KPI cards visible at all times on the dashboard.
  *
  * Cards:
- *   1. Voice-to-voice latency  (customer's last word → first sound at speaker)
+ *   1. Voice-to-voice latency  (customer's last word → first sound ready for speaker)
  *   2. Transcription latency   (last spoken word → transcript ready)
  *   3. LLM TTFT                (time to first token)
  *   4. TTS TTFB                (time to first byte)
@@ -120,7 +120,7 @@ export function ExecutiveKpis({ kpis }: ExecutiveKpisProps) {
   const v2vSub =
     firstAudioWasOpener && v2vAnswerMs !== null
       ? `Cached opener first · answer audio ${formatLatency(v2vAnswerMs)} · ${sourceNote}`
-      : `Last word → first sound at speaker · ${sourceNote}`;
+      : `Last word → first sound ready for speaker · ${sourceNote}`;
 
   return (
     <div className="space-y-2">

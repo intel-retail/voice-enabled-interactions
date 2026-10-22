@@ -801,7 +801,7 @@ def print_summary(report: BenchmarkReport) -> None:
             ("trace_asr", "trace ASR total"),
             ("trace_llm_ttft", "LLM TTFT"),
             ("trace_agent_total", "trace agent_total"),
-            ("trace_tts_ttfb", "TTS TTFB"),
+            ("trace_tts_ttfb", "TTS time to first sentence"),
             ("trace_tts", "trace TTS total"),
         ):
             st = voice.get(key) or {}

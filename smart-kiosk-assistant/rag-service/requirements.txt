@@ -8,7 +8,7 @@ python-multipart==0.0.31
 
 # Document ingestion (PDF/DOCX support for RAG context upload)
 python-docx==1.1.2
-pypdf==6.16.1
+pypdf==6.19.0
 
 openvino==2026.1.0
 openvino-tokenizers==2026.1.0.0
@@ -22,10 +22,14 @@ fsspec>=2023.1.0,<=2025.3.0
 numpy==1.26.4
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.13.0+cpu
+# NOTE: Dependabot alert #106 (GHSA path traversal) is fixed in transformers>=5.10.1,
+# but optimum-intel==2.1.0 (latest 2.2.0 as of this writing) pins transformers<5.6,
+# so upgrading here breaks pip's dependency resolution for the OpenVINO/optimum-intel
+# integration. Keeping the pin until optimum-intel raises its upper bound upstream.
 transformers==5.5.0
 tokenizers==0.22.2
 safetensors==0.6.2
-sentence-transformers==5.2.0
+sentence-transformers==5.6.0
 
 langchain-chroma>=0.2.5
 langchain-core>=0.3.74

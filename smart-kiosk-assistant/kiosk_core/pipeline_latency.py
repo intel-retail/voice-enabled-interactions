@@ -157,6 +157,13 @@ class WallTimes:
     # headline. With the opener disabled these equal the two fields above.
     voice_to_voice_answer_ms: float | None = None
     processing_latency_answer_ms: float | None = None
+    # Honest "sound actually reached the speaker" voice-to-voice span: the
+    # customer's last word to the browser's own onFirstPlay, reported back over
+    # the hands-free WebSocket, rather than the on-disk WAV-write stamp that
+    # voice_to_voice_ms / _answer_ms use. None when no client reported playback
+    # (push-to-talk, the headless benchmark, or a hands-free browser running
+    # with KIOSK_CORE_HANDSFREE_WS_ENABLED off).
+    voice_to_voice_speaker_ms: float | None = None
     # True when the first sound of this turn was the canned opener. Makes a
     # near-zero processing_latency_ms self-explanatory in the trace instead
     # of looking like a pipeline result.
@@ -260,6 +267,20 @@ class PipelineLatencyStore:
         with self._lock:
             items = list(self._buffer)
         return [t.to_dict() for t in items[-n:]]
+
+    def amend_speaker_v2v(self, turn_id: str, ms: float) -> bool:
+        """Late-patch ``voice_to_voice_speaker_ms`` on an already-recorded trace.
+
+        The browser's playback report can land after the turn trace was
+        recorded (a short turn finishes synthesising before the first segment
+        starts playing). Returns ``True`` if a matching trace was found.
+        """
+        with self._lock:
+            for trace in reversed(self._buffer):
+                if trace.turn_id == turn_id:
+                    trace.wall.voice_to_voice_speaker_ms = ms
+                    return True
+        return False
 
 
 # Module-level singleton — imported by audio_session and main.py

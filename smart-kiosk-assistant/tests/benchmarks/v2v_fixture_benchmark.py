@@ -33,8 +33,8 @@ This script instead:
 * Reads kiosk-core's wall-clock latency fields directly from the turn trace.
   The headline identity is now exact per turn:
   ``voice_to_voice_ms == endpointing_delay_ms + processing_latency_ms``.
-  ``voice_to_voice_ms`` stops on the first sound at the speaker, which may be
-  the cached "One moment." opener; therefore the report also surfaces
+  ``voice_to_voice_ms`` stops on the first sound ready for the speaker, which
+  may be the cached "One moment." opener; therefore the report also surfaces
   ``voice_to_voice_answer_ms`` and ``first_audio_was_opener`` so the first
   answer-bearing audio is visible.
 * Reports mean/median/p90/**p95** (p95 is the customer-facing target — a
@@ -173,6 +173,35 @@ def http_post_empty(url: str, timeout: float = 30.0) -> None:
     status, resp = _request(url, data=b"", method="POST", timeout=timeout)
     if status != 200:
         raise RuntimeError(f"POST {url} -> HTTP {status}: {resp[:300]!r}")
+
+
+def derive_ws_stream_url(base_url: str = CORE_BASE_URL) -> str:
+    """Map the kiosk-core HTTP base URL to the hands-free WebSocket endpoint."""
+    if base_url.startswith("https://"):
+        scheme_rest = base_url[len("https://"):]
+        return f"wss://{scheme_rest}/api/v1/sessions/stream"
+    scheme_rest = base_url[len("http://"):] if base_url.startswith("http://") else base_url
+    return f"ws://{scheme_rest}/api/v1/sessions/stream"
+
+
+def iter_pcm_frames(fixture: Path, chunk_seconds: float) -> Iterator[tuple[bytes, float]]:
+    """Slice a 16 kHz mono int16 WAV fixture into raw PCM frames (no container).
+
+    The hands-free WebSocket uplink sends bare little-endian int16 PCM, exactly
+    what ``BrowserStreamSession.push_pcm`` expects, so there is no per-chunk
+    RIFF/WAV header. Yields each frame's real duration too, for push pacing.
+    """
+    with wave.open(str(fixture), "rb") as wav_file:
+        channels = wav_file.getnchannels()
+        sample_width = wav_file.getsampwidth()
+        sample_rate = wav_file.getframerate()
+        frames_per_chunk = max(1, int(chunk_seconds * sample_rate))
+        while True:
+            raw = wav_file.readframes(frames_per_chunk)
+            if not raw:
+                return
+            n_frames = len(raw) // (sample_width * channels)
+            yield raw, n_frames / sample_rate
 
 
 def iter_wav_chunks(fixture: Path, chunk_seconds: float) -> Iterator[tuple[bytes, float]]:
@@ -317,9 +346,9 @@ class TurnResult:
     error: str | None = None
 
     # Wall-clock spans, never blended with audio-domain diagnostics:
-    #   voice_to_voice_ms          : customer's last word -> first sound at speaker
+    #   voice_to_voice_ms          : customer's last word -> first sound ready for speaker
     #   endpointing_delay_ms       : customer's last word -> turn-end decision
-    #   processing_latency_ms      : turn-end decision -> first sound at speaker
+    #   processing_latency_ms      : turn-end decision -> first sound ready for speaker
     #   voice_to_voice_answer_ms   : customer's last word -> first answer audio
     voice_to_voice_ms: float | None = None
     voice_to_voice_answer_ms: float | None = None
@@ -484,9 +513,9 @@ def build_summary(turns: list[TurnResult]) -> dict[str, Any]:
     opener_flags = [t.first_audio_was_opener for t in ok]
     summary["first_audio_was_opener_count"] = sum(1 for f_ in opener_flags if f_)
     summary["first_audio_turn_count"] = len(opener_flags)
-    # A TTS TTFB of ~1 ms is a cache hit, not a fast synthesiser. Report how
-    # many turns it applied to so the TTFB percentiles above can be read
-    # correctly instead of looking like a broken metric.
+    # A first-sentence time of ~1 ms is a cache hit, not a fast synthesiser.
+    # Report how many turns it applied to so the tts_ttfb_ms percentiles above
+    # can be read correctly instead of looking like a broken metric.
     cached = [
         t.tts_first_segment_cached for t in ok
         if t.tts_first_segment_cached is not None
@@ -609,12 +638,12 @@ def build_kpi_vocabulary(summary: dict[str, Any]) -> dict[str, Any]:
     return {
         "voice_to_voice_latency": _kpi(
             "Voice-to-voice latency", v2v_field,
-            "customer's last word", "first sound at speaker",
+            "customer's last word", "first sound ready for speaker",
             "Includes the cached opener when first_audio_was_opener is true.",
         ),
         "voice_to_voice_answer_latency": _kpi(
             "Voice-to-voice answer latency", v2v_answer_field,
-            "customer's last word", "first answer-bearing sound at speaker",
+            "customer's last word", "first answer-bearing sound ready for speaker",
             "Use this as the pipeline figure when the cached opener is enabled.",
         ),
         "endpointing_delay": _kpi(
@@ -625,12 +654,12 @@ def build_kpi_vocabulary(summary: dict[str, Any]) -> dict[str, Any]:
         ),
         "processing_latency": _kpi(
             "Processing latency", processing_field,
-            "turn-end decision", "first sound at speaker",
+            "turn-end decision", "first sound ready for speaker",
             "Pipeline work after endpointing; may stop on the cached opener.",
         ),
         "processing_latency_answer": _kpi(
             "Processing latency to answer", "processing_latency_answer_ms",
-            "turn-end decision", "first answer-bearing sound at speaker",
+            "turn-end decision", "first answer-bearing sound ready for speaker",
             "Pipeline work excluding the cached opener shortcut.",
         ),
         "transcription_latency": _kpi(
@@ -641,9 +670,11 @@ def build_kpi_vocabulary(summary: dict[str, Any]) -> dict[str, Any]:
             "LLM TTFT", "agent_ttft_ms",
             "prompt in", "first token out",
         ),
-        "tts_time_to_first_byte": _kpi(
-            "TTS TTFB", "tts_ttfb_ms",
-            "first sentence handed to synthesizer", "first audio byte on disk",
+        "tts_time_to_first_sentence": _kpi(
+            "TTS time to first sentence", "tts_ttfb_ms",
+            "first sentence handed to synthesizer", "first full sentence WAV on disk",
+            "Runs until sentence 1's WAV is finished, so it measures time to the "
+            "first whole sentence, not the first audio byte out of the synthesizer.",
         ),
         "customer_experience_band": {
             "voice_to_voice_p50_ms": v2v_p50,
@@ -726,7 +757,7 @@ def build_latency_breakdown(summary: dict[str, Any]) -> list[dict[str, Any]]:
     )
     _row(
         "tts_ttfb",
-        "TTS TTFB (first sentence -> first audio byte on disk)",
+        "TTS time to first sentence (first sentence -> first full sentence WAV on disk)",
         tts_ttfb_ms, processing_ms,
     )
     _row(
@@ -774,7 +805,7 @@ def _print_kpi_vocabulary(kpi: dict[str, Any] | None) -> None:
     order = (
         "voice_to_voice_latency", "voice_to_voice_answer_latency",
         "endpointing_delay", "processing_latency", "processing_latency_answer",
-        "transcription_latency", "llm_time_to_first_token", "tts_time_to_first_byte",
+        "transcription_latency", "llm_time_to_first_token", "tts_time_to_first_sentence",
     )
     print(f"\n{'-' * 78}\nCANONICAL KPI VOCABULARY\n{'-' * 78}")
     print(f"{'KPI':<34}{'p50 ms':>10}{'p95 ms':>10}")
@@ -832,10 +863,31 @@ def print_report(report: BenchmarkReport) -> None:
         f"{report.summary.get('endpoint_shortcut_eligible_count')} eligible turns "
         f"(the rest fell back to the full silence_timeout_seconds wait)"
     )
-    print(
-        "\nCustomer-facing number: voice_to_voice_ms p95 = "
-        f"{(report.summary.get('voice_to_voice_ms') or {}).get('p95', 'n/a')} ms"
-    )
+    # Headline: the clip-anchored number. The customer's last word is taken
+    # from the test clip itself (where speech ends in the WAV), independent of
+    # the kiosk's own endpoint detector. Endpointing is part of what we measure,
+    # so the clip anchor is the honest customer-facing figure; the
+    # detector-anchored number is shown below it only as a secondary
+    # cross-check. Live-mic runs have no clip ground truth, so they fall back to
+    # the detector-anchored number as the headline.
+    gt_stats = report.summary.get("voice_to_voice_ground_truth_ms")
+    det_stats = report.summary.get("voice_to_voice_ms") or {}
+    if gt_stats:
+        print(
+            "\nCustomer-facing number (clip-anchored): voice_to_voice "
+            f"p95 = {gt_stats.get('p95', 'n/a')} ms  "
+            f"median = {gt_stats.get('median', 'n/a')} ms"
+        )
+        print(
+            "  secondary (detector-anchored, kiosk VAD): voice_to_voice_ms "
+            f"p95 = {det_stats.get('p95', 'n/a')} ms  "
+            f"median = {det_stats.get('median', 'n/a')} ms"
+        )
+    else:
+        print(
+            "\nCustomer-facing number (detector-anchored, kiosk VAD; no clip "
+            f"ground truth): voice_to_voice_ms p95 = {det_stats.get('p95', 'n/a')} ms"
+        )
     answer_stats = report.summary.get("voice_to_voice_answer_ms")
     if answer_stats:
         print(
@@ -847,14 +899,8 @@ def print_report(report: BenchmarkReport) -> None:
     processing_stats = report.summary.get("processing_latency_ms")
     if processing_stats:
         print(
-            "Processing latency (turn-end decision -> first sound at speaker): "
+            "Processing latency (turn-end decision -> first sound ready for speaker): "
             f"median = {processing_stats['median']} ms  p95 = {processing_stats['p95']} ms"
-        )
-    gt_stats = report.summary.get("voice_to_voice_ground_truth_ms")
-    if gt_stats:
-        print(
-            "Ground-truth v2v (independent silence-detector EOS, kiosk-voice-lab "
-            f"method) median = {gt_stats['median']} ms  p95 = {gt_stats['p95']} ms"
         )
     print_breakdown(report)
 
@@ -894,6 +940,113 @@ def print_breakdown(report: BenchmarkReport) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _stream_fixture_over_rest(
+    session_payload: dict[str, Any],
+    fixture: Path,
+    push_chunk_seconds: float,
+    realtime_factor: float,
+    explicit_end_mark: bool,
+    session_timeout: float,
+) -> tuple[str, dict[str, Any]]:
+    """Replay a fixture over the REST chunk-push path (push-to-talk transport).
+
+    Returns ``(session_id, final_snapshot)``.
+    """
+    started = http_post_json(
+        f"{CORE_BASE_URL}/api/v1/sessions/start-stream", session_payload, timeout=30.0
+    )
+    session_id = str(started.get("session_id"))
+
+    # Push the fixture as a live browser would: slice it into self-contained
+    # WAV chunks and POST them one at a time, sleeping between pushes so the
+    # customer's own trailing silence is what the server-side endpoint detector
+    # actually waits through -- not a single upload the server paces internally
+    # (start-file's model). realtime_factor=1.0 reproduces true real-time
+    # pacing; >1.0 speeds pushes up for fast smoke-testing. The sleep is
+    # deliberately NOT applied after the last chunk (a real browser force-
+    # flushes and calls /audio/end the instant the button is released), which
+    # needs one-chunk look-ahead since iter_wav_chunks has no "last one" signal.
+    still_active = True
+    chunk_iter = iter_wav_chunks(fixture, push_chunk_seconds)
+    pending = next(chunk_iter, None)
+    while pending is not None:
+        wav_chunk, chunk_duration_s = pending
+        pending = next(chunk_iter, None)
+        still_active = http_post_wav_chunk(
+            f"{CORE_BASE_URL}/api/v1/sessions/{session_id}/audio", wav_chunk, timeout=30.0
+        )
+        if not still_active:
+            break
+        if pending is not None and realtime_factor > 0:
+            time.sleep(chunk_duration_s / realtime_factor)
+
+    # explicit_end_mark: tell kiosk-core the turn is over the instant every
+    # real-audio chunk has been pushed (see signal_end / the endpoint-shortcut
+    # race documented on BaseAudioSession._endpoint_transcript_stable). Only
+    # fires if the server's own detector has not already closed the session.
+    if still_active:
+        http_post_empty(
+            f"{CORE_BASE_URL}/api/v1/sessions/{session_id}/audio/end", timeout=30.0
+        )
+    elif explicit_end_mark:
+        print(
+            f"[v2v] session={session_id} explicit_end_mark requested but the endpoint "
+            "detector already closed the session first -- this turn's timing still "
+            "reflects the silence-timeout/shortcut path, not the explicit signal."
+        )
+
+    snapshot = poll_session(session_id, timeout=session_timeout)
+    return session_id, snapshot
+
+
+def _stream_fixture_over_ws(
+    session_payload: dict[str, Any],
+    fixture: Path,
+    push_chunk_seconds: float,
+    realtime_factor: float,
+    session_timeout: float,
+) -> tuple[str, dict[str, Any]]:
+    """Replay a fixture over the hands-free WebSocket uplink and poll the result.
+
+    Mirrors the REST push loop but speaks the browser's hands-free protocol:
+    one persistent socket, a JSON ``start`` message, raw int16 PCM binary
+    frames, then a JSON ``end``. Results are still polled over REST (the
+    harness is headless, so it never reports ``playback_started``). Returns
+    ``(session_id, final_snapshot)``.
+    """
+    from websockets.sync.client import connect  # local import: optional dep
+
+    ws_url = derive_ws_stream_url()
+    # proxy=None bypasses any inherited *_proxy/socks_proxy env vars: the
+    # kiosk-core WS endpoint is always on localhost, and without this the
+    # websockets client routes the loopback connection through the corporate
+    # SOCKS proxy and fails with "requires python-socks" (no_proxy is not
+    # honoured by the sync client for raw host matches).
+    with connect(ws_url, open_timeout=30, max_size=None, proxy=None) as ws:
+        ws.send(json.dumps({"type": "start", **session_payload}))
+        started = json.loads(ws.recv(timeout=30))
+        if started.get("type") != "started":
+            raise RuntimeError(f"unexpected WS start reply: {started!r}")
+        session_id = str(started["session_id"])
+
+        # Same pacing contract as the REST loop: sleep between frames (not
+        # after the last) so the fixture's own trailing silence is what the
+        # server-side endpoint detector waits through.
+        frame_iter = iter_pcm_frames(fixture, push_chunk_seconds)
+        pending = next(frame_iter, None)
+        while pending is not None:
+            pcm_bytes, frame_duration_s = pending
+            pending = next(frame_iter, None)
+            ws.send(pcm_bytes)
+            if pending is not None and realtime_factor > 0:
+                time.sleep(frame_duration_s / realtime_factor)
+
+        ws.send(json.dumps({"type": "end"}))
+        # Keep the socket open across the poll so the server's disconnect
+        # handler does not race the turn's finalisation.
+        return session_id, poll_session(session_id, timeout=session_timeout)
+
+
 def replay_fixture(
     fixture: Path,
     run: int,
@@ -902,9 +1055,17 @@ def replay_fixture(
     session_timeout: float,
     push_chunk_seconds: float = 0.5,
     explicit_end_mark: bool = False,
+    uplink: str = "ws",
+    conversation_id: str | None = None,
 ) -> TurnResult:
     result = TurnResult(fixture=fixture.name, run=run)
-    conversation_id = f"v2v-bench-{uuid.uuid4().hex[:8]}"
+    # A multi-turn scripted conversation must thread ONE conversation_id across
+    # all of its turns: kiosk-core clears the draft cart whenever a turn arrives
+    # under a new conversation (see _clear_stale_cart_for_new_session), so a
+    # per-turn id makes the closing "confirm my order" turn hit an empty cart and
+    # fail. Callers that genuinely want an isolated single turn simply omit it
+    # and get a fresh conversation per replay, as before.
+    conversation_id = conversation_id or f"v2v-bench-{uuid.uuid4().hex[:8]}"
 
     # Same session parameters start-file used to send, minus the file itself
     # and realtime_factor (which is now purely a client-side push-pacing
@@ -924,74 +1085,27 @@ def replay_fixture(
     }
 
     try:
-        started = http_post_json(f"{CORE_BASE_URL}/api/v1/sessions/start-stream", session_payload, timeout=30.0)
-        session_id = str(started.get("session_id"))
-
-        # Push the fixture as a live browser would: slice it into
-        # self-contained WAV chunks and POST them one at a time, sleeping
-        # between pushes so the customer's own trailing silence is what the
-        # server-side endpoint detector actually waits through -- not a
-        # single upload the server paces internally (start-file's model).
-        # realtime_factor=1.0 (default) reproduces true real-time pacing;
-        # >1.0 speeds pushes up (useful for fast smoke-testing, at the cost
-        # of no longer matching a live customer's cadence).
-        #
-        # The sleep is deliberately NOT applied after the last chunk. A real
-        # browser session (see kiosk-ui's useVoiceSession.stop()) force-
-        # flushes whatever audio is buffered and calls /audio/end the
-        # instant the customer releases the push-to-talk button -- it never
-        # waits out the remainder of a chunkSeconds interval first. Sleeping
-        # after the final chunk here would instead charge up to a full
-        # push_chunk_seconds (0.5s default) of pure harness dead time to
-        # every turn that reaches this loop's end (i.e. every turn where the
-        # explicit end mark -- not the server's own silence-timeout shortcut
-        # -- is what closes the turn), inflating post_speech_gap_ms with
-        # nothing a live customer would ever experience. Requires
-        # look-ahead (buffering one chunk) since iter_wav_chunks is a plain
-        # generator with no "is this the last one" signal of its own.
-        still_active = True
-        chunk_iter = iter_wav_chunks(fixture, push_chunk_seconds)
-        pending = next(chunk_iter, None)
-        while pending is not None:
-            wav_chunk, chunk_duration_s = pending
-            pending = next(chunk_iter, None)
-            still_active = http_post_wav_chunk(f"{CORE_BASE_URL}/api/v1/sessions/{session_id}/audio", wav_chunk, timeout=30.0)
-            if not still_active:
-                # Endpoint already fired and closed the session -- the rest
-                # of this fixture is just trailing silence padding anyway,
-                # so there is nothing left worth pushing.
-                break
-            if pending is not None and realtime_factor > 0:
-                time.sleep(chunk_duration_s / realtime_factor)
-
-        # explicit_end_mark: tell kiosk-core the turn is over the instant
-        # every real-audio chunk has been pushed, the same way a live
-        # customer releasing a push-to-talk button would -- instead of
-        # relying on the server's own silence-timeout/completeness-shortcut
-        # endpoint detector to notice the trailing silence and decide the
-        # sentence "reads complete". BaseAudioSession.signal_end() (invoked
-        # by POST /audio/end) stamps the voice-to-voice anchor and cuts off
-        # the frame supply immediately, bypassing the
-        # silence_run_seconds >= ... shortcut-firing race entirely (see
-        # BaseAudioSession._endpoint_transcript_stable's docstring for that
-        # race's documented 0%-80% run-to-run firing-rate swing). Only fires
-        # if the session is still open -- if the server's own detector
-        # already closed it (still_active is False above), there is nothing
-        # left to signal.
-        if still_active:
-            http_post_empty(f"{CORE_BASE_URL}/api/v1/sessions/{session_id}/audio/end", timeout=30.0)
-        elif explicit_end_mark:
-            # The server's own detector beat the explicit signal to it (fired
-            # during the short end-mark trailing pad) -- rare, but tell the
-            # caller so a suspiciously-fast/slow turn isn't mistaken for a
-            # clean explicit-end-mark measurement.
-            print(
-                f"[v2v] session={session_id} explicit_end_mark requested but the endpoint "
-                "detector already closed the session first -- this turn's timing still "
-                "reflects the silence-timeout/shortcut path, not the explicit signal."
+        if uplink == "ws":
+            # Hands-free path: persistent WebSocket, raw PCM frames. The
+            # harness is headless so it never reports playback_started; the
+            # headline stays the transport-independent clip-anchored
+            # ground-truth number.
+            session_id, snapshot = _stream_fixture_over_ws(
+                session_payload=session_payload,
+                fixture=fixture,
+                push_chunk_seconds=push_chunk_seconds,
+                realtime_factor=realtime_factor,
+                session_timeout=session_timeout,
             )
-
-        snapshot = poll_session(session_id, timeout=session_timeout)
+        else:
+            session_id, snapshot = _stream_fixture_over_rest(
+                session_payload=session_payload,
+                fixture=fixture,
+                push_chunk_seconds=push_chunk_seconds,
+                realtime_factor=realtime_factor,
+                explicit_end_mark=explicit_end_mark,
+                session_timeout=session_timeout,
+            )
         result.transcript = snapshot.get("transcript", "") or ""
         result.reply = snapshot.get("response", "") or ""
         if snapshot.get("error"):
@@ -1171,6 +1285,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--silence-timeout-seconds", type=float, default=1.1)
     parser.add_argument("--session-timeout", type=float, default=60.0, help="Max seconds to wait per turn")
     parser.add_argument(
+        "--uplink",
+        choices=("ws", "rest"),
+        default=os.getenv("V2V_UPLINK", "ws"),
+        help=(
+            "Audio transport to kiosk-core: 'ws' replays over the hands-free "
+            "WebSocket uplink (raw PCM frames, the browser's hands-free path); "
+            "'rest' uses the legacy chunked WAV POST (push-to-talk path). "
+            "Default: ws (override with V2V_UPLINK)."
+        ),
+    )
+    parser.add_argument(
         "--results-dir",
         type=Path,
         default=RESULTS_DIR,
@@ -1204,6 +1329,7 @@ def main(argv: list[str] | None = None) -> int:
                 silence_timeout_seconds=args.silence_timeout_seconds,
                 session_timeout=args.session_timeout,
                 push_chunk_seconds=args.push_chunk_seconds,
+                uplink=args.uplink,
             )
             report.turns.append(turn)
             if turn.error:
@@ -1222,7 +1348,7 @@ def main(argv: list[str] | None = None) -> int:
                     f"opener={turn.first_audio_was_opener}  "
                     f"final_flush_wait={turn.final_flush_wait_ms} ms  "
                     f"shortcut_fired={turn.endpoint_shortcut_fired}  "
-                    f"tts_ttfb={turn.tts_ttfb_ms} ms{gt}  "
+                    f"tts_first_sentence={turn.tts_ttfb_ms} ms{gt}  "
                     f"transcript={turn.transcript[:80]!r}"
                 )
 

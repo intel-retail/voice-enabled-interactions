@@ -96,6 +96,136 @@ def test_make_mcp_callable_infers_list_type_for_optional_anyof_items(monkeypatch
     )
 
 
+def test_mcp_fn_coalesces_duplicate_calls_within_a_turn(monkeypatch) -> None:
+    """A storm of identical tool calls in one turn hits the network once.
+
+    The int4 model intermittently emits the same function call many times in a
+    single turn (observed: place_order ×22). ADK runs each one, so without
+    per-turn coalescing every duplicate is a real MCP round-trip and, for a
+    write tool, a repeated cart mutation. _mcp_fn must dispatch the first call
+    and return its result to every identical repeat.
+    """
+    fake_call_tool = AsyncMock(return_value={"status": "success", "result": "added"})
+    monkeypatch.setattr(ordering_agent, "call_tool", fake_call_tool)
+    mcp_tool = MCPTool(name="place_order", server="core", description="Place order")
+    fn = OrderingAgent._make_mcp_callable("place_order", mcp_tool)
+
+    async def _drive() -> list[Any]:
+        # Bind the per-turn context exactly as chat() does before ADK runs.
+        ordering_agent._tool_call_count_ctx.set(ordering_agent._ToolCallCounter())
+        ordering_agent._tool_dispatch_cache_ctx.set({})
+        args = {"items": [{"product_id": "burger", "quantity": 1}]}
+        # Fire the same call three times (as sibling coroutines) within one turn.
+        return await asyncio.gather(
+            fn(**args), fn(**args), fn(**args)
+        )
+
+    results = _run(_drive())
+
+    # Only one real dispatch despite three identical calls.
+    fake_call_tool.assert_awaited_once()
+    # Every caller still gets the same result.
+    assert all(r == results[0] for r in results)
+
+
+def test_mcp_fn_does_not_coalesce_distinct_calls(monkeypatch) -> None:
+    """Different arguments to the same tool are dispatched separately."""
+    fake_call_tool = AsyncMock(return_value={"status": "success", "result": "ok"})
+    monkeypatch.setattr(ordering_agent, "call_tool", fake_call_tool)
+    mcp_tool = MCPTool(name="place_order", server="core", description="Place order")
+    fn = OrderingAgent._make_mcp_callable("place_order", mcp_tool)
+
+    async def _drive() -> None:
+        ordering_agent._tool_call_count_ctx.set(ordering_agent._ToolCallCounter())
+        ordering_agent._tool_dispatch_cache_ctx.set({})
+        await fn(items=[{"product_id": "burger", "quantity": 1}])
+        await fn(items=[{"product_id": "fries", "quantity": 1}])
+
+    _run(_drive())
+    assert fake_call_tool.await_count == 2
+
+
+class TestDeclineCloseRegex:
+    """`_DECLINE_CLOSE_RE` must only match a whole-utterance decline."""
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "No, thank you.",
+            "No thanks",
+            "That's all",
+            "That's it, thanks",
+            "I'm good",
+            "I'm all set",
+            "Nothing else",
+            "No",
+            "Nope",
+            "that'll be all",
+        ],
+    )
+    def test_pure_decline_matches(self, message: str) -> None:
+        assert ordering_agent._DECLINE_CLOSE_RE.match(message)
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "No burger, just fries",
+            "Add a coke please",
+            "No, I'd like a pizza instead",
+            "What do you have for dessert?",
+            "Can I get two burgers",
+        ],
+    )
+    def test_embedded_decline_does_not_match(self, message: str) -> None:
+        assert not ordering_agent._DECLINE_CLOSE_RE.match(message)
+
+
+def test_chat_declines_close_confirms_active_order(monkeypatch) -> None:
+    """"No, thank you." with an active cart finalises the order deterministically."""
+    pytest.importorskip("google.adk")
+    monkeypatch.setattr(ordering_agent, "get_all_tools", lambda: {"dummy": object()})
+
+    agent = OrderingAgent()
+    agent._bootstrapped = True
+    agent._agent = SimpleNamespace(name="kiosk_ordering_agent")
+    agent._session_service = _FakeSessionService()
+    agent._runner = _FakeRunner()
+    # Seed an active cart so the decline is read as "finalise", not "start over".
+    cart = ordering_agent._CartState()
+    cart.known_items = [{"product_id": "burger", "quantity": 1}]
+    agent._cart_states["session-1"] = cart
+
+    confirm = AsyncMock(return_value="Your order is confirmed. Your order number is 7. Enjoy your meal!")
+    monkeypatch.setattr(agent, "_force_confirm", confirm)
+
+    result = _run(agent.chat(message="No, thank you.", session_id="session-1", user_id="user-1"))
+
+    confirm.assert_awaited_once()
+    assert result["tool_calls"] == ["confirm_active_order"]
+    assert result["templated"] is True
+    assert "confirmed" in result["reply"]
+
+
+def test_chat_decline_without_cart_falls_through(monkeypatch) -> None:
+    """A bare "no thanks" with no active order never auto-confirms."""
+    pytest.importorskip("google.adk")
+    monkeypatch.setattr(ordering_agent, "get_all_tools", lambda: {"dummy": object()})
+
+    agent = OrderingAgent()
+    agent._bootstrapped = True
+    agent._agent = SimpleNamespace(name="kiosk_ordering_agent")
+    agent._session_service = _FakeSessionService()
+    agent._runner = _FakeRunner()
+
+    confirm = AsyncMock(return_value="should not be called")
+    monkeypatch.setattr(agent, "_force_confirm", confirm)
+
+    result = _run(agent.chat(message="No, thank you.", session_id="session-empty", user_id="user-1"))
+
+    confirm.assert_not_awaited()
+    assert result["tool_calls"] == []
+
+
 @pytest.mark.parametrize(
     ("message", "expected_tools"),
     [
