@@ -293,6 +293,44 @@ def test_webhook_treats_4xx_as_permanent_and_does_not_retry():
     assert len(calls) == 1, "a 4xx must not be retried"
 
 
+def test_webhook_retries_429():
+    """429 means "slow down", not "this payload is wrong", so it must use the
+    retry budget. AutonomyEventSink already excludes it; the sinks must agree."""
+    calls = []
+
+    def post(url, body, headers, timeout):
+        calls.append(url)
+        return 429
+
+    delivery = Delivery(sinks=[WebhookSink("http://inbox.example/hook", post_json=post)],
+                        max_retries=3, backoff_s=0)
+    assert delivery.dispatch(queue_event(1)) is False
+    assert len(calls) == 3, "429 must be retried, not treated as permanent"
+
+
+def test_webhook_survives_a_non_urlerror_transport_failure():
+    """_post_json can raise http.client.HTTPException or a bare OSError.
+    Letting one escape would abort dispatch and skip every later sink."""
+    import http.client
+
+    def post(url, body, headers, timeout):
+        raise http.client.IncompleteRead(b"")
+
+    sink = WebhookSink("http://inbox.example/hook", post_json=post)
+    delivered = []
+
+    class Recorder:
+        name = "recorder"
+
+        def push(self, event):
+            delivered.append(event.ref_id)
+            return True
+
+    delivery = Delivery(sinks=[sink, Recorder()], max_retries=1, backoff_s=0)
+    assert delivery.dispatch(queue_event(1)) is False
+    assert len(delivered) == 1, "a later sink must still be attempted"
+
+
 def test_webhook_retries_5xx():
     """A server-side failure is transient and should use the retry budget."""
     calls = []

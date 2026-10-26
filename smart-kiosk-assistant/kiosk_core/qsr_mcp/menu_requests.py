@@ -27,8 +27,16 @@ from kiosk_core.qsr_mcp.atomic_file import write_json_atomic
 logger = logging.getLogger(__name__)
 
 STATUS_PENDING = "pending"
+STATUS_EXECUTING = "executing"
 STATUS_APPROVED = "approved"
 STATUS_REJECTED = "rejected"
+
+# `approved` must mean "done", not "claimed". A single state for both is
+# indistinguishable after a crash between the claim and the write: the
+# request would sit at `approved` with `result: None` forever, unretryable
+# and with nothing to tell an operator it never actually ran. `executing` is
+# the claim; `approved` is only written once the result is recorded, so a
+# stale `executing` row is durable evidence of an interrupted execution.
 
 # Cap the stored history so a long-running kiosk cannot grow the file without
 # bound; pending requests are never evicted, only resolved ones.
@@ -85,6 +93,7 @@ def create(action: str, payload: dict[str, Any], reason: str | None = None) -> d
         "status": STATUS_PENDING,
         "created_at": time.time(),
         "resolved_at": None,
+        "executed_at": None,
         "result": None,
     }
     with _lock:
@@ -145,15 +154,39 @@ def resolve(
     return None
 
 
-def release(request_id: str) -> dict[str, Any] | None:
-    """Return a claimed (approved) request to pending so it can be retried.
+def claim(request_id: str) -> dict[str, Any] | None:
+    """Claim a pending request for execution (pending -> executing).
 
-    ``resolve`` only transitions *out of* pending, which makes approval
-    single-use. That is the right guarantee for a successful execution, but
-    it strands a request that was claimed and then failed for a transient
-    reason (a locked database, an I/O error): it would stay ``approved`` with
-    no result and every retry would be refused as "already approved". This
-    hands the claim back so an operator can approve it again.
+    This is the single-use gate: two concurrent operators cannot both claim
+    the same request, so the underlying write happens at most once. The claim
+    is deliberately *not* ``approved`` — see the status constants above.
+
+    Args:
+        request_id: The request to claim.
+
+    Returns:
+        The claimed request, or ``None`` if it does not exist or is no longer
+        pending. The caller must treat ``None`` as "do not execute".
+    """
+    with _lock:
+        for request in _requests:
+            if request["request_id"] != request_id:
+                continue
+            if request["status"] != STATUS_PENDING:
+                return None
+            request["status"] = STATUS_EXECUTING
+            _persist()
+            return dict(request)
+    return None
+
+
+def release(request_id: str) -> dict[str, Any] | None:
+    """Return a claimed request to pending so it can be retried.
+
+    A claim is single-use, which is the right guarantee once the write has
+    succeeded, but it would strand a request that was claimed and then failed
+    for a transient reason (a locked database, an I/O error). This hands the
+    claim back so an operator can approve it again.
 
     Args:
         request_id: The request to hand back.
@@ -166,10 +199,14 @@ def release(request_id: str) -> dict[str, Any] | None:
         for request in _requests:
             if request["request_id"] != request_id:
                 continue
-            if request["status"] != STATUS_APPROVED:
+            if request["status"] != STATUS_EXECUTING:
                 return None
             request["status"] = STATUS_PENDING
-            request.pop("resolved_at", None)
+            # Set rather than popped: every other record carries these keys,
+            # so dropping them would make this one a different shape to any
+            # reader or REST response.
+            request["resolved_at"] = None
+            request["executed_at"] = None
             request["result"] = None
             _persist()
             return dict(request)
@@ -177,7 +214,7 @@ def release(request_id: str) -> dict[str, Any] | None:
 
 
 def fail(request_id: str, error: str) -> dict[str, Any] | None:
-    """Mark a claimed (approved) request rejected after a permanent failure.
+    """Mark a claimed request rejected after a permanent failure.
 
     Used when the underlying write is refused for a reason that retrying
     cannot fix (an invalid price, a duplicate product id). Unlike
@@ -195,7 +232,7 @@ def fail(request_id: str, error: str) -> dict[str, Any] | None:
         for request in _requests:
             if request["request_id"] != request_id:
                 continue
-            if request["status"] != STATUS_APPROVED:
+            if request["status"] != STATUS_EXECUTING:
                 return None
             request["status"] = STATUS_REJECTED
             request["resolved_at"] = time.time()
@@ -208,11 +245,9 @@ def fail(request_id: str, error: str) -> dict[str, Any] | None:
 def complete(request_id: str, result: dict[str, Any]) -> dict[str, Any] | None:
     """Record the outcome of a successfully executed claimed request.
 
-    The claim made by ``resolve(..., STATUS_APPROVED)`` necessarily leaves the
-    request already out of pending, so ``resolve`` cannot be used a second
-    time to attach the result — it would return ``None`` and discard it. This
-    writes the result onto the request the operator already claimed, keeping
-    the audit trail complete.
+    This is the only transition into ``approved``: the status and the result
+    are written together, so an ``approved`` request always carries the
+    outcome of the write that actually happened.
 
     Args:
         request_id: The claimed request.
@@ -226,10 +261,25 @@ def complete(request_id: str, result: dict[str, Any]) -> dict[str, Any] | None:
         for request in _requests:
             if request["request_id"] != request_id:
                 continue
-            if request["status"] != STATUS_APPROVED:
+            if request["status"] != STATUS_EXECUTING:
                 return None
-            request["resolved_at"] = time.time()
+            now = time.time()
+            request["status"] = STATUS_APPROVED
+            request["resolved_at"] = now
+            request["executed_at"] = now
             request["result"] = result
             _persist()
             return dict(request)
     return None
+
+
+def stale_executing() -> list[dict[str, Any]]:
+    """Requests left mid-execution, i.e. claimed but never completed.
+
+    On a fresh process these can only be the result of an interrupted
+    execution (a crash or a kill between the claim and the write). Whether
+    the underlying write landed is unknown, so they are surfaced for an
+    operator rather than retried automatically.
+    """
+    with _lock:
+        return [dict(r) for r in _requests if r["status"] == STATUS_EXECUTING]

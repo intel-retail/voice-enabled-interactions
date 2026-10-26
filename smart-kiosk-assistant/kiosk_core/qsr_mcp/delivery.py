@@ -14,12 +14,11 @@ identical body cannot help.
 """
 from __future__ import annotations
 
+import http.client
 import logging
 import queue
 import threading
 import time
-import urllib.error
-import urllib.request
 from typing import Callable, Protocol
 
 from kiosk_core.qsr_mcp.autonomy import PermanentDeliveryError, _post_json
@@ -70,11 +69,21 @@ class WebhookSink:
             status = self._post_json(
                 self._url, data, {"Content-Type": "application/json"}, self._timeout_s
             )
-        except (urllib.error.URLError, TimeoutError):
+        except (OSError, http.client.HTTPException) as error:
+            # Same catch as AutonomyEventSink: _post_json can raise an
+            # http.client.HTTPException (IncompleteRead, BadStatusLine) or a
+            # bare OSError, neither of which is a URLError. Letting one escape
+            # would abort Delivery.dispatch and skip every later sink for this
+            # event.
+            logger.warning(
+                "[webhook] event %s delivery failed: %s", event.ref_id, error
+            )
             return False
         if 200 <= status < 300:
             return True
-        if 400 <= status < 500:
+        # 429 is excluded: it means "slow down", not "this payload is wrong",
+        # so it must use the retry budget rather than being dropped.
+        if 400 <= status < 500 and status != 429:
             raise PermanentDeliveryError(
                 f"webhook rejected event {event.ref_id}: HTTP {status}"
             )
@@ -206,3 +215,27 @@ class BackgroundDispatcher:
     def join(self, timeout: float | None = None) -> None:
         """Block until the backlog drains. Intended for tests."""
         self._queue.join()
+
+    def stop(self, timeout: float | None = 2.0) -> None:
+        """Shut the worker down, draining whatever is already queued.
+
+        Sends the ``None`` sentinel the run loop already recognises. Safe to
+        call when no worker was ever started: ``_ensure_worker`` is lazy, so
+        there may be nothing to stop.
+
+        Args:
+            timeout: Seconds to wait for the worker to exit. The thread is a
+                daemon, so a hung remote cannot block process exit regardless.
+        """
+        with self._lock:
+            thread = self._thread
+            self._thread = None
+        if thread is None or not thread.is_alive():
+            return
+        try:
+            self._queue.put_nowait(None)
+        except queue.Full:
+            # Backlog is full of events we are about to discard anyway; the
+            # daemon thread dies with the process.
+            return
+        thread.join(timeout)

@@ -50,6 +50,10 @@ def menu_env(monkeypatch, tmp_path):
     importlib.reload(board_module)
     import kiosk_core.qsr_mcp.mcp_service as mcp_service
     importlib.reload(mcp_service)
+    # Build the runtime state the way the app's startup does. Without this
+    # the first gated call would self-initialise and rebuild the policy gate,
+    # discarding any registration a test made on `mcp_service._policy`.
+    mcp_service.init(force=True)
 
     from kiosk_core.ordering.repository import SqliteProductRepository
 
@@ -391,3 +395,67 @@ def test_product_id_cannot_be_changed(menu_env):
     assert "product_id" not in menu.UPDATABLE_FIELDS
     with pytest.raises(menu.MenuError, match="unknown field"):
         menu.update_item("P1", source="agent")
+
+
+# ---------------------------------------------------------------------------
+# Approval record shape and lifecycle
+# ---------------------------------------------------------------------------
+
+def test_release_keeps_every_record_field_present(menu_env):
+    """Popping a key instead of nulling it makes a released request a
+    different shape from a fresh one, which readers have to special-case."""
+    from kiosk_core.qsr_mcp import menu_requests
+
+    created = menu_requests.create("update_menu_item", {"product_id": "P1"}, None)
+    menu_requests.claim(created["request_id"])
+    released = menu_requests.release(created["request_id"])
+
+    assert released["status"] == menu_requests.STATUS_PENDING
+    assert set(released) == set(created)
+    for field in ("resolved_at", "executed_at", "result"):
+        assert field in released and released[field] is None
+
+
+def test_a_claim_cannot_be_made_twice(menu_env):
+    """The claim is what stops two operators executing the same approval."""
+    from kiosk_core.qsr_mcp import menu_requests
+
+    created = menu_requests.create("update_menu_item", {"product_id": "P1"}, None)
+    assert menu_requests.claim(created["request_id"]) is not None
+    assert menu_requests.claim(created["request_id"]) is None
+
+
+def test_force_init_releases_the_previous_runtime(monkeypatch):
+    """A rebuild that leaves the old SQLite connection and worker threads
+    behind leaks a little on every test and a lot in a long-lived process."""
+    from kiosk_core.qsr_mcp import mcp_service
+
+    # Dispatchers only exist when a destination is configured; the default
+    # stack performs no outbound delivery at all.
+    monkeypatch.setattr(
+        mcp_service.cfg, "QSR_MCP_WEBHOOK_URL", "http://inbox.example/hook"
+    )
+
+    mcp_service.init(force=True)
+    old_log = mcp_service._log
+    old_dispatchers = list(mcp_service._dispatchers)
+    assert old_dispatchers, "a configured webhook must produce a dispatcher"
+
+    # The worker is started lazily, so a rebuild is only a real test of the
+    # cleanup once something has actually been submitted.
+    from kiosk_core.qsr_mcp.event_log import new_event
+
+    for dispatcher in old_dispatchers:
+        dispatcher.submit(
+            new_event("board_mode_changed", "svc", "s1", {"mode": "full"}, "warmup")
+        )
+    threads = [d._thread for d in old_dispatchers]
+    assert all(t is not None and t.is_alive() for t in threads)
+
+    mcp_service.init(force=True)
+
+    assert mcp_service._log is not old_log
+    for thread in threads:
+        if thread is not None:
+            thread.join(timeout=2.0)
+            assert not thread.is_alive(), "old dispatcher thread was not stopped"

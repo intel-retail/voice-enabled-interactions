@@ -29,16 +29,22 @@ durable SQLite/JSONL log's on-disk format are unchanged by this migration.
 | `kiosk_core/qsr_mcp/menu_requests.py` | Durable queue of menu changes awaiting operator approval |
 | `kiosk_core/qsr_mcp/api.py` | Operator-only REST endpoints to approve/reject those requests |
 | `kiosk_core/qsr_mcp/atomic_file.py` | Crash-safe JSON writes (temp file + `fsync` + `os.replace`) shared by `board_state` / `menu_requests` |
+| `kiosk_core/queue_client.py` | HTTP client to the standalone `queue-service` |
 
 **Initialisation is explicit.** Importing `mcp_service` is side-effect free:
 `mcp_service.init()` is what opens the durable log, builds the delivery sinks
-and the queue-service client, and points `board_state` / `menu_requests` at
-their configured paths. `main.py` calls it during startup (and
-`run_mcp_server` / `start_queue_poller` call it too). It is idempotent, reads
-configuration at call time rather than import time, and takes `force=True` to
-rebuild — which is how tests get a clean instance. Every runtime entry point
-also self-initialises, so a direct tool call still works standalone.
-| `kiosk_core/queue_client.py` | HTTP client to the standalone `queue-service` |
+and the queue-service client, points `board_state` / `menu_requests` at their
+configured paths, and registers the policy gates. `main.py` calls it during
+startup (and `run_mcp_server` / `start_queue_poller` call it too). It is
+idempotent, and takes `force=True` to rebuild — which closes the previous log
+and stops the previous dispatcher threads rather than leaking them. Every
+runtime entry point also self-initialises, so a direct tool call still works
+standalone.
+
+`init()` re-reads per-call configuration, but a handful of values are still
+bound at import time and a rebuild will **not** pick them up:
+`MCP_SERVICE_ENABLED`, `STORE_ID`, and `MCP_HOST` / `MCP_PORT` /
+`MCP_TRANSPORT`. Changing any of those needs a process restart.
 
 Started from `main.py`'s lifespan when `KIOSK_CORE_QSR_MCP_ENABLED=true`
 (default). Listens on `KIOSK_CORE_QSR_MCP_PORT` (default `8014`,
@@ -61,12 +67,17 @@ streamable-http transport) — distinct from the ordering feature's `/mcp`.
 **Read tools**
 - `get_queue_depth()` — current count/status from queue-service.
 - `get_queue_history(period)` — sample count/avg/max for
-  `today|yesterday|all|YYYY-MM-DD`.
+  `today|yesterday|all|YYYY-MM-DD`. On the SQLite backend this is a single
+  `COUNT`/`AVG`/`MAX` over `json_extract(envelope, '$.payload.count')`, so
+  `all` stays O(1) in memory however long the log grows; the JSONL backend
+  falls back to reducing rows in Python.
 - `get_order_stats(period, top_n)` — confirmed order count, revenue, top
   items, from the existing ordering SQLite DB.
 - `get_board_state()` — current board mode and when/why it last changed.
 - `get_menu_requests(status)` — menu changes awaiting (or past) operator
-  approval; `pending` (default), `approved`, `rejected` or `all`.
+  approval; `pending` (default), `executing`, `approved`, `rejected` or
+  `all`. The response also carries an `incomplete` list of requests stuck in
+  `executing` from an interrupted run.
 
 **Act tools**
 
@@ -116,14 +127,29 @@ approve its own request would make the gate meaningless:
 | GET | `/api/v1/qsr/menu/requests?status=pending` | List requests |
 | POST | `/api/v1/qsr/menu/requests/{id}/approve` | Approve and execute |
 | POST | `/api/v1/qsr/menu/requests/{id}/reject` | Reject without executing |
+| POST | `/api/v1/qsr/menu/items/{id}/release` | Hand an agent-claimed product back to `products.yaml` |
 
-Approval is single-use: the request is marked resolved *before* the write, so
-two concurrent operators cannot both execute it. The two failure modes are
-then kept apart. A caller-fixable rejection (`MenuError` — duplicate id, bad
-price, unknown product) marks the request **rejected** with the error, since
-re-approving it unchanged would fail identically. Any other failure (a locked
-database, a disk error) **releases the request back to `pending`**, so a
-transient fault really is retryable rather than consuming the approval.
+A request moves `pending -> executing -> approved | rejected`:
+
+| Status | Meaning |
+|---|---|
+| `pending` | Awaiting an operator |
+| `executing` | Claimed, write in progress. Seeing this on a freshly started process means an execution was interrupted — the list endpoint reports those separately as `incomplete`, because whether the write landed is unknown and must not be retried blindly |
+| `approved` | Executed. Always carries `result` and `executed_at` |
+| `rejected` | Refused by an operator, or failed permanently |
+
+Approval is single-use: the claim happens *before* the write, so two
+concurrent operators cannot both execute it. `executing` is deliberately a
+distinct state from `approved` — collapsing them would make a crash between
+the claim and the write indistinguishable from a completed change, leaving
+an `approved` request with no result that could never be retried.
+
+The two failure modes are then kept apart. A caller-fixable rejection
+(`MenuError` — duplicate id, bad price, unknown product) marks the request
+**rejected** with the error, since re-approving it unchanged would fail
+identically. Any other failure (a locked database, a disk error) **releases
+the request back to `pending`**, so a transient fault really is retryable
+rather than consuming the approval.
 
 **Persistence vs. `products.yaml`.** The YAML is the *default* catalogue and
 is re-applied on every startup. A row is marked `source='agent'` — which
@@ -136,8 +162,10 @@ operator workflow for every item the agent has not taken over.
 An **availability-only** change deliberately does *not* claim the row: the
 seeder never writes `is_available`, so an 86'd item stays 86'd across a
 restart without permanently detaching it from YAML control. To hand a claimed
-row back, call `menu.release_item(product_id)` — without it, a single price
-change would make that item ignore `products.yaml` forever.
+row back, `POST /api/v1/qsr/menu/items/{id}/release` — without it, a single
+price change would make that item ignore `products.yaml` forever. The release
+is operator-only, like approve/reject: letting the agent release its own
+claim would allow a restart to undo a change it had just made.
 
 | Variable | Default | Effect |
 |---|---|---|
@@ -154,6 +182,13 @@ declared no-op.** It validates its arguments and returns
 success acknowledgement, because nothing dispatches on those registrations —
 acknowledging a subscription that never fires is worse than refusing it. Use
 the autonomy push below for server-initiated events.
+
+> **Breaking change.** `subscribed` previously returned the event-type string
+> (truthy); it is now the boolean `false`. A caller doing
+> `if response["subscribed"]` now correctly sees that nothing was registered,
+> but a caller using the value as an identifier will break. Nothing in this
+> repository consumes it — **verify against the Central QSR Agent**, which
+> lives outside this tree, before deploying.
 
 ## Event autonomy (push to the Central QSR Agent)
 

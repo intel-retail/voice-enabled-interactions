@@ -102,6 +102,60 @@ class DurableLog(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class NumericSummary:
+    """Count / average / maximum of one numeric payload field."""
+
+    count: int
+    average: float
+    maximum: int
+
+
+def summarise_numeric(
+    log: "DurableLog",
+    field: str,
+    event_type: str | None = None,
+    since_ts_ms: int | None = None,
+    until_ts_ms: int | None = None,
+) -> NumericSummary:
+    """Summarise a numeric payload field without materialising the events.
+
+    Backends that can do the arithmetic in storage (``SQLiteLog``) do so, so
+    an unbounded query — "the queue trend for all time" — costs one row
+    instead of every sample ever recorded. Backends that cannot fall back to
+    reading, which is why this is a free function rather than a required
+    protocol method.
+
+    Args:
+        log: The log to query.
+        field: Payload key to summarise, e.g. ``"count"``.
+        event_type: Restrict to this event type.
+        since_ts_ms: Only include events at or after this epoch-ms.
+        until_ts_ms: Only include events strictly before this epoch-ms.
+    """
+    aggregate = getattr(log, "aggregate_numeric", None)
+    if aggregate is not None:
+        return aggregate(field, event_type, since_ts_ms, until_ts_ms)
+    events = log.read(
+        event_type=event_type,
+        since_ts_ms=since_ts_ms,
+        until_ts_ms=until_ts_ms,
+        limit=None,
+    )
+    values = [
+        e.payload.get(field, 0)
+        for e in events
+        if isinstance(e.payload.get(field), (int, float))
+    ]
+    if not values:
+        return NumericSummary(count=0, average=0.0, maximum=0)
+    return NumericSummary(
+        count=len(values),
+        average=round(sum(values) / len(values), 2),
+        maximum=int(max(values)),
+    )
+
+
 class SQLiteLog:
     """Single-box durable log. Thread-safe via a process-local lock."""
 
@@ -185,6 +239,48 @@ class SQLiteLog:
 
     def close(self) -> None:
         self._conn.close()
+
+    def aggregate_numeric(
+        self,
+        field: str,
+        event_type: str | None = None,
+        since_ts_ms: int | None = None,
+        until_ts_ms: int | None = None,
+    ) -> NumericSummary:
+        """COUNT/AVG/MAX a numeric payload field inside SQLite.
+
+        Keeps an unbounded query (``period="all"``) to a single row rather
+        than loading every sample ever recorded onto the heap just to reduce
+        it to three numbers.
+        """
+        # The field name is interpolated into the JSON path, so it must not
+        # be attacker-controlled; all call sites pass a literal.
+        if not field.isidentifier():
+            raise ValueError(f"unsupported payload field: {field!r}")
+        value = f"json_extract(envelope, '$.payload.{field}')"
+        query = (
+            f"SELECT COUNT({value}), AVG({value}), MAX({value}) "
+            f"FROM events WHERE {value} IS NOT NULL"
+        )
+        params: list[object] = []
+        if event_type is not None:
+            query += " AND event_type = ?"
+            params.append(event_type)
+        if since_ts_ms is not None:
+            query += " AND ts_ms >= ?"
+            params.append(since_ts_ms)
+        if until_ts_ms is not None:
+            query += " AND ts_ms < ?"
+            params.append(until_ts_ms)
+        with self._lock:
+            count, average, maximum = self._conn.execute(query, params).fetchone()
+        if not count:
+            return NumericSummary(count=0, average=0.0, maximum=0)
+        return NumericSummary(
+            count=int(count),
+            average=round(float(average), 2),
+            maximum=int(maximum),
+        )
 
 
 class JSONLFileLog:

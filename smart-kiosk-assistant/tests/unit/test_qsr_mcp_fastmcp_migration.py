@@ -567,3 +567,63 @@ def test_tools_work_without_an_explicit_init(monkeypatch, tmp_path):
     result = mcp_service.get_queue_history(period="today")
     assert result["samples"] == 0
     assert mcp_service._log is not None, "first use must self-initialise"
+
+
+# ---------------------------------------------------------------------------
+# Queue-history aggregation
+# ---------------------------------------------------------------------------
+
+def test_sqlite_aggregate_matches_the_python_fallback(tmp_path):
+    """period='all' must not load every sample ever recorded just to reduce
+    it to three numbers. The SQL path has to agree with the row-by-row one."""
+    from kiosk_core.qsr_mcp.event_log import (
+        JSONLFileLog,
+        SQLiteLog,
+        new_event,
+        summarise_numeric,
+    )
+
+    counts = [3, 7, 2, 11, 5]
+    sqlite_log = SQLiteLog(":memory:", "svc")
+    jsonl_log = JSONLFileLog(str(tmp_path / "log.jsonl"), "svc")
+    for i, count in enumerate(counts):
+        for log in (sqlite_log, jsonl_log):
+            log.append(
+                new_event("queue_depth_sample", "svc", "s1", {"count": count}, f"r{i}")
+            )
+            # A different event type carrying the same field must be excluded.
+            log.append(
+                new_event("board_mode_changed", "svc", "s1", {"count": 999}, f"b{i}")
+            )
+
+    expected = (len(counts), round(sum(counts) / len(counts), 2), max(counts))
+    for log in (sqlite_log, jsonl_log):
+        summary = summarise_numeric(log, "count", event_type="queue_depth_sample")
+        assert (summary.count, summary.average, summary.maximum) == expected
+
+    assert hasattr(sqlite_log, "aggregate_numeric")
+    assert not hasattr(jsonl_log, "aggregate_numeric")
+    sqlite_log.close()
+
+
+def test_aggregate_respects_the_time_window():
+    from kiosk_core.qsr_mcp.event_log import SQLiteLog, new_event, summarise_numeric
+
+    log = SQLiteLog(":memory:", "svc")
+    log.append(new_event("queue_depth_sample", "svc", "s1", {"count": 4}, "a"))
+    empty = summarise_numeric(
+        log, "count", event_type="queue_depth_sample", since_ts_ms=10**15
+    )
+    assert (empty.count, empty.average, empty.maximum) == (0, 0.0, 0)
+    log.close()
+
+
+def test_aggregate_rejects_a_non_identifier_field():
+    """The field name is interpolated into the JSON path, so it must be
+    validated rather than trusted."""
+    from kiosk_core.qsr_mcp.event_log import SQLiteLog
+
+    log = SQLiteLog(":memory:", "svc")
+    with pytest.raises(ValueError):
+        log.aggregate_numeric("count'; DROP TABLE events--")
+    log.close()

@@ -49,7 +49,12 @@ from kiosk_core.qsr_mcp import board_state
 from kiosk_core.qsr_mcp.autonomy import AutonomyEventSink
 from kiosk_core.qsr_mcp.delivery import BackgroundDispatcher, Delivery
 from kiosk_core.qsr_mcp import menu, menu_requests
-from kiosk_core.qsr_mcp.event_log import DurableLog, build_log, new_event
+from kiosk_core.qsr_mcp.event_log import (
+    DurableLog,
+    build_log,
+    new_event,
+    summarise_numeric,
+)
 from kiosk_core.qsr_mcp.policy import GateLevel, PolicyGate
 
 logger = logging.getLogger(__name__)
@@ -94,11 +99,19 @@ _init_lock = threading.Lock()
 def init(force: bool = False) -> None:
     """Build the service's runtime state. Idempotent.
 
-    Reads configuration *now* rather than at import time, so tests (and a
-    reloaded `config` module) see the values they set.
+    Reads the configuration it owns — log backend and path, delivery and
+    autonomy sinks, queue client, persistence paths and policy gate levels —
+    *now* rather than at import time, so tests (and a reloaded ``config``
+    module) see the values they set.
+
+    Not covered: ``MCP_SERVICE_ENABLED``, ``STORE_ID``, ``MCP_HOST``,
+    ``MCP_PORT`` and ``MCP_TRANSPORT`` are module constants bound at import,
+    because ``mcp_server`` imports them by value. Changing those still
+    requires a module reload.
 
     Args:
-        force: Rebuild even if already initialised. Used by tests.
+        force: Rebuild even if already initialised, releasing the previous
+            log connection and delivery workers first. Used by tests.
     """
     global _log, _delivery, _autonomy_delivery, _dispatchers
     global _queue_client, _initialised
@@ -106,6 +119,8 @@ def init(force: bool = False) -> None:
     with _init_lock:
         if _initialised and not force:
             return
+        if _initialised:
+            _release_runtime_state()
 
         _log = build_log(
             backend=cfg.QSR_MCP_LOG_BACKEND if MCP_SERVICE_ENABLED else "memory",
@@ -148,8 +163,35 @@ def init(force: bool = False) -> None:
         board_state.configure(cfg.QSR_MCP_BOARD_STATE_PATH)
         menu_requests.configure(cfg.QSR_MENU_REQUESTS_PATH)
         _queue_client = QueueClient() if cfg.QUEUE_SERVICE_ENABLED else None
+        _register_policies()
 
         _initialised = True
+
+
+def _release_runtime_state() -> None:
+    """Close the resources a previous :func:`init` opened.
+
+    Rebuilding without this leaks an open SQLite connection, an httpx
+    connection pool and a live worker thread per rebuild. Harmless once, but
+    it accumulates across a test suite that rebuilds per test.
+    """
+    for dispatcher in _dispatchers:
+        try:
+            dispatcher.stop()
+        except Exception:  # pragma: no cover - best-effort teardown
+            logger.exception("[QSR-MCP] Failed to stop delivery worker")
+    if _queue_client is not None:
+        try:
+            _queue_client.close()
+        except Exception:  # pragma: no cover - best-effort teardown
+            logger.exception("[QSR-MCP] Failed to close queue client")
+    if _log is not None:
+        close = getattr(_log, "close", None)
+        if close is not None:
+            try:
+                close()
+            except Exception:  # pragma: no cover - best-effort teardown
+                logger.exception("[QSR-MCP] Failed to close event log")
 
 
 def _ensure_init() -> None:
@@ -349,23 +391,21 @@ def get_queue_history(period: str = "today") -> dict[str, Any]:
     start_ms, end_ms = _day_bounds_ms(period)
     _ensure_init()
     assert _log is not None  # set by init()
-    # Both filters are applied by the storage backend, so a period query
-    # reads only its own rows instead of pulling every event of every type
-    # onto the heap. The window itself bounds the result (one day is ~2,880
-    # samples at a 30s poll), so no additional cap is needed; "all" is
-    # unbounded by definition of the question being asked.
-    samples = _log.read(
+    # Count, average and max are computed by the storage backend, so even an
+    # unbounded query (period="all") costs one row rather than loading every
+    # sample ever recorded onto the heap to reduce it to three numbers.
+    summary = summarise_numeric(
+        _log,
+        "count",
         event_type="queue_depth_sample",
         since_ts_ms=start_ms,
         until_ts_ms=end_ms,
-        limit=None,
     )
-    counts = [e.payload.get("count", 0) for e in samples]
     return {
         "period": period,
-        "samples": len(counts),
-        "avg_count": round(sum(counts) / len(counts), 2) if counts else 0.0,
-        "max_count": max(counts) if counts else 0,
+        "samples": summary.count,
+        "avg_count": summary.average,
+        "max_count": summary.maximum,
     }
 
 
@@ -450,11 +490,26 @@ def get_board_state() -> dict[str, Any]:
         "Menu changes awaiting operator approval, newest last. Use this to "
         "check whether a previously requested change has been actioned."
     ),
-    schema={"status": "str ('pending'|'approved'|'rejected'|'all')"},
+    schema={"status": "str ('pending'|'executing'|'approved'|'rejected'|'all')"},
 )
 def get_menu_requests(status: str = "pending") -> dict[str, Any]:
     requested = None if status == "all" else status
-    return {"status": status, "requests": menu_requests.list_requests(requested)}
+    response: dict[str, Any] = {
+        "status": status,
+        "requests": menu_requests.list_requests(requested),
+    }
+    # Surfaced unconditionally: a request left mid-execution by a crash is
+    # invisible under any single status filter an operator would think to
+    # ask for, and it is the one state that needs a human to check whether
+    # the write actually landed.
+    incomplete = menu_requests.stale_executing()
+    if incomplete:
+        response["incomplete"] = incomplete
+        response["incomplete_note"] = (
+            "claimed but never completed — execution was interrupted; verify "
+            "whether the change was applied before approving again"
+        )
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -467,13 +522,11 @@ _SET_BOARD_MODE_DESCRIPTION = (
 )
 _SET_BOARD_MODE_SCHEMA = {"mode": "str ('full'|'simplified')", "reason": "str|None"}
 
-_policy.register(
-    "set_board_mode", GateLevel.AUTOMATIC, max_calls=20, per_seconds=60.0
-)
+_SET_BOARD_MODE_GATE = GateLevel.AUTOMATIC
 _ACT_TOOLS["set_board_mode"] = {
     "description": _SET_BOARD_MODE_DESCRIPTION,
     "schema": _SET_BOARD_MODE_SCHEMA,
-    "gate": GateLevel.AUTOMATIC.value,
+    "gate": _SET_BOARD_MODE_GATE.value,
 }
 
 
@@ -496,6 +549,7 @@ def set_board_mode(mode: str, reason: Optional[str] = None) -> dict[str, Any]:
     acting, matching the old SDK's ``ServiceServer.call_action`` wire
     contract: ``{"executed", "level", "result"}`` on success or
     ``{"executed": False, "level", "reason"}`` when gated/rate-limited."""
+    _ensure_init()
     decision = _policy.evaluate("set_board_mode", {"mode": mode, "reason": reason})
     if not decision.allowed:
         return {
@@ -555,14 +609,38 @@ _UPDATE_MENU_ITEM_SCHEMA = {
 _ADD_GATE = _gate_level(cfg.QSR_MENU_ADD_GATE, GateLevel.NEEDS_APPROVAL)
 _UPDATE_GATE = _gate_level(cfg.QSR_MENU_UPDATE_GATE, GateLevel.AUTOMATIC)
 
-_policy.register(
-    "add_menu_item", _ADD_GATE,
-    max_calls=cfg.QSR_MENU_MAX_CALLS, per_seconds=cfg.QSR_MENU_PER_SECONDS,
-)
-_policy.register(
-    "update_menu_item", _UPDATE_GATE,
-    max_calls=cfg.QSR_MENU_MAX_CALLS, per_seconds=cfg.QSR_MENU_PER_SECONDS,
-)
+
+def _register_policies() -> None:
+    """(Re)build the policy gate from current configuration.
+
+    Called by :func:`init`, not at import, so a changed gate level is picked
+    up — and so ``init(force=True)`` resets the rate-limit counters with it.
+    The ``_ACT_TOOLS`` gate values that ``describe`` reports are refreshed
+    here too, or they would advertise the import-time level.
+    """
+    global _policy, _ADD_GATE, _UPDATE_GATE
+
+    _ADD_GATE = _gate_level(cfg.QSR_MENU_ADD_GATE, GateLevel.NEEDS_APPROVAL)
+    _UPDATE_GATE = _gate_level(cfg.QSR_MENU_UPDATE_GATE, GateLevel.AUTOMATIC)
+
+    gate = PolicyGate()
+    gate.register(
+        "set_board_mode", _SET_BOARD_MODE_GATE, max_calls=20, per_seconds=60.0
+    )
+    gate.register(
+        "add_menu_item", _ADD_GATE,
+        max_calls=cfg.QSR_MENU_MAX_CALLS, per_seconds=cfg.QSR_MENU_PER_SECONDS,
+    )
+    gate.register(
+        "update_menu_item", _UPDATE_GATE,
+        max_calls=cfg.QSR_MENU_MAX_CALLS, per_seconds=cfg.QSR_MENU_PER_SECONDS,
+    )
+    _policy = gate
+
+    _ACT_TOOLS["set_board_mode"]["gate"] = _SET_BOARD_MODE_GATE.value
+    _ACT_TOOLS["add_menu_item"]["gate"] = _ADD_GATE.value
+    _ACT_TOOLS["update_menu_item"]["gate"] = _UPDATE_GATE.value
+
 _ACT_TOOLS["add_menu_item"] = {
     "description": _ADD_MENU_ITEM_DESCRIPTION,
     "schema": _ADD_MENU_ITEM_SCHEMA,
@@ -611,6 +689,11 @@ def approve_menu_request(request_id: str) -> dict[str, Any]:
     request for good, while any other error hands it back to pending so the
     operator can approve it again.
 
+    The claim moves the request to ``executing``, not ``approved``: the
+    latter is written only once the result is recorded, so a crash mid-write
+    leaves visible evidence rather than an ``approved`` request that never
+    ran.
+
     Raises:
         menu.MenuError: If the request is unknown, already resolved, or the
             underlying write is rejected.
@@ -621,7 +704,7 @@ def approve_menu_request(request_id: str) -> dict[str, Any]:
     if request["status"] != menu_requests.STATUS_PENDING:
         raise menu.MenuError(f"request already {request['status']}: {request_id}")
 
-    claimed = menu_requests.resolve(request_id, menu_requests.STATUS_APPROVED)
+    claimed = menu_requests.claim(request_id)
     if claimed is None:
         raise menu.MenuError(f"request already resolved: {request_id}")
 
@@ -681,6 +764,7 @@ def _gated_menu_call(
     recorded durably and returned with its ``request_id`` so an operator can
     approve it later, instead of the agent's intent being dropped.
     """
+    _ensure_init()
     decision = _policy.evaluate(action, {**payload, "reason": reason})
     if not decision.allowed:
         response: dict[str, Any] = {
