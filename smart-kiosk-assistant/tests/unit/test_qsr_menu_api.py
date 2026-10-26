@@ -328,3 +328,37 @@ def test_approve_reports_a_conflict_when_its_result_cannot_be_recorded(api_env):
     assert response["executed"] is True
     assert "conflict" in response, "a silent success would mislead the operator"
     assert api_env.requests.get(request["request_id"])["status"] == "rejected"
+
+
+def test_operator_endpoints_are_not_coroutines(api_env):
+    """Every handler must stay synchronous so FastAPI runs it in a thread.
+
+    These handlers do blocking I/O: :mod:`menu` opens a synchronous
+    ``sqlite3`` connection and takes ``BEGIN IMMEDIATE``, and
+    :mod:`menu_requests` writes its JSON store under a lock. As ``async def``
+    that work would run on the event loop, where it deadlocks against the
+    ordering feature: ordering holds an ``aiosqlite`` write transaction open
+    across ``await`` points on the same database, so a blocked loop can never
+    resume it to ``COMMIT`` and release the write lock. ``BEGIN IMMEDIATE``
+    then spins for its full timeout and fails ``database is locked`` while
+    the whole kiosk-core process is frozen.
+
+    Adding ``async`` to any of these reintroduces that freeze, so pin it.
+    """
+    import kiosk_core.qsr_mcp.api as api_module
+
+    endpoints = {
+        route.name: route.endpoint
+        for route in api_module.router.routes
+        if hasattr(route, "endpoint")
+    }
+    assert endpoints, "router exposed no endpoints — fixture wiring changed"
+
+    offenders = [
+        name
+        for name, fn in endpoints.items()
+        if asyncio.iscoroutinefunction(fn)
+    ]
+    assert not offenders, (
+        f"blocking operator endpoints must not be async def: {offenders}"
+    )

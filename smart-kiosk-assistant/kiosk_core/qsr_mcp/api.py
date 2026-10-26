@@ -9,6 +9,17 @@ executed. These endpoints are how a human actions that queue.
 
 Deliberately **not** exposed as MCP tools: the agent must not be able to
 approve its own gated request, which would make the gate meaningless.
+
+Every handler here is a plain ``def``, not ``async def``, so FastAPI runs it
+in a worker thread. They all do blocking I/O — :mod:`menu` opens a synchronous
+``sqlite3`` connection and takes ``BEGIN IMMEDIATE``; :mod:`menu_requests`
+writes its JSON store under a lock. On the event loop that blocking write
+would deadlock against the ordering feature, which holds an ``aiosqlite``
+write transaction open across ``await`` points on the *same* database: the
+blocked loop can never resume the ordering coroutine to let it ``COMMIT`` and
+release the write lock, so ``BEGIN IMMEDIATE`` spins for its full timeout and
+fails ``database is locked`` while the whole kiosk is frozen. Keep these
+synchronous unless a handler genuinely needs to ``await``.
 """
 
 from __future__ import annotations
@@ -25,7 +36,7 @@ router = APIRouter(prefix="/api/v1/qsr", tags=["qsr-menu"])
 
 
 @router.get("/menu/requests")
-async def list_menu_requests(
+def list_menu_requests(
     status: str = Query(
         "pending", pattern="^(pending|executing|approved|rejected|all)$"
     ),
@@ -48,7 +59,7 @@ async def list_menu_requests(
 
 
 @router.post("/menu/requests/{request_id}/approve")
-async def approve_menu_request(request_id: str) -> dict:
+def approve_menu_request(request_id: str) -> dict:
     """Approve and execute a pending menu change."""
     try:
         return mcp_service.approve_menu_request(request_id)
@@ -57,7 +68,7 @@ async def approve_menu_request(request_id: str) -> dict:
 
 
 @router.post("/menu/requests/{request_id}/reject")
-async def reject_menu_request(request_id: str, reason: str | None = None) -> dict:
+def reject_menu_request(request_id: str, reason: str | None = None) -> dict:
     """Reject a pending menu change without executing it."""
     resolved = menu_requests.resolve(
         request_id, menu_requests.STATUS_REJECTED, {"reason": reason}
@@ -71,7 +82,7 @@ async def reject_menu_request(request_id: str, reason: str | None = None) -> dic
 
 
 @router.post("/menu/requests/{request_id}/resolve-incomplete")
-async def resolve_incomplete_menu_request(
+def resolve_incomplete_menu_request(
     request_id: str,
     outcome: str = Query(..., pattern="^(applied|not_applied|abandoned)$"),
     note: str | None = None,
@@ -115,7 +126,7 @@ async def resolve_incomplete_menu_request(
 
 
 @router.post("/menu/items/{product_id}/release")
-async def release_menu_item(product_id: str) -> dict:
+def release_menu_item(product_id: str) -> dict:
     """Hand an agent-owned product back to ``products.yaml`` control.
 
     A change the YAML seeder would otherwise re-apply marks the row
