@@ -578,7 +578,8 @@ def _gate_level(raw: str, fallback: GateLevel) -> GateLevel:
 
 _ADD_MENU_ITEM_DESCRIPTION = (
     "Add a new item to the kiosk menu. Fails if the product_id already "
-    "exists — use update_menu_item to change an existing item."
+    "exists — use update_menu_item to change an existing item. May require "
+    "operator approval; call describe() for the current gate level."
 )
 _ADD_MENU_ITEM_SCHEMA = {
     "product_id": "str",
@@ -593,7 +594,8 @@ _ADD_MENU_ITEM_SCHEMA = {
 _UPDATE_MENU_ITEM_DESCRIPTION = (
     "Update an existing menu item's price, availability or details. Set "
     "is_available=false to take an item off the menu (it is then hidden from "
-    "the menu and refused at order time)."
+    "the menu and refused at order time). May require operator approval; "
+    "call describe() for the current gate level."
 )
 _UPDATE_MENU_ITEM_SCHEMA = {
     "product_id": "str",
@@ -802,8 +804,13 @@ def _gated_menu_call(
 
 
 @mcp.tool(
+    # No "[gate=...]" here, unlike set_board_mode: that tool's level is the
+    # literal AUTOMATIC and can never drift, whereas this one is
+    # configurable. A tool description is fixed when the module is imported,
+    # so baking the level in would make tools/list disagree with describe()
+    # after init() rebuilt the gates. describe() is the live answer.
     name="add_menu_item",
-    description=f"[gate={_ADD_GATE.value}] {_ADD_MENU_ITEM_DESCRIPTION}",
+    description=_ADD_MENU_ITEM_DESCRIPTION,
 )
 def add_menu_item(
     product_id: str,
@@ -827,8 +834,10 @@ def add_menu_item(
 
 
 @mcp.tool(
+    # Configurable gate — see add_menu_item above for why the level is not
+    # baked into this description.
     name="update_menu_item",
-    description=f"[gate={_UPDATE_GATE.value}] {_UPDATE_MENU_ITEM_DESCRIPTION}",
+    description=_UPDATE_MENU_ITEM_DESCRIPTION,
 )
 def update_menu_item(
     product_id: str,

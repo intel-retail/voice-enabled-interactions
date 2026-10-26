@@ -42,6 +42,16 @@ STATUS_REJECTED = "rejected"
 # bound; pending requests are never evicted, only resolved ones.
 MAX_RESOLVED = 100
 
+# A claim held longer than this is treated as abandoned even within the same
+# process run. Executing is only ever held across a single menu write, which
+# is milliseconds, so anything near this is a stuck or crashed execution.
+STALE_CLAIM_SECONDS = 300.0
+
+# Identifies this process run. A request claimed by an *earlier* run can only
+# be the result of an interrupted execution, which is what distinguishes a
+# genuine crash from an approval that is simply still in flight.
+_RUN_ID = uuid.uuid4().hex[:12]
+
 _lock = threading.RLock()
 _requests: list[dict[str, Any]] = []
 _path: Path | None = None
@@ -92,6 +102,8 @@ def create(action: str, payload: dict[str, Any], reason: str | None = None) -> d
         "reason": reason,
         "status": STATUS_PENDING,
         "created_at": time.time(),
+        "claimed_at": None,
+        "claimed_by_run": None,
         "resolved_at": None,
         "executed_at": None,
         "result": None,
@@ -107,7 +119,14 @@ def create(action: str, payload: dict[str, Any], reason: str | None = None) -> d
 
 
 def _prune() -> None:
-    resolved = [r for r in _requests if r["status"] != STATUS_PENDING]
+    # `executing` is explicitly *not* prunable. A stuck executing request is
+    # the only evidence that a change may have been half-applied, so evicting
+    # it once 100 later requests resolve would discard exactly the record an
+    # operator needs. Only genuinely finished requests are capped.
+    resolved = [
+        r for r in _requests
+        if r["status"] not in (STATUS_PENDING, STATUS_EXECUTING)
+    ]
     if len(resolved) <= MAX_RESOLVED:
         return
     drop = {id(r) for r in resolved[: len(resolved) - MAX_RESOLVED]}
@@ -175,6 +194,10 @@ def claim(request_id: str) -> dict[str, Any] | None:
             if request["status"] != STATUS_PENDING:
                 return None
             request["status"] = STATUS_EXECUTING
+            # Provenance of the claim, so an execution that is merely still
+            # running can be told apart from one that was interrupted.
+            request["claimed_at"] = time.time()
+            request["claimed_by_run"] = _RUN_ID
             _persist()
             return dict(request)
     return None
@@ -205,6 +228,8 @@ def release(request_id: str) -> dict[str, Any] | None:
             # Set rather than popped: every other record carries these keys,
             # so dropping them would make this one a different shape to any
             # reader or REST response.
+            request["claimed_at"] = None
+            request["claimed_by_run"] = None
             request["resolved_at"] = None
             request["executed_at"] = None
             request["result"] = None
@@ -273,13 +298,85 @@ def complete(request_id: str, result: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def stale_executing() -> list[dict[str, Any]]:
+def stale_executing(now: float | None = None) -> list[dict[str, Any]]:
     """Requests left mid-execution, i.e. claimed but never completed.
 
-    On a fresh process these can only be the result of an interrupted
-    execution (a crash or a kill between the claim and the write). Whether
-    the underlying write landed is unknown, so they are surfaced for an
-    operator rather than retried automatically.
+    A claim is only held for the duration of a single menu write, so an
+    executing request is almost always one that is still in flight. Reporting
+    every one of them would mean any listing taken during an approval
+    wrongly accused that approval of being interrupted.
+
+    A claim is therefore only treated as abandoned when it cannot plausibly
+    still be running: it was made by an **earlier process run** (so the owner
+    is definitively gone), or it has been held for longer than
+    :data:`STALE_CLAIM_SECONDS` (covering a thread that hung within this run).
+
+    Whether the underlying write landed is unknown in either case, so these
+    are surfaced for an operator to check rather than retried automatically.
+    Use :func:`resolve_incomplete` to close one out.
+
+    Args:
+        now: Override the current time, for tests.
+
+    Returns:
+        The abandoned requests, oldest claim first.
     """
+    moment = time.time() if now is None else now
     with _lock:
-        return [dict(r) for r in _requests if r["status"] == STATUS_EXECUTING]
+        stale = []
+        for request in _requests:
+            if request["status"] != STATUS_EXECUTING:
+                continue
+            claimed_at = request.get("claimed_at")
+            # A record written before claims carried provenance has no way to
+            # prove it is live, and a missing timestamp cannot be aged out —
+            # treat both as abandoned rather than hiding them forever.
+            if request.get("claimed_by_run") != _RUN_ID or claimed_at is None:
+                stale.append(dict(request))
+            elif moment - claimed_at >= STALE_CLAIM_SECONDS:
+                stale.append(dict(request))
+        return sorted(stale, key=lambda r: r.get("claimed_at") or 0.0)
+
+
+# Outcomes an operator can record for an abandoned execution. The operator
+# has to check the catalogue first: only they can tell whether the half-done
+# write actually landed, which is why this cannot be automatic.
+RESOLVE_APPLIED = "applied"
+RESOLVE_NOT_APPLIED = "not_applied"
+RESOLVE_ABANDONED = "abandoned"
+RESOLVE_OUTCOMES = (RESOLVE_APPLIED, RESOLVE_NOT_APPLIED, RESOLVE_ABANDONED)
+
+
+def resolve_incomplete(
+    request_id: str, outcome: str, note: str | None = None
+) -> dict[str, Any] | None:
+    """Close out a request stuck in ``executing`` after a human has checked.
+
+    Without this an abandoned claim is a dead end: ``approve`` and ``reject``
+    only accept pending requests, so a stuck request could be seen in
+    ``incomplete`` but never cleared, and would sit there forever.
+
+    Args:
+        request_id: The stuck request.
+        outcome: One of :data:`RESOLVE_OUTCOMES`. ``applied`` records that the
+            change did land (-> approved); ``not_applied`` hands it back for
+            another attempt (-> pending); ``abandoned`` gives up on it
+            (-> rejected).
+        note: Free-text operator note recorded on the request.
+
+    Returns:
+        The updated request, or ``None`` if it is unknown or not currently
+        executing.
+
+    Raises:
+        ValueError: If ``outcome`` is not a recognised outcome.
+    """
+    if outcome not in RESOLVE_OUTCOMES:
+        raise ValueError(f"outcome must be one of {RESOLVE_OUTCOMES}, got {outcome!r}")
+
+    detail = {"resolved_by": "operator", "outcome": outcome, "note": note}
+    if outcome == RESOLVE_APPLIED:
+        return complete(request_id, detail)
+    if outcome == RESOLVE_ABANDONED:
+        return fail(request_id, f"abandoned by operator: {note or 'no note'}")
+    return release(request_id)

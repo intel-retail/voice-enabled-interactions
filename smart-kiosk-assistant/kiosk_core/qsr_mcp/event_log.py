@@ -142,10 +142,14 @@ def summarise_numeric(
         until_ts_ms=until_ts_ms,
         limit=None,
     )
+    # `bool` is excluded deliberately: isinstance(True, int) is True in
+    # Python, but json_type() reports 'true'/'false', so counting booleans
+    # here would make the two backends disagree.
     values = [
-        e.payload.get(field, 0)
+        e.payload[field]
         for e in events
         if isinstance(e.payload.get(field), (int, float))
+        and not isinstance(e.payload.get(field), bool)
     ]
     if not values:
         return NumericSummary(count=0, average=0.0, maximum=0)
@@ -258,9 +262,15 @@ class SQLiteLog:
         if not field.isidentifier():
             raise ValueError(f"unsupported payload field: {field!r}")
         value = f"json_extract(envelope, '$.payload.{field}')"
+        # The Python fallback counts only int/float, so SQL must too.
+        # Without this, SQLite would coerce a string "7" into AVG, and
+        # because text sorts above every number in MAX, a single non-numeric
+        # value would also make int(maximum) raise. Restricting by json_type
+        # keeps the two backends returning the same answer.
+        numeric = f"json_type(envelope, '$.payload.{field}') IN ('integer', 'real')"
         query = (
             f"SELECT COUNT({value}), AVG({value}), MAX({value}) "
-            f"FROM events WHERE {value} IS NOT NULL"
+            f"FROM events WHERE {value} IS NOT NULL AND {numeric}"
         )
         params: list[object] = []
         if event_type is not None:

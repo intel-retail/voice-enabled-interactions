@@ -46,6 +46,13 @@ bound at import time and a rebuild will **not** pick them up:
 `MCP_SERVICE_ENABLED`, `STORE_ID`, and `MCP_HOST` / `MCP_PORT` /
 `MCP_TRANSPORT`. Changing any of those needs a process restart.
 
+Gate levels *are* refreshed by `init()`, which is why the configurable act
+tools do not carry a `[gate=…]` prefix in their MCP descriptions: a tool
+description is fixed when the module is imported, so a baked-in level would
+drift from the live one after a rebuild. `describe()` is the authoritative
+answer. `set_board_mode` keeps its prefix because its level is the literal
+`automatic` and cannot change.
+
 Started from `main.py`'s lifespan when `KIOSK_CORE_QSR_MCP_ENABLED=true`
 (default). Listens on `KIOSK_CORE_QSR_MCP_PORT` (default `8014`,
 streamable-http transport) — distinct from the ordering feature's `/mcp`.
@@ -70,7 +77,9 @@ streamable-http transport) — distinct from the ordering feature's `/mcp`.
   `today|yesterday|all|YYYY-MM-DD`. On the SQLite backend this is a single
   `COUNT`/`AVG`/`MAX` over `json_extract(envelope, '$.payload.count')`, so
   `all` stays O(1) in memory however long the log grows; the JSONL backend
-  falls back to reducing rows in Python.
+  falls back to reducing rows in Python. Both paths count only
+  integer/real values, so a malformed string payload cannot skew the average
+  or (since text sorts above numbers in SQLite) break the maximum.
 - `get_order_stats(period, top_n)` — confirmed order count, revenue, top
   items, from the existing ordering SQLite DB.
 - `get_board_state()` — current board mode and when/why it last changed.
@@ -127,6 +136,7 @@ approve its own request would make the gate meaningless:
 | GET | `/api/v1/qsr/menu/requests?status=pending` | List requests |
 | POST | `/api/v1/qsr/menu/requests/{id}/approve` | Approve and execute |
 | POST | `/api/v1/qsr/menu/requests/{id}/reject` | Reject without executing |
+| POST | `/api/v1/qsr/menu/requests/{id}/resolve-incomplete?outcome=…` | Close out an interrupted execution |
 | POST | `/api/v1/qsr/menu/items/{id}/release` | Hand an agent-claimed product back to `products.yaml` |
 
 A request moves `pending -> executing -> approved | rejected`:
@@ -134,7 +144,7 @@ A request moves `pending -> executing -> approved | rejected`:
 | Status | Meaning |
 |---|---|
 | `pending` | Awaiting an operator |
-| `executing` | Claimed, write in progress. Seeing this on a freshly started process means an execution was interrupted — the list endpoint reports those separately as `incomplete`, because whether the write landed is unknown and must not be retried blindly |
+| `executing` | Claimed, write in progress |
 | `approved` | Executed. Always carries `result` and `executed_at` |
 | `rejected` | Refused by an operator, or failed permanently |
 
@@ -143,6 +153,32 @@ concurrent operators cannot both execute it. `executing` is deliberately a
 distinct state from `approved` — collapsing them would make a crash between
 the claim and the write indistinguishable from a completed change, leaving
 an `approved` request with no result that could never be retried.
+
+### Interrupted executions
+
+A claim is held only for the length of a single menu write, so an `executing`
+request is almost always one that is simply still running. A claim is
+reported as **abandoned** — listed under `incomplete` — only when it cannot
+plausibly still be live: it was made by an *earlier process run*, or it has
+been held longer than `STALE_CLAIM_SECONDS` (300s, covering a hung thread
+within the current run). Without that distinction, any listing taken during
+an approval would wrongly accuse that approval of having crashed.
+
+Abandoned claims are never auto-recovered: whether the half-done write landed
+is unknown, and a blind retry could double-apply it. Only an operator can
+tell, so they close it out with
+`POST /menu/requests/{id}/resolve-incomplete?outcome=…`:
+
+| `outcome` | Meaning | Result |
+|---|---|---|
+| `applied` | The change is in the catalogue | `approved` |
+| `not_applied` | It never landed; retry it | `pending` |
+| `abandoned` | Give up on it | `rejected` |
+
+This route exists because `approve` and `reject` only accept *pending*
+requests — without it a stuck request could be seen forever but never
+cleared. Pruning also skips `executing`, so the evidence of an interrupted
+write is never evicted by the resolved-history cap.
 
 The two failure modes are then kept apart. A caller-fixable rejection
 (`MenuError` — duplicate id, bad price, unknown product) marks the request

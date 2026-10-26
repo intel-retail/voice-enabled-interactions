@@ -459,3 +459,25 @@ def test_force_init_releases_the_previous_runtime(monkeypatch):
         if thread is not None:
             thread.join(timeout=2.0)
             assert not thread.is_alive(), "old dispatcher thread was not stopped"
+
+
+def test_pruning_never_evicts_a_stuck_execution(menu_env):
+    """An old executing request is exactly the evidence an operator needs,
+    so it must not be capped out by later resolved requests."""
+    from kiosk_core.qsr_mcp import menu_requests
+
+    stuck = menu_requests.create("update_menu_item", {"product_id": "P1"}, None)
+    menu_requests.claim(stuck["request_id"])
+
+    for _ in range(menu_requests.MAX_RESOLVED + 20):
+        later = menu_requests.create("update_menu_item", {"product_id": "P1"}, None)
+        menu_requests.resolve(later["request_id"], menu_requests.STATUS_REJECTED)
+
+    menu_requests.create("update_menu_item", {"product_id": "P1"}, None)  # prunes
+
+    assert menu_requests.get(stuck["request_id"]) is not None
+    resolved = [
+        r for r in menu_requests.list_requests(None)
+        if r["status"] == menu_requests.STATUS_REJECTED
+    ]
+    assert len(resolved) == menu_requests.MAX_RESOLVED, "resolved history still capped"

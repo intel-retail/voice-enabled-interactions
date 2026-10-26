@@ -33,8 +33,11 @@ async def list_menu_requests(
     """List menu changes requested by the agent.
 
     ``incomplete`` lists requests claimed for execution that never finished —
-    only possible if the process died mid-write. Whether the change landed is
-    unknown, so they need a human to check rather than an automatic retry.
+    an execution interrupted by a crash, or one hung past
+    ``STALE_CLAIM_SECONDS``. An approval that is merely still running is not
+    listed. Whether the change landed is unknown, so they need a human to
+    check (then ``POST .../resolve-incomplete``) rather than an automatic
+    retry.
     """
     requested = None if status == "all" else status
     response = {"status": status, "requests": menu_requests.list_requests(requested)}
@@ -65,6 +68,38 @@ async def reject_menu_request(request_id: str, reason: str | None = None) -> dic
             detail=f"unknown or already-resolved request: {request_id}",
         )
     return {"request_id": request_id, "status": resolved["status"]}
+
+
+@router.post("/menu/requests/{request_id}/resolve-incomplete")
+async def resolve_incomplete_menu_request(
+    request_id: str,
+    outcome: str = Query(..., pattern="^(applied|not_applied|abandoned)$"),
+    note: str | None = None,
+) -> dict:
+    """Close out a request stuck in ``executing`` after a human has checked.
+
+    ``approve`` and ``reject`` only accept *pending* requests, so without
+    this an abandoned claim could be seen in ``incomplete`` but never
+    cleared. Only an operator can say whether the interrupted write landed,
+    which is why the outcome is an argument rather than a guess:
+
+    - ``applied`` — the change is in the catalogue (-> approved)
+    - ``not_applied`` — it never landed, hand it back to be retried
+      (-> pending)
+    - ``abandoned`` — give up on it (-> rejected)
+    """
+    resolved = menu_requests.resolve_incomplete(request_id, outcome, note)
+    if resolved is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown or not-executing request: {request_id}",
+        )
+    return {
+        "request_id": request_id,
+        "status": resolved["status"],
+        "outcome": outcome,
+        "request": resolved,
+    }
 
 
 @router.post("/menu/items/{product_id}/release")

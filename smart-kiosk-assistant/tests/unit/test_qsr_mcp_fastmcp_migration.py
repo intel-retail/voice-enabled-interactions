@@ -627,3 +627,60 @@ def test_aggregate_rejects_a_non_identifier_field():
     with pytest.raises(ValueError):
         log.aggregate_numeric("count'; DROP TABLE events--")
     log.close()
+
+
+def test_aggregate_ignores_non_numeric_payload_values(tmp_path):
+    """SQLite folds a string "7" into AVG, and text sorts above every number
+    in MAX, so int(maximum) would raise. Both backends must skip them."""
+    from kiosk_core.qsr_mcp.event_log import (
+        JSONLFileLog,
+        SQLiteLog,
+        new_event,
+        summarise_numeric,
+    )
+
+    sqlite_log = SQLiteLog(":memory:", "svc")
+    jsonl_log = JSONLFileLog(str(tmp_path / "log.jsonl"), "svc")
+    for i, count in enumerate([4, "7", None, True, 6]):
+        for log in (sqlite_log, jsonl_log):
+            log.append(
+                new_event("queue_depth_sample", "svc", "s1", {"count": count}, f"r{i}")
+            )
+
+    for log in (sqlite_log, jsonl_log):
+        summary = summarise_numeric(log, "count", event_type="queue_depth_sample")
+        assert (summary.count, summary.average, summary.maximum) == (2, 5.0, 6)
+    sqlite_log.close()
+
+
+def test_the_queue_poller_does_not_hold_a_closed_client(monkeypatch):
+    """init(force=True) closes the previous client. A poller that captured it
+    once would call a closed httpx client every interval, forever."""
+    from kiosk_core.qsr_mcp import mcp_server
+
+    seen: list[object] = []
+
+    class StopPolling(BaseException):
+        """Not an Exception: the loop deliberately swallows those."""
+
+    class Client:
+        def __init__(self, label):
+            self.label = label
+
+        def get_queue_snapshot(self):
+            seen.append(self.label)
+            raise StopPolling  # end the loop after one sample
+
+        def close(self):
+            pass
+
+    clients = iter([Client("first"), Client("second")])
+    monkeypatch.setattr(mcp_server, "get_queue_client", lambda: next(clients))
+    monkeypatch.setattr(mcp_server.time, "sleep", lambda _: None)
+
+    with pytest.raises(StopPolling):
+        mcp_server._poll_queue_forever(0)
+
+    # The first call is the "is queue-service enabled?" probe; the sample must
+    # come from a freshly resolved client, not that captured one.
+    assert seen == ["second"]

@@ -101,19 +101,112 @@ def test_releasing_an_unknown_product_is_404(api_env):
 # Approval queue
 # ---------------------------------------------------------------------------
 
+def _crash_after_claim(api_env, **payload):
+    """Claim a request, then make the claim look like it came from a process
+    run that has since died."""
+    request = api_env.requests.create("update_menu_item", payload, None)
+    api_env.requests.claim(request["request_id"])
+    for record in api_env.requests._requests:
+        if record["request_id"] == request["request_id"]:
+            record["claimed_by_run"] = "a-previous-run"
+    return request
+
+
 def test_interrupted_execution_is_surfaced_as_incomplete(api_env):
-    """A request claimed but never completed is only possible if the process
-    died mid-write. It must be visible, or an operator cannot tell that the
-    change never ran."""
-    request = api_env.requests.create(
-        "update_menu_item", {"product_id": "P1", "price": 9.0}, None
-    )
-    api_env.requests.claim(request["request_id"])  # simulate a crash after the claim
+    """A request claimed by a run that is now gone was interrupted mid-write.
+    It must be visible, or an operator cannot tell the change never ran."""
+    request = _crash_after_claim(api_env, product_id="P1", price=9.0)
 
     body = api_env.client.get("/api/v1/qsr/menu/requests").json()
 
     assert body["incomplete"][0]["request_id"] == request["request_id"]
     assert body["incomplete"][0]["status"] == "executing"
+
+
+def test_an_approval_still_running_is_not_called_incomplete(api_env):
+    """stale_executing() is consulted on every listing, so reporting all
+    executing requests would accuse a live approval of having crashed."""
+    request = api_env.requests.create(
+        "update_menu_item", {"product_id": "P1", "price": 9.0}, None
+    )
+    api_env.requests.claim(request["request_id"])  # this run, just now
+
+    body = api_env.client.get("/api/v1/qsr/menu/requests").json()
+
+    assert "incomplete" not in body
+
+
+def test_a_claim_held_too_long_is_incomplete_even_in_this_run(api_env):
+    """A hung thread never ends its run, so the run id alone is not enough."""
+    request = api_env.requests.create(
+        "update_menu_item", {"product_id": "P1", "price": 9.0}, None
+    )
+    claimed = api_env.requests.claim(request["request_id"])
+
+    stale = api_env.requests.stale_executing(
+        now=claimed["claimed_at"] + api_env.requests.STALE_CLAIM_SECONDS + 1
+    )
+
+    assert [r["request_id"] for r in stale] == [request["request_id"]]
+
+
+# ---------------------------------------------------------------------------
+# Closing out an interrupted execution
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "outcome,expected_status",
+    [("applied", "approved"), ("not_applied", "pending"), ("abandoned", "rejected")],
+)
+def test_operator_can_close_out_an_incomplete_request(
+    api_env, outcome, expected_status
+):
+    """approve/reject only accept pending requests, so without this route a
+    stuck request could be seen forever but never cleared."""
+    request = _crash_after_claim(api_env, product_id="P1", price=9.0)
+
+    response = api_env.client.post(
+        f"/api/v1/qsr/menu/requests/{request['request_id']}/resolve-incomplete"
+        f"?outcome={outcome}&note=checked+the+catalogue"
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == expected_status
+    assert api_env.client.get("/api/v1/qsr/menu/requests?status=all").json().get(
+        "incomplete"
+    ) is None
+
+
+def test_not_applied_hands_the_request_back_for_another_attempt(api_env):
+    request = _crash_after_claim(api_env, product_id="P1", price=9.0)
+    api_env.client.post(
+        f"/api/v1/qsr/menu/requests/{request['request_id']}"
+        "/resolve-incomplete?outcome=not_applied"
+    )
+
+    approved = api_env.client.post(
+        f"/api/v1/qsr/menu/requests/{request['request_id']}/approve"
+    )
+
+    assert approved.status_code == 200, "a released request must be approvable again"
+
+
+def test_resolve_incomplete_rejects_an_unknown_outcome(api_env):
+    request = _crash_after_claim(api_env, product_id="P1", price=9.0)
+    response = api_env.client.post(
+        f"/api/v1/qsr/menu/requests/{request['request_id']}"
+        "/resolve-incomplete?outcome=probably"
+    )
+    assert response.status_code == 422
+
+
+def test_resolve_incomplete_refuses_a_request_that_is_not_executing(api_env):
+    request = api_env.requests.create("update_menu_item", {"product_id": "P1"}, None)
+    response = api_env.client.post(
+        f"/api/v1/qsr/menu/requests/{request['request_id']}"
+        "/resolve-incomplete?outcome=applied"
+    )
+    assert response.status_code == 400
 
 
 def test_completed_approval_is_not_reported_as_incomplete(api_env):

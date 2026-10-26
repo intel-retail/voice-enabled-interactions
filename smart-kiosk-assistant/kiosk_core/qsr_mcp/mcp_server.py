@@ -76,8 +76,7 @@ def run_mcp_server(embedded: bool = False) -> None:
 
 
 def _poll_queue_forever(interval_seconds: float) -> None:
-    queue_client = get_queue_client()
-    if queue_client is None:
+    if get_queue_client() is None:
         logger.info("[QSR-MCP] Queue-service disabled; queue poller not started")
         return
     logger.info("[QSR-MCP] Queue poller started (interval=%.1fs)", interval_seconds)
@@ -87,6 +86,13 @@ def _poll_queue_forever(interval_seconds: float) -> None:
         # every failure as transient and keep sampling: a malformed payload
         # (JSON decode) or a logging error must not end the loop.
         try:
+            # Resolved per iteration, not captured once: init(force=True)
+            # closes the previous client, and a captured reference would
+            # leave this loop calling a closed httpx client and logging an
+            # exception every interval for the life of the process.
+            queue_client = get_queue_client()
+            if queue_client is None:
+                return
             snapshot = queue_client.get_queue_snapshot()
             if snapshot is not None:
                 emit_queue_sample(snapshot)
