@@ -206,7 +206,7 @@ def test_resolve_incomplete_refuses_a_request_that_is_not_executing(api_env):
         f"/api/v1/qsr/menu/requests/{request['request_id']}"
         "/resolve-incomplete?outcome=applied"
     )
-    assert response.status_code == 400
+    assert response.status_code == 409
 
 
 def test_completed_approval_is_not_reported_as_incomplete(api_env):
@@ -232,3 +232,99 @@ def test_executing_is_an_accepted_status_filter(api_env):
 
 def test_approving_an_unknown_request_is_400(api_env):
     assert api_env.client.post("/api/v1/qsr/menu/requests/nope/approve").status_code == 400
+
+
+def test_a_live_claim_cannot_be_resolved(api_env):
+    """Resolving a running claim corrupts it: not_applied returns it to
+    pending, the running write then loses its result, and approving again
+    applies the change twice."""
+    request = api_env.requests.create(
+        "update_menu_item", {"product_id": "P1", "price": 9.0}, None
+    )
+    api_env.requests.claim(request["request_id"])  # this run, still running
+
+    response = api_env.client.post(
+        f"/api/v1/qsr/menu/requests/{request['request_id']}"
+        "/resolve-incomplete?outcome=not_applied"
+    )
+
+    assert response.status_code == 409
+    assert api_env.requests.get(request["request_id"])["status"] == "executing"
+
+
+def test_force_overrides_the_live_claim_check(api_env):
+    request = api_env.requests.create(
+        "update_menu_item", {"product_id": "P1", "price": 9.0}, None
+    )
+    api_env.requests.claim(request["request_id"])
+
+    response = api_env.client.post(
+        f"/api/v1/qsr/menu/requests/{request['request_id']}"
+        "/resolve-incomplete?outcome=abandoned&force=true"
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "rejected"
+
+
+def test_resolving_as_applied_is_recorded_in_the_audit_log(api_env):
+    """The interrupted run never emitted its menu_item_* event, so without
+    this the log and the agent never learn of a change that did happen."""
+    request = _crash_after_claim(api_env, product_id="P1", price=9.0)
+
+    api_env.client.post(
+        f"/api/v1/qsr/menu/requests/{request['request_id']}"
+        "/resolve-incomplete?outcome=applied&note=verified"
+    )
+
+    events = api_env.service._log.read(event_type="menu_change_resolved")
+    assert len(events) == 1
+    payload = events[0].payload
+    assert payload["request_id"] == request["request_id"]
+    assert payload["outcome"] == "applied"
+    assert payload["status"] == "approved"
+    assert payload["note"] == "verified"
+
+
+def test_each_resolution_is_logged_separately(api_env):
+    """A request sent back by not_applied can be resolved again; a reused
+    ref_id would make the log drop the second one."""
+    request = _crash_after_claim(api_env, product_id="P1", price=9.0)
+    base = f"/api/v1/qsr/menu/requests/{request['request_id']}/resolve-incomplete"
+
+    api_env.client.post(f"{base}?outcome=not_applied")
+    api_env.requests.claim(request["request_id"])
+    for record in api_env.requests._requests:
+        if record["request_id"] == request["request_id"]:
+            record["claimed_by_run"] = "a-previous-run"
+    api_env.client.post(f"{base}?outcome=applied")
+
+    events = api_env.service._log.read(event_type="menu_change_resolved")
+    assert [e.payload["outcome"] for e in events] == ["not_applied", "applied"]
+
+
+def test_approve_reports_a_conflict_when_its_result_cannot_be_recorded(api_env):
+    """If an operator resolves the claim mid-write, the write still happened.
+    Reporting a plain success would hide that the record disagrees."""
+    request = api_env.requests.create(
+        "update_menu_item", {"product_id": "P1", "price": 150.0}, None
+    )
+    real_update = api_env.service._update_menu_item_impl
+
+    def steal_the_claim(payload, reason=None):
+        result = real_update(payload, reason)
+        # Simulate an operator resolving it while the write was in flight.
+        api_env.requests.resolve_incomplete(
+            request["request_id"], "abandoned", force=True
+        )
+        return result
+
+    api_env.service._update_menu_item_impl = steal_the_claim
+    try:
+        response = api_env.service.approve_menu_request(request["request_id"])
+    finally:
+        api_env.service._update_menu_item_impl = real_update
+
+    assert response["executed"] is True
+    assert "conflict" in response, "a silent success would mislead the operator"
+    assert api_env.requests.get(request["request_id"])["status"] == "rejected"

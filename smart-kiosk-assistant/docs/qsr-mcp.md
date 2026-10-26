@@ -70,6 +70,8 @@ streamable-http transport) — distinct from the ordering feature's `/mcp`.
   `{field: {from, to}}` diff.
 - `menu_change_requested` — `{request_id, action, payload, reason}`, emitted
   when a gated menu change is parked for operator approval.
+- `menu_change_resolved` — `{request_id, action, payload, outcome, status,
+  note}`, emitted when an operator closes out an interrupted execution.
 
 **Read tools**
 - `get_queue_depth()` — current count/status from queue-service.
@@ -136,7 +138,7 @@ approve its own request would make the gate meaningless:
 | GET | `/api/v1/qsr/menu/requests?status=pending` | List requests |
 | POST | `/api/v1/qsr/menu/requests/{id}/approve` | Approve and execute |
 | POST | `/api/v1/qsr/menu/requests/{id}/reject` | Reject without executing |
-| POST | `/api/v1/qsr/menu/requests/{id}/resolve-incomplete?outcome=…` | Close out an interrupted execution |
+| POST | `/api/v1/qsr/menu/requests/{id}/resolve-incomplete?outcome=…[&force=true]` | Close out an interrupted execution |
 | POST | `/api/v1/qsr/menu/items/{id}/release` | Hand an agent-claimed product back to `products.yaml` |
 
 A request moves `pending -> executing -> approved | rejected`:
@@ -179,6 +181,27 @@ This route exists because `approve` and `reject` only accept *pending*
 requests — without it a stuck request could be seen forever but never
 cleared. Pruning also skips `executing`, so the evidence of an interrupted
 write is never evicted by the resolved-history cap.
+
+It accepts **only** requests listed under `incomplete`, returning `409`
+otherwise. Resolving a claim that is still running would corrupt it:
+`not_applied` returns it to pending, the in-flight write then finds it no
+longer claimed and loses its result, and approving it again applies the
+change twice. `force=true` overrides the check and asserts the owning
+execution is genuinely gone.
+
+Resolving emits a **`menu_change_resolved`** event. This matters most for
+`applied`: the catalogue changed, but the interrupted run never emitted its
+`menu_item_added` / `menu_item_updated` event, so without this neither the
+audit trail nor the agent would learn of a change that really happened. It
+is deliberately not a replayed `menu_item_*` event — the operator is
+attesting to the outcome of a *request*, and the field-level diff that
+`menu_item_updated` carries is not knowable after the fact.
+
+Conversely, if an operator resolves a claim while its write is genuinely in
+flight (via `force`, or past the timeout), `approve_menu_request` can no
+longer record its result. It does not report a plain success: the response
+carries a `conflict` field saying the change was applied but the request no
+longer holds that result.
 
 The two failure modes are then kept apart. A caller-fixable rejection
 (`MenuError` — duplicate id, bad price, unknown product) marks the request

@@ -348,13 +348,22 @@ RESOLVE_OUTCOMES = (RESOLVE_APPLIED, RESOLVE_NOT_APPLIED, RESOLVE_ABANDONED)
 
 
 def resolve_incomplete(
-    request_id: str, outcome: str, note: str | None = None
+    request_id: str,
+    outcome: str,
+    note: str | None = None,
+    force: bool = False,
 ) -> dict[str, Any] | None:
     """Close out a request stuck in ``executing`` after a human has checked.
 
     Without this an abandoned claim is a dead end: ``approve`` and ``reject``
     only accept pending requests, so a stuck request could be seen in
     ``incomplete`` but never cleared, and would sit there forever.
+
+    Only requests :func:`stale_executing` reports are accepted. Resolving a
+    claim that is still running would corrupt it: picking ``not_applied``
+    mid-write returns the request to pending, the running write then finds it
+    no longer claimed and loses its result, and approving it again applies
+    the change twice.
 
     Args:
         request_id: The stuck request.
@@ -363,16 +372,24 @@ def resolve_incomplete(
             another attempt (-> pending); ``abandoned`` gives up on it
             (-> rejected).
         note: Free-text operator note recorded on the request.
+        force: Resolve even if the claim still looks live. The caller is
+            asserting the owning execution is genuinely gone; see above for
+            what this risks if it is not.
 
     Returns:
-        The updated request, or ``None`` if it is unknown or not currently
-        executing.
+        The updated request, or ``None`` if it is unknown, not currently
+        executing, or still looks live and ``force`` is not set.
 
     Raises:
         ValueError: If ``outcome`` is not a recognised outcome.
     """
     if outcome not in RESOLVE_OUTCOMES:
         raise ValueError(f"outcome must be one of {RESOLVE_OUTCOMES}, got {outcome!r}")
+
+    if not force:
+        with _lock:
+            if request_id not in {r["request_id"] for r in stale_executing()}:
+                return None
 
     detail = {"resolved_by": "operator", "outcome": outcome, "note": note}
     if outcome == RESOLVE_APPLIED:

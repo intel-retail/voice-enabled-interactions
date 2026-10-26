@@ -75,6 +75,7 @@ async def resolve_incomplete_menu_request(
     request_id: str,
     outcome: str = Query(..., pattern="^(applied|not_applied|abandoned)$"),
     note: str | None = None,
+    force: bool = False,
 ) -> dict:
     """Close out a request stuck in ``executing`` after a human has checked.
 
@@ -87,12 +88,23 @@ async def resolve_incomplete_menu_request(
     - ``not_applied`` — it never landed, hand it back to be retried
       (-> pending)
     - ``abandoned`` — give up on it (-> rejected)
+
+    Only requests listed under ``incomplete`` are accepted. Resolving a claim
+    that is still running would corrupt it — ``not_applied`` would return it
+    to pending, the running write would then lose its result, and approving
+    it again would apply the change twice. ``force=true`` overrides this and
+    asserts the owning execution is genuinely gone.
     """
-    resolved = menu_requests.resolve_incomplete(request_id, outcome, note)
+    resolved = mcp_service.resolve_incomplete_request(
+        request_id, outcome, note, force=force
+    )
     if resolved is None:
         raise HTTPException(
-            status_code=400,
-            detail=f"unknown or not-executing request: {request_id}",
+            status_code=409,
+            detail=(
+                f"request {request_id} is unknown, not executing, or still "
+                "appears to be running (pass force=true to override)"
+            ),
         )
     return {
         "request_id": request_id,

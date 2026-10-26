@@ -72,6 +72,13 @@ _EVENT_TYPES: dict[str, dict[str, str]] = {
     "menu_item_added": {"product_id": "str", "name": "str", "category": "str", "price": "float"},
     "menu_item_updated": {"product_id": "str", "changed": "dict", "reason": "str|None"},
     "menu_change_requested": {"request_id": "str", "action": "str", "reason": "str|None"},
+    "menu_change_resolved": {
+        "request_id": "str",
+        "action": "str",
+        "outcome": "str",
+        "status": "str",
+        "note": "str|None",
+    },
 }
 
 # -- plumbing: durable log, delivery, policy gate (self-contained, no SDK) --
@@ -720,17 +727,113 @@ def approve_menu_request(request_id: str) -> dict[str, Any]:
     except menu.MenuError as exc:
         # Permanent, caller-fixable refusal (invalid price, duplicate id).
         # Retrying cannot help, so consume the approval and record why.
-        menu_requests.fail(request_id, str(exc))
+        if menu_requests.fail(request_id, str(exc)) is None:
+            logger.warning(
+                "[QSR-MENU] Could not record failure of %s: it was resolved "
+                "concurrently (now %s)",
+                request_id,
+                _current_status(request_id),
+            )
         raise
     except Exception:
         # Anything else is treated as transient (locked database, I/O error):
         # hand the claim back to pending so the operator can approve again
         # rather than silently consuming their approval.
-        menu_requests.release(request_id)
+        if menu_requests.release(request_id) is None:
+            logger.warning(
+                "[QSR-MENU] Could not release %s after a transient failure: "
+                "it was resolved concurrently (now %s)",
+                request_id,
+                _current_status(request_id),
+            )
         raise
 
-    menu_requests.complete(request_id, result)
+    completed = menu_requests.complete(request_id, result)
+    if completed is None:
+        # The write happened, but the claim was resolved underneath us — an
+        # operator used resolve-incomplete on it. Reporting a plain success
+        # would leave the caller believing the record matches the catalogue
+        # when it does not.
+        status = _current_status(request_id)
+        logger.warning(
+            "[QSR-MENU] %s executed but its result could not be recorded: the "
+            "request was resolved concurrently (now %s)",
+            request_id,
+            status,
+        )
+        return {
+            "request_id": request_id,
+            "executed": True,
+            "result": result,
+            "conflict": (
+                f"the change was applied, but the request is now {status} and "
+                "does not carry this result"
+            ),
+        }
     return {"request_id": request_id, "executed": True, "result": result}
+
+
+def _current_status(request_id: str) -> str:
+    """Best-effort status of a request, for a conflict message."""
+    record = menu_requests.get(request_id)
+    return "gone" if record is None else record["status"]
+
+
+def resolve_incomplete_request(
+    request_id: str,
+    outcome: str,
+    note: Optional[str] = None,
+    force: bool = False,
+) -> Optional[dict[str, Any]]:
+    """Close out an abandoned execution and record that an operator did so.
+
+    Wraps :func:`menu_requests.resolve_incomplete` so the decision reaches
+    the durable log and the agent. This matters most for ``applied``: the
+    catalogue changed, but the interrupted run never emitted its
+    ``menu_item_added`` / ``menu_item_updated`` event, so without this the
+    audit trail and the agent would never learn of a change that really
+    happened.
+
+    The emitted event is ``menu_change_resolved``, not the original
+    add/update event: what the operator is attesting to is the *outcome of a
+    request*, and the field-level diff an ``menu_item_updated`` carries is
+    not knowable after the fact.
+
+    Args:
+        request_id: The abandoned request.
+        outcome: One of ``menu_requests.RESOLVE_OUTCOMES``.
+        note: Operator note recorded on the request and the event.
+        force: Resolve even if the claim still looks live.
+
+    Returns:
+        The updated request, or ``None`` if it was not resolvable.
+
+    Raises:
+        ValueError: If ``outcome`` is not recognised.
+    """
+    resolved = menu_requests.resolve_incomplete(request_id, outcome, note, force=force)
+    if resolved is None:
+        return None
+    if MCP_SERVICE_ENABLED:
+        try:
+            emit(
+                "menu_change_resolved",
+                {
+                    "request_id": request_id,
+                    "action": resolved["action"],
+                    "payload": resolved["payload"],
+                    "outcome": outcome,
+                    "status": resolved["status"],
+                    "note": note,
+                },
+                # Unique per resolution: the log drops a repeated ref_id, and
+                # a request can legitimately be resolved more than once if an
+                # earlier `not_applied` sent it back to pending.
+                ref_id=f"{request_id}:resolve:{uuid.uuid4().hex}",
+            )
+        except Exception:
+            logger.exception("[QSR-MENU] Failed to emit menu_change_resolved")
+    return resolved
 
 
 def _update_menu_item_impl(payload: dict[str, Any], reason: Optional[str] = None) -> dict[str, Any]:

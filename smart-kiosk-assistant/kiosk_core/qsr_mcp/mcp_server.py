@@ -91,11 +91,14 @@ def _poll_queue_forever(interval_seconds: float) -> None:
             # leave this loop calling a closed httpx client and logging an
             # exception every interval for the life of the process.
             queue_client = get_queue_client()
-            if queue_client is None:
-                return
-            snapshot = queue_client.get_queue_snapshot()
-            if snapshot is not None:
-                emit_queue_sample(snapshot)
+            if queue_client is not None:
+                snapshot = queue_client.get_queue_snapshot()
+                if snapshot is not None:
+                    emit_queue_sample(snapshot)
+            # A missing client is skipped, not returned on: returning would
+            # end the thread for good, so queue history would stop growing
+            # silently if queue-service were re-enabled by a later
+            # init(force=True). Nothing restarts this loop.
         except Exception:
             logger.exception("[QSR-MCP] Queue poll failed; continuing")
         time.sleep(interval_seconds)

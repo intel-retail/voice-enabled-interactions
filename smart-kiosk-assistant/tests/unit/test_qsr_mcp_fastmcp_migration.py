@@ -284,6 +284,7 @@ def test_describe_matches_pre_migration_baseline(qsr_env):
         "menu_item_added",
         "menu_item_updated",
         "menu_change_requested",
+        "menu_change_resolved",
     }
     # add_menu_item must stay behind the approval gate by default.
     assert actual["act_tools"]["add_menu_item"]["gate"] == "needs_approval"
@@ -684,3 +685,24 @@ def test_the_queue_poller_does_not_hold_a_closed_client(monkeypatch):
     # The first call is the "is queue-service enabled?" probe; the sample must
     # come from a freshly resolved client, not that captured one.
     assert seen == ["second"]
+
+
+def test_the_queue_poller_survives_a_missing_client(monkeypatch):
+    """Returning on a None client would end the thread for good, so queue
+    history would stop growing silently if queue-service came back."""
+    from kiosk_core.qsr_mcp import mcp_server
+
+    class StopPolling(BaseException):
+        """Not an Exception: the loop deliberately swallows those."""
+
+    class Client:
+        def get_queue_snapshot(self):
+            raise StopPolling
+
+    # None on the second iteration must be skipped, not fatal.
+    clients = iter([Client(), None, Client()])
+    monkeypatch.setattr(mcp_server, "get_queue_client", lambda: next(clients))
+    monkeypatch.setattr(mcp_server.time, "sleep", lambda _: None)
+
+    with pytest.raises(StopPolling):
+        mcp_server._poll_queue_forever(0)
