@@ -29,7 +29,7 @@ This release depends on **specific commits** of two other repositories.
 
 | Repository | Pinned commit | Why |
 | --- | --- | --- |
-| [`intel-retail/performance-tools`](https://github.com/intel-retail/performance-tools) | `c561c9e` | Provides `benchmark_smart_kiosk_v2v.py`, the voice-to-voice benchmark orchestrator, and the natural-endpointing measurement mode. Tracked as a Git **submodule**, so the commit is recorded in this repository — you do not pick it manually. |
+| [`intel-retail/performance-tools`](https://github.com/intel-retail/performance-tools) | `2635159` | Provides `benchmark_smart_kiosk_v2v.py`, the voice-to-voice benchmark orchestrator, and the natural-endpointing measurement mode. Tracked as a Git **submodule**, so the commit is recorded in this repository — you do not pick it manually. |
 | [`open-edge-platform/edge-ai-libraries`](https://github.com/open-edge-platform/edge-ai-libraries) | `fc89569` | Source for the `audio-analyzer` and `text-to-speech` images. You do **not** build these two services here — they are always pulled pre-built from the registry (Docker Hub `intel/audio-analyzer` and `intel/text-to-speech` by default). The settings this release relies on (`TEXT_TO_SPEECH_WORKERS`, the ASR preview pool, and forwarding an empty ASR language to English-only checkpoints) are not yet on upstream `main`, so the published images are built from the pinned commit above. |
 
 `audio-analyzer` and `text-to-speech` have **no `build:` section** in
@@ -69,7 +69,7 @@ cd voice-enabled-interactions/smart-kiosk-assistant/
 Confirm the submodule pin before building:
 
 ```bash
-git -C ../performance-tools rev-parse --short HEAD   # expect c561c9e
+git -C ../performance-tools rev-parse --short HEAD   # expect 2635159
 ```
 
 You only need an `edge-ai-libraries` checkout if you intend to rebuild

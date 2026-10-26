@@ -12,10 +12,13 @@ same reasoning already applies to ``get_order_stats`` in ``mcp_service.py``.
 WAL mode (set by ``kiosk_core.ordering.db.init_db``) makes these short-lived
 writes safe alongside the async ordering writers.
 
-**Ownership.** Every row written here is marked ``source='agent'`` so the
-YAML seeder leaves it alone on the next restart — otherwise an agent's price
-change or an 86'd item would silently revert (see
-``SqliteProductRepository.seed_upsert``).
+**Ownership.** A row is marked ``source='agent'`` when the agent changes a
+field that ``products.yaml`` would otherwise re-apply on restart (name,
+category, price, is_bestseller, is_veg) — without it an agent's price change
+would silently revert (see ``SqliteProductRepository.seed_upsert``). An
+availability-only change does *not* claim the row, because the seeder never
+writes ``is_available``; that keeps a temporary 86 from permanently detaching
+the item from YAML. Use :func:`release_item` to hand a claimed row back.
 """
 
 from __future__ import annotations
@@ -33,6 +36,19 @@ logger = logging.getLogger(__name__)
 # deliberately immutable: order_items rows reference it, so renaming an id
 # would orphan historical orders.
 UPDATABLE_FIELDS = ("name", "category", "price", "is_available", "is_bestseller", "is_veg")
+
+# Fields that ``SqliteProductRepository.seed_upsert`` rewrites from
+# products.yaml on every startup. Only a change to one of these needs to
+# claim the row as agent-owned; note ``is_available`` is deliberately absent,
+# because the seeder never writes it. That matters: 86'ing an item is usually
+# temporary, and claiming the row for it would permanently detach the product
+# from YAML control as a side effect of a one-shift stock-out.
+_SEEDED_FIELDS = frozenset({"name", "category", "price", "is_bestseller", "is_veg"})
+
+_COLUMNS = (
+    "SELECT product_id, name, category, price, is_bestseller, is_veg, "
+    "is_available, source FROM products WHERE product_id = ?"
+)
 
 
 class MenuError(ValueError):
@@ -64,11 +80,7 @@ def get_item(product_id: str) -> dict[str, Any] | None:
     """Return one catalogue item, available or not, or ``None``."""
     conn = _connect()
     try:
-        row = conn.execute(
-            "SELECT product_id, name, category, price, is_bestseller, is_veg, "
-            "is_available, source FROM products WHERE product_id = ?",
-            (product_id,),
-        ).fetchone()
+        row = conn.execute(_COLUMNS, (product_id,)).fetchone()
     finally:
         conn.close()
     return _row_to_dict(row) if row else None
@@ -170,25 +182,79 @@ def update_item(product_id: str, **fields: Any) -> dict[str, Any]:
         if flag in updates:
             updates[flag] = int(bool(updates[flag]))
 
-    before = get_item(product_id)
-    if before is None:
-        raise MenuError(f"product not found: {product_id}")
-
     assignments = ", ".join(f"{k} = ?" for k in updates)
+    # Only claim the row when the change is one the YAML seeder would
+    # otherwise revert (see _SEEDED_FIELDS); an availability-only flip leaves
+    # ownership where it is so the item can still track the file.
+    claims_ownership = bool(set(updates) & _SEEDED_FIELDS)
+    source_clause = ", source = 'agent'" if claims_ownership else ""
+
     conn = _connect()
     try:
-        # source='agent' marks the row as agent-owned so the YAML seeder
-        # stops overwriting it on restart.
-        conn.execute(
-            f"UPDATE products SET {assignments}, source = 'agent' WHERE product_id = ?",
-            (*updates.values(), product_id),
-        )
-        conn.commit()
+        # One connection and one BEGIN IMMEDIATE for read-modify-read: with a
+        # connection per statement, a concurrent writer could land between the
+        # before-read and the after-read and be reported as this call's diff.
+        conn.isolation_level = None
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(_COLUMNS, (product_id,)).fetchone()
+            if row is None:
+                raise MenuError(f"product not found: {product_id}")
+            before = _row_to_dict(row)
+            conn.execute(
+                f"UPDATE products SET {assignments}{source_clause} "
+                f"WHERE product_id = ?",
+                (*updates.values(), product_id),
+            )
+            after = _row_to_dict(conn.execute(_COLUMNS, (product_id,)).fetchone())
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        conn.execute("COMMIT")
     finally:
         conn.close()
 
-    after = get_item(product_id)
     changed = {k: {"from": before.get(k), "to": after.get(k)} for k in updates
                if before.get(k) != after.get(k)}
     logger.info("[QSR-MENU] Updated product %s: %s", product_id, changed or "no-op")
     return {"product": after, "changed": changed}
+
+
+def release_item(product_id: str) -> dict[str, Any]:
+    """Hand an agent-owned product back to ``products.yaml`` control.
+
+    Without this, a row is agent-owned for good once any seeded field is
+    changed, and later YAML edits for that item are ignored forever. Calling
+    this restores ``source='yaml'`` so the next startup re-applies the file.
+
+    Args:
+        product_id: The product to release.
+
+    Returns:
+        The product as it stands after the release.
+
+    Raises:
+        MenuError: If the product does not exist.
+    """
+    product_id = _validate_text("product_id", product_id)
+    conn = _connect()
+    try:
+        conn.isolation_level = None
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if conn.execute(_COLUMNS, (product_id,)).fetchone() is None:
+                raise MenuError(f"product not found: {product_id}")
+            conn.execute(
+                "UPDATE products SET source = 'yaml' WHERE product_id = ?",
+                (product_id,),
+            )
+            after = _row_to_dict(conn.execute(_COLUMNS, (product_id,)).fetchone())
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+
+    logger.info("[QSR-MENU] Released product %s back to YAML control", product_id)
+    return after

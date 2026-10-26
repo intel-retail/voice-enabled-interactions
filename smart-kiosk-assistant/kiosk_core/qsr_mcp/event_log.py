@@ -81,8 +81,20 @@ class DurableLog(Protocol):
         self,
         event_type: str | None = None,
         since_seq: int = 0,
-        limit: int = 1000,
+        limit: int | None = 1000,
+        since_ts_ms: int | None = None,
+        until_ts_ms: int | None = None,
     ) -> list[EventEnvelope]:
+        """Return stored events, oldest first.
+
+        Args:
+            event_type: Only return events of this type.
+            since_seq: Only return events with a sequence number above this.
+            limit: Maximum number of events, or ``None`` for no cap. Use a cap
+                unless the other filters already bound the result.
+            since_ts_ms: Only return events at or after this epoch-ms.
+            until_ts_ms: Only return events strictly before this epoch-ms.
+        """
         ...
 
     def replay(self, from_seq: int = 0) -> Iterator[EventEnvelope]:
@@ -137,15 +149,27 @@ class SQLiteLog:
         self,
         event_type: str | None = None,
         since_seq: int = 0,
-        limit: int = 1000,
+        limit: int | None = 1000,
+        since_ts_ms: int | None = None,
+        until_ts_ms: int | None = None,
     ) -> list[EventEnvelope]:
         query = "SELECT envelope FROM events WHERE seq > ?"
         params: list[object] = [since_seq]
         if event_type is not None:
             query += " AND event_type = ?"
             params.append(event_type)
-        query += " ORDER BY seq ASC LIMIT ?"
-        params.append(limit)
+        # Filtering the time window here rather than in the caller keeps the
+        # whole log off the heap: a period query reads only its own rows.
+        if since_ts_ms is not None:
+            query += " AND ts_ms >= ?"
+            params.append(since_ts_ms)
+        if until_ts_ms is not None:
+            query += " AND ts_ms < ?"
+            params.append(until_ts_ms)
+        query += " ORDER BY seq ASC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
         with self._lock:
             rows = self._conn.execute(query, params).fetchall()
         return [EventEnvelope.from_json(r[0]) for r in rows]
@@ -224,7 +248,9 @@ class JSONLFileLog:
         self,
         event_type: str | None = None,
         since_seq: int = 0,
-        limit: int = 1000,
+        limit: int | None = 1000,
+        since_ts_ms: int | None = None,
+        until_ts_ms: int | None = None,
     ) -> list[EventEnvelope]:
         out: list[EventEnvelope] = []
         with self._lock:
@@ -234,8 +260,12 @@ class JSONLFileLog:
                 ev = rec["event"]
                 if event_type is not None and ev["event_type"] != event_type:
                     continue
+                if since_ts_ms is not None and ev["ts_ms"] < since_ts_ms:
+                    continue
+                if until_ts_ms is not None and ev["ts_ms"] >= until_ts_ms:
+                    continue
                 out.append(EventEnvelope(**ev))
-                if len(out) >= limit:
+                if limit is not None and len(out) >= limit:
                     break
         return out
 

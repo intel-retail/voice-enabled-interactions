@@ -30,19 +30,39 @@ from kiosk_core.qsr_mcp.mcp_service import (
     MCP_PORT,
     MCP_SERVICE_ENABLED,
     MCP_TRANSPORT,
-    _queue_client,
     emit_queue_sample,
+    get_queue_client,
+    init,
     mcp,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def run_mcp_server() -> None:
-    """Start the MCP server (blocking). No-op if disabled via env flag."""
+def run_mcp_server(embedded: bool = False) -> None:
+    """Start the MCP server (blocking). No-op if disabled via env flag.
+
+    Args:
+        embedded: ``True`` when run on a background thread inside the
+            kiosk-core process rather than as a standalone process. The
+            ``stdio`` transport is refused in that case: it would take over
+            the container's stdin/stdout, which kiosk-core needs for its own
+            logging, and an MCP client cannot reach a thread's stdio anyway.
+
+    Raises:
+        ValueError: If ``stdio`` is requested while embedded.
+    """
     if not MCP_SERVICE_ENABLED:
         logger.info("[QSR-MCP] MCP_SERVICE_ENABLED=false, MCP server not started")
         return
+    init()
+    if embedded and MCP_TRANSPORT == "stdio":
+        raise ValueError(
+            "MCP transport 'stdio' cannot be used when the server runs inside "
+            "kiosk-core: it would hijack the container's stdio. Set "
+            "KIOSK_CORE_QSR_MCP_TRANSPORT=streamable-http, or run "
+            "'python -m kiosk_core.qsr_mcp.mcp_server' as its own process."
+        )
     logger.info(
         "[QSR-MCP] Starting MCP server: transport=%s host=%s port=%s",
         MCP_TRANSPORT,
@@ -56,14 +76,22 @@ def run_mcp_server() -> None:
 
 
 def _poll_queue_forever(interval_seconds: float) -> None:
-    if _queue_client is None:
+    queue_client = get_queue_client()
+    if queue_client is None:
         logger.info("[QSR-MCP] Queue-service disabled; queue poller not started")
         return
     logger.info("[QSR-MCP] Queue poller started (interval=%.1fs)", interval_seconds)
     while True:
-        snapshot = _queue_client.get_queue_snapshot()
-        if snapshot is not None:
-            emit_queue_sample(snapshot)
+        # The poller owns a daemon thread with no supervisor, so an escaping
+        # exception would kill queue history silently and permanently. Treat
+        # every failure as transient and keep sampling: a malformed payload
+        # (JSON decode) or a logging error must not end the loop.
+        try:
+            snapshot = queue_client.get_queue_snapshot()
+            if snapshot is not None:
+                emit_queue_sample(snapshot)
+        except Exception:
+            logger.exception("[QSR-MCP] Queue poll failed; continuing")
         time.sleep(interval_seconds)
 
 
@@ -71,6 +99,7 @@ def start_queue_poller(interval_seconds: float | None = None) -> threading.Threa
     """Start the queue-depth sampling loop on a daemon thread."""
     if not MCP_SERVICE_ENABLED:
         return None
+    init()
     interval = interval_seconds or cfg.QSR_MCP_QUEUE_POLL_SECONDS
     thread = threading.Thread(
         target=_poll_queue_forever,

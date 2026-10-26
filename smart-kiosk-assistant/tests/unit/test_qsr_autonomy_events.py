@@ -278,6 +278,44 @@ def test_webhook_url_still_builds_a_webhook_sink():
     assert isinstance(delivery.sinks[0], WebhookSink)
 
 
+def test_webhook_treats_4xx_as_permanent_and_does_not_retry():
+    """The webhook sink must match AutonomyEventSink: a rejected payload is
+    not resent, so a misconfigured inbox cannot absorb the retry budget."""
+    calls = []
+
+    def post(url, body, headers, timeout):
+        calls.append(url)
+        return 422
+
+    delivery = Delivery(sinks=[WebhookSink("http://inbox.example/hook", post_json=post)],
+                        max_retries=3, backoff_s=0)
+    assert delivery.dispatch(queue_event(1)) is False
+    assert len(calls) == 1, "a 4xx must not be retried"
+
+
+def test_webhook_retries_5xx():
+    """A server-side failure is transient and should use the retry budget."""
+    calls = []
+
+    def post(url, body, headers, timeout):
+        calls.append(url)
+        return 503
+
+    delivery = Delivery(sinks=[WebhookSink("http://inbox.example/hook", post_json=post)],
+                        max_retries=3, backoff_s=0)
+    assert delivery.dispatch(queue_event(1)) is False
+    assert len(calls) == 3
+
+
+def test_webhook_accepts_2xx():
+    def post(url, body, headers, timeout):
+        return 204
+
+    delivery = Delivery(sinks=[WebhookSink("http://inbox.example/hook", post_json=post)],
+                        max_retries=3, backoff_s=0)
+    assert delivery.dispatch(queue_event(1)) is True
+
+
 def test_webhook_and_autonomy_sinks_are_independent():
     """One failing sink must not stop the other from being attempted."""
     post = RecordingPost()

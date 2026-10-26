@@ -28,6 +28,16 @@ durable SQLite/JSONL log's on-disk format are unchanged by this migration.
 | `kiosk_core/qsr_mcp/menu.py` | Menu actuation — add/update catalogue items (sync `sqlite3`) |
 | `kiosk_core/qsr_mcp/menu_requests.py` | Durable queue of menu changes awaiting operator approval |
 | `kiosk_core/qsr_mcp/api.py` | Operator-only REST endpoints to approve/reject those requests |
+| `kiosk_core/qsr_mcp/atomic_file.py` | Crash-safe JSON writes (temp file + `fsync` + `os.replace`) shared by `board_state` / `menu_requests` |
+
+**Initialisation is explicit.** Importing `mcp_service` is side-effect free:
+`mcp_service.init()` is what opens the durable log, builds the delivery sinks
+and the queue-service client, and points `board_state` / `menu_requests` at
+their configured paths. `main.py` calls it during startup (and
+`run_mcp_server` / `start_queue_poller` call it too). It is idempotent, reads
+configuration at call time rather than import time, and takes `force=True` to
+rebuild — which is how tests get a clean instance. Every runtime entry point
+also self-initialises, so a direct tool call still works standalone.
 | `kiosk_core/queue_client.py` | HTTP client to the standalone `queue-service` |
 
 Started from `main.py`'s lifespan when `KIOSK_CORE_QSR_MCP_ENABLED=true`
@@ -108,16 +118,26 @@ approve its own request would make the gate meaningless:
 | POST | `/api/v1/qsr/menu/requests/{id}/reject` | Reject without executing |
 
 Approval is single-use: the request is marked resolved *before* the write, so
-two concurrent operators cannot both execute it. If the write then fails the
-request is released as rejected with the error, rather than silently
-consuming the approval.
+two concurrent operators cannot both execute it. The two failure modes are
+then kept apart. A caller-fixable rejection (`MenuError` — duplicate id, bad
+price, unknown product) marks the request **rejected** with the error, since
+re-approving it unchanged would fail identically. Any other failure (a locked
+database, a disk error) **releases the request back to `pending`**, so a
+transient fault really is retryable rather than consuming the approval.
 
 **Persistence vs. `products.yaml`.** The YAML is the *default* catalogue and
-is re-applied on every startup. Any row written by these tools is marked
-`source='agent'`, and `SqliteProductRepository.seed_upsert` skips those — so
-an agent's price change or an 86'd item is not silently reverted by the next
-restart, while editing the YAML remains the normal operator workflow for
-every item the agent has not taken over.
+is re-applied on every startup. A row is marked `source='agent'` — which
+`SqliteProductRepository.seed_upsert` then skips — only when the agent changes
+a field the seeder would otherwise re-apply (`name`, `category`, `price`,
+`is_bestseller`, `is_veg`). So an agent's price change is not silently
+reverted by the next restart, while editing the YAML remains the normal
+operator workflow for every item the agent has not taken over.
+
+An **availability-only** change deliberately does *not* claim the row: the
+seeder never writes `is_available`, so an 86'd item stays 86'd across a
+restart without permanently detaching it from YAML control. To hand a claimed
+row back, call `menu.release_item(product_id)` — without it, a single price
+change would make that item ignore `products.yaml` forever.
 
 | Variable | Default | Effect |
 |---|---|---|
@@ -128,9 +148,12 @@ every item the agent has not taken over.
 | `KIOSK_CORE_QSR_MENU_REQUESTS_PATH` | `./qsr_menu_requests.json` | Approval queue file |
 
 Also exposed (unchanged by the migration): `describe()` (self-description)
-and `subscribe(event_type, condition, callback_url)` (records a
-subscription; Kiosk — unlike Order Accuracy's sensor-only services — has no
-restriction against exposing `subscribe`).
+and `subscribe(event_type, condition, callback_url)`. **`subscribe` is a
+declared no-op.** It validates its arguments and returns
+`{"subscribed": false, "implemented": false, "reason": ...}` rather than a
+success acknowledgement, because nothing dispatches on those registrations —
+acknowledging a subscription that never fires is worse than refusing it. Use
+the autonomy push below for server-initiated events.
 
 ## Event autonomy (push to the Central QSR Agent)
 
@@ -151,6 +174,28 @@ best-effort and never blocks the queue poller or a `set_board_mode` call.
 A single ordered worker (rather than a thread per event) ensures a retrying
 older sample cannot arrive *after* a newer one and leave the agent acting on
 a stale queue depth.
+
+### The two store IDs
+
+There are **two** distinct store identifiers, and mixing them up is the
+easiest misconfiguration to make. They are separate because they answer to
+different owners:
+
+| Setting | Default | Who defines the value | What it labels |
+|---|---|---|---|
+| `KIOSK_CORE_QSR_MCP_STORE_ID` | `store-001` | **We do.** Local bookkeeping only. | The `store_id` stamped on every row of our own durable event log (`qsr_mcp_events.db`). Nothing outside this kiosk reads it. |
+| `KIOSK_CORE_QSR_AUTONOMY_STORE_ID` | `qsr-001` | **The agent does.** Must equal its `QSR_RESTAURANT_ID`. | The `store_id` field of the envelope POSTed to the agent. A mismatch means the agent rejects every event with a 4xx — which is treated as permanent, so nothing is retried and the events are lost. |
+
+Symptom of getting it wrong: events appear in the local log but the agent
+never sees them, and `[QSR-AUTONOMY] event ... rejected: HTTP 4xx` is logged.
+
+If you have no reason to keep them apart, set both to the same value — the
+only cost is that the local log is relabelled, which nothing depends on:
+
+```
+KIOSK_CORE_QSR_MCP_STORE_ID=qsr-001
+KIOSK_CORE_QSR_AUTONOMY_STORE_ID=qsr-001
+```
 
 **Envelope** posted to `POST {url}` (the agent replies `202 Accepted`):
 

@@ -21,6 +21,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from kiosk_core.qsr_mcp.atomic_file import write_json_atomic
+
 logger = logging.getLogger(__name__)
 
 VALID_MODES = ("full", "simplified")
@@ -66,7 +68,7 @@ def set_mode(mode: str, reason: str | None = None) -> dict[str, Any]:
         snapshot = dict(_state)
         if _path is not None:
             try:
-                _path.write_text(json.dumps(snapshot), encoding="utf-8")
+                write_json_atomic(_path, snapshot)
             except OSError as exc:
                 logger.warning("[BoardState] Could not persist state to %s: %s", _path, exc)
     return snapshot

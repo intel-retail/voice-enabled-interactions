@@ -20,9 +20,9 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from typing import Protocol
+from typing import Callable, Protocol
 
-from kiosk_core.qsr_mcp.autonomy import PermanentDeliveryError
+from kiosk_core.qsr_mcp.autonomy import PermanentDeliveryError, _post_json
 from kiosk_core.qsr_mcp.event_log import EventEnvelope
 
 logger = logging.getLogger(__name__)
@@ -44,27 +44,44 @@ class Sink(Protocol):
 
 
 class WebhookSink:
-    """POSTs the event envelope to a callback URL (stdlib, no extra deps)."""
+    """POSTs the event envelope to a callback URL (stdlib, no extra deps).
+
+    Shares ``autonomy._post_json`` with :class:`AutonomyEventSink` so both
+    sinks behave identically on the wire: redirects are not followed (a 3xx
+    would silently re-POST the payload to another host) and a 4xx is
+    permanent rather than retried.
+    """
 
     name = "webhook"
 
-    def __init__(self, url: str, timeout_s: float = 5.0) -> None:
+    def __init__(
+        self,
+        url: str,
+        timeout_s: float = 5.0,
+        post_json: Callable[[str, bytes, dict[str, str], float], int] | None = None,
+    ) -> None:
         self._url = url
         self._timeout_s = timeout_s
+        self._post_json = post_json or _post_json
 
     def push(self, event: EventEnvelope) -> bool:
         data = event.to_json().encode("utf-8")
-        req = urllib.request.Request(
-            self._url,
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout_s) as resp:
-                return 200 <= resp.status < 300
+            status = self._post_json(
+                self._url, data, {"Content-Type": "application/json"}, self._timeout_s
+            )
         except (urllib.error.URLError, TimeoutError):
             return False
+        if 200 <= status < 300:
+            return True
+        if 400 <= status < 500:
+            raise PermanentDeliveryError(
+                f"webhook rejected event {event.ref_id}: HTTP {status}"
+            )
+        logger.warning(
+            "[webhook] event %s not accepted: HTTP %s", event.ref_id, status
+        )
+        return False
 
 
 class Delivery:

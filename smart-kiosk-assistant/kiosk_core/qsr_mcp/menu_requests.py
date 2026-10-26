@@ -22,6 +22,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from kiosk_core.qsr_mcp.atomic_file import write_json_atomic
+
 logger = logging.getLogger(__name__)
 
 STATUS_PENDING = "pending"
@@ -68,7 +70,7 @@ def _persist() -> None:
         return
     try:
         _path.parent.mkdir(parents=True, exist_ok=True)
-        _path.write_text(json.dumps(_requests, indent=2))
+        write_json_atomic(_path, _requests)
     except OSError:
         logger.exception("[QSR-MENU] Could not persist menu requests to %s", _path)
 
@@ -136,6 +138,96 @@ def resolve(
             if request["status"] != STATUS_PENDING:
                 return None
             request["status"] = status
+            request["resolved_at"] = time.time()
+            request["result"] = result
+            _persist()
+            return dict(request)
+    return None
+
+
+def release(request_id: str) -> dict[str, Any] | None:
+    """Return a claimed (approved) request to pending so it can be retried.
+
+    ``resolve`` only transitions *out of* pending, which makes approval
+    single-use. That is the right guarantee for a successful execution, but
+    it strands a request that was claimed and then failed for a transient
+    reason (a locked database, an I/O error): it would stay ``approved`` with
+    no result and every retry would be refused as "already approved". This
+    hands the claim back so an operator can approve it again.
+
+    Args:
+        request_id: The request to hand back.
+
+    Returns:
+        The updated request, or ``None`` if it is unknown or not currently
+        claimed — in which case there is nothing to release.
+    """
+    with _lock:
+        for request in _requests:
+            if request["request_id"] != request_id:
+                continue
+            if request["status"] != STATUS_APPROVED:
+                return None
+            request["status"] = STATUS_PENDING
+            request.pop("resolved_at", None)
+            request["result"] = None
+            _persist()
+            return dict(request)
+    return None
+
+
+def fail(request_id: str, error: str) -> dict[str, Any] | None:
+    """Mark a claimed (approved) request rejected after a permanent failure.
+
+    Used when the underlying write is refused for a reason that retrying
+    cannot fix (an invalid price, a duplicate product id). Unlike
+    :func:`release`, this is final.
+
+    Args:
+        request_id: The request to reject.
+        error: The refusal reason, recorded on the request.
+
+    Returns:
+        The updated request, or ``None`` if it is unknown or not currently
+        claimed.
+    """
+    with _lock:
+        for request in _requests:
+            if request["request_id"] != request_id:
+                continue
+            if request["status"] != STATUS_APPROVED:
+                return None
+            request["status"] = STATUS_REJECTED
+            request["resolved_at"] = time.time()
+            request["result"] = {"error": error}
+            _persist()
+            return dict(request)
+    return None
+
+
+def complete(request_id: str, result: dict[str, Any]) -> dict[str, Any] | None:
+    """Record the outcome of a successfully executed claimed request.
+
+    The claim made by ``resolve(..., STATUS_APPROVED)`` necessarily leaves the
+    request already out of pending, so ``resolve`` cannot be used a second
+    time to attach the result — it would return ``None`` and discard it. This
+    writes the result onto the request the operator already claimed, keeping
+    the audit trail complete.
+
+    Args:
+        request_id: The claimed request.
+        result: The outcome of the underlying menu write.
+
+    Returns:
+        The updated request, or ``None`` if it is unknown or not currently
+        claimed.
+    """
+    with _lock:
+        for request in _requests:
+            if request["request_id"] != request_id:
+                continue
+            if request["status"] != STATUS_APPROVED:
+                return None
             request["resolved_at"] = time.time()
             request["result"] = result
             _persist()

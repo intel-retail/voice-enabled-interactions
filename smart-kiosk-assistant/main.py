@@ -67,11 +67,17 @@ async def lifespan(app: FastAPI):
 
         # ── QSR MCP feature startup (Central QSR Agent surface) ──────────────
         if cfg.QSR_MCP_ENABLED:
+            from kiosk_core.qsr_mcp.mcp_service import init as init_qsr_mcp
             from kiosk_core.qsr_mcp.mcp_server import run_mcp_server, start_queue_poller
 
+            # Explicit, before anything can use it: builds the durable log,
+            # delivery sinks and queue client, and points board-state /
+            # approval-queue persistence at their configured paths. The REST
+            # approval endpoints depend on that wiring too, not just MCP.
+            init_qsr_mcp()
             def _run_qsr_mcp() -> None:
                 try:
-                    run_mcp_server()
+                    run_mcp_server(embedded=True)
                 except Exception:
                     logger.exception("[QSR-MCP] MCP server thread crashed")
 

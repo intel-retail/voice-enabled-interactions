@@ -45,9 +45,9 @@ def qsr_env(monkeypatch, tmp_path):
     )
     monkeypatch.setenv("KIOSK_CORE_QUEUE_SERVICE_ENABLED", "false")
     monkeypatch.setenv("KIOSK_CORE_DB_PATH", str(tmp_path / "kiosk.db"))
-    # Fresh state per test: mcp_service.py builds its log/policy/app at
-    # import time from these env vars, so its module (and the singletons it
-    # configures) must be *reloaded*, not just deleted-and-reimported.
+    # Fresh state per test: mcp_service.py reads these env vars when its
+    # ``init()`` runs, and the singletons it configures live in other
+    # modules, so those must be *reloaded*, not just deleted-and-reimported.
     # ``from kiosk_core import config`` resolves via an attribute already
     # cached on the ``kiosk_core`` package object once anything has imported
     # it, so removing "kiosk_core.config" from sys.modules alone does not
@@ -61,6 +61,9 @@ def qsr_env(monkeypatch, tmp_path):
     importlib.reload(menu_requests_module)
     import kiosk_core.qsr_mcp.mcp_service as mcp_service
     importlib.reload(mcp_service)
+    # The reload leaves the module uninitialised by design; build its runtime
+    # state the way the app's startup does rather than relying on import.
+    mcp_service.init(force=True)
 
     return mcp_service
 
@@ -84,7 +87,12 @@ _EXPECTED_TOOLS = {
         },
     },
     "subscribe": {
-        "description": "Subscribe to an event type.",
+        "description": (
+            "Register interest in an event type. NOT IMPLEMENTED: this kiosk "
+            "does not call back to subscribers. Events are delivered by the "
+            "kiosk's own autonomy push (KIOSK_CORE_QSR_AUTONOMY_EVENTS_URL) "
+            "instead; the agent should rely on that or poll the read tools."
+        ),
         "input_schema": {
             "type": "object",
             "additionalProperties": False,
@@ -182,7 +190,15 @@ def test_tools_list_matches_pre_migration_baseline(qsr_env):
             return await client.list_tools()
 
     tools = _run(go())
-    actual = {t.name: {"description": t.description, "input_schema": t.input_schema} for t in tools}
+    # The MCP Tool model renamed this field to camelCase; accept either so the
+    # baseline keeps being checked across SDK versions rather than erroring out.
+    def _schema_of(tool):
+        schema = getattr(tool, "inputSchema", None)
+        if schema is None:
+            schema = getattr(tool, "input_schema", None)
+        return schema
+
+    actual = {t.name: {"description": t.description, "input_schema": _schema_of(t)} for t in tools}
     assert set(actual) == set(_EXPECTED_TOOLS) | _POST_MIGRATION_TOOLS
     for name, expected in _EXPECTED_TOOLS.items():
         assert actual[name] == expected, name
@@ -224,7 +240,7 @@ def test_describe_matches_pre_migration_baseline(qsr_env):
                 "description": _EXPECTED_TOOLS["get_order_stats"]["description"],
                 "schema": {
                     "period": "str (default 'today')",
-                    "top_n": "int (default 5)",
+                    "top_n": "int (default 5, 1-50)",
                 },
             },
             "get_board_state": {
@@ -324,9 +340,11 @@ def test_set_board_mode_rate_limit_matches_baseline(qsr_env):
     }
 
 
-def test_subscribe_returns_ack(qsr_env):
-    """`subscribe` keeps returning the SDK's `{"subscribed", "condition"}`
-    acknowledgement (Kiosk, unlike Order Accuracy, does not strip it)."""
+def test_subscribe_reports_that_it_is_a_no_op(qsr_env):
+    """`subscribe` is still exposed (Kiosk, unlike Order Accuracy, does not
+    strip it) but must not claim a delivery it never performs: nothing in
+    this service reads the subscription registry, so an agent told
+    ``subscribed: true`` would wait forever for callbacks."""
     from fastmcp import Client
 
     async def go():
@@ -341,7 +359,11 @@ def test_subscribe_returns_ack(qsr_env):
             )
 
     result = _run(go())
-    assert result.data == {"subscribed": "board_mode_changed", "condition": "*"}
+    assert result.data["subscribed"] is False
+    assert result.data["implemented"] is False
+    assert result.data["event_type"] == "board_mode_changed"
+    assert result.data["condition"] == "*"
+    assert "autonomy" in result.data["reason"].lower()
 
 
 # ---------------------------------------------------------------------------
@@ -474,3 +496,74 @@ def test_policy_gate_automatic_rate_limit():
     d3 = gate.evaluate("do_thing", {})
     assert [d1.allowed, d2.allowed, d3.allowed] == [True, True, False]
     assert d3.reason == "rate limit exceeded"
+
+
+# ---------------------------------------------------------------------------
+# Explicit initialisation
+# ---------------------------------------------------------------------------
+
+def test_importing_the_module_opens_no_log_and_no_sockets(monkeypatch, tmp_path):
+    """Importing must stay side-effect free. Building the durable log at
+    import time created `qsr_mcp_events.db` on disk and an httpx connection
+    pool merely because something did `import mcp_service` — which is also
+    why the tests had to reload modules in a fixed order."""
+    import importlib
+
+    db_path = tmp_path / "events.db"
+    monkeypatch.setenv("KIOSK_CORE_QSR_MCP_ENABLED", "true")
+    monkeypatch.setenv("KIOSK_CORE_QSR_MCP_LOG_BACKEND", "sqlite")
+    monkeypatch.setenv("KIOSK_CORE_QSR_MCP_LOG_PATH", str(db_path))
+    monkeypatch.setenv("KIOSK_CORE_QUEUE_SERVICE_ENABLED", "true")
+
+    import kiosk_core.config as cfg_module
+    importlib.reload(cfg_module)
+    import kiosk_core.qsr_mcp.mcp_service as mcp_service
+    importlib.reload(mcp_service)
+
+    assert not db_path.exists(), "import must not create the event log"
+    assert mcp_service._log is None
+    assert mcp_service._queue_client is None
+
+    mcp_service.init()
+    assert db_path.exists()
+    assert mcp_service._log is not None
+    assert mcp_service._queue_client is not None
+
+
+def test_init_is_idempotent(monkeypatch, tmp_path):
+    import importlib
+
+    monkeypatch.setenv("KIOSK_CORE_QSR_MCP_LOG_BACKEND", "memory")
+    monkeypatch.setenv("KIOSK_CORE_QUEUE_SERVICE_ENABLED", "false")
+    monkeypatch.setenv(
+        "KIOSK_CORE_QSR_MCP_BOARD_STATE_PATH", str(tmp_path / "board.json")
+    )
+    import kiosk_core.config as cfg_module
+    importlib.reload(cfg_module)
+    import kiosk_core.qsr_mcp.mcp_service as mcp_service
+    importlib.reload(mcp_service)
+
+    mcp_service.init()
+    first = mcp_service._log
+    mcp_service.init()
+    assert mcp_service._log is first, "a second init must not rebuild the log"
+    mcp_service.init(force=True)
+    assert mcp_service._log is not first, "force=True must rebuild"
+
+
+def test_tools_work_without_an_explicit_init(monkeypatch, tmp_path):
+    """`init()` is explicit for the app, but a direct tool call must still
+    work standalone rather than raising AttributeError on a None log."""
+    import importlib
+
+    monkeypatch.setenv("KIOSK_CORE_QSR_MCP_LOG_BACKEND", "memory")
+    monkeypatch.setenv("KIOSK_CORE_QUEUE_SERVICE_ENABLED", "false")
+    import kiosk_core.config as cfg_module
+    importlib.reload(cfg_module)
+    import kiosk_core.qsr_mcp.mcp_service as mcp_service
+    importlib.reload(mcp_service)
+
+    assert mcp_service._log is None
+    result = mcp_service.get_queue_history(period="today")
+    assert result["samples"] == 0
+    assert mcp_service._log is not None, "first use must self-initialise"

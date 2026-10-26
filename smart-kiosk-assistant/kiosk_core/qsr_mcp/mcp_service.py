@@ -36,7 +36,9 @@ import calendar
 import logging
 import os
 import sqlite3
+import threading
 import time
+import uuid
 from typing import Any, Optional
 
 from fastmcp import FastMCP
@@ -47,7 +49,7 @@ from kiosk_core.qsr_mcp import board_state
 from kiosk_core.qsr_mcp.autonomy import AutonomyEventSink
 from kiosk_core.qsr_mcp.delivery import BackgroundDispatcher, Delivery
 from kiosk_core.qsr_mcp import menu, menu_requests
-from kiosk_core.qsr_mcp.event_log import build_log, new_event
+from kiosk_core.qsr_mcp.event_log import DurableLog, build_log, new_event
 from kiosk_core.qsr_mcp.policy import GateLevel, PolicyGate
 
 logger = logging.getLogger(__name__)
@@ -68,49 +70,106 @@ _EVENT_TYPES: dict[str, dict[str, str]] = {
 }
 
 # -- plumbing: durable log, delivery, policy gate (self-contained, no SDK) --
+#
+# These are built by `init()` rather than at import time. Importing this
+# module must stay side-effect free: it is imported by the test suite, by
+# `main.py` before the app decides whether the feature is enabled, and by
+# tooling that only wants `describe`. Building them eagerly would open a
+# SQLite connection, create `qsr_mcp_events.db` on disk and construct an
+# httpx connection pool as a side effect of an `import` statement.
+#
+# `init()` is idempotent and is called explicitly from the app's startup
+# (`main.py` / `run_mcp_server`); every runtime entry point also calls
+# `_ensure_init()` so a direct tool call still works without it.
 
-_log = build_log(
-    backend=cfg.QSR_MCP_LOG_BACKEND if MCP_SERVICE_ENABLED else "memory",
-    path=cfg.QSR_MCP_LOG_PATH,
-    service=SERVICE_NAME,
-)
-_delivery = Delivery(webhook_url=cfg.QSR_MCP_WEBHOOK_URL)
-# Outbound autonomy push to the Central QSR Agent; built only when the URL is
-# configured, so the default stack performs no outbound delivery at all.
-_autonomy_delivery = (
-    Delivery(
-        sinks=[
-            AutonomyEventSink(
-                cfg.QSR_AUTONOMY_EVENTS_URL,
-                store_id=cfg.QSR_AUTONOMY_STORE_ID,
-                token=cfg.QSR_AUTONOMY_EVENTS_TOKEN,
-                event_types=cfg.QSR_AUTONOMY_EVENT_TYPES,
-                queue_min_delta=cfg.QSR_AUTONOMY_QUEUE_MIN_DELTA,
-                timeout_s=cfg.QSR_AUTONOMY_TIMEOUT_SECONDS,
+_log: DurableLog | None = None
+_delivery: Delivery | None = None
+_autonomy_delivery: Delivery | None = None
+_dispatchers: tuple[BackgroundDispatcher, ...] = ()
+_queue_client: QueueClient | None = None
+_initialised = False
+_init_lock = threading.Lock()
+
+
+def init(force: bool = False) -> None:
+    """Build the service's runtime state. Idempotent.
+
+    Reads configuration *now* rather than at import time, so tests (and a
+    reloaded `config` module) see the values they set.
+
+    Args:
+        force: Rebuild even if already initialised. Used by tests.
+    """
+    global _log, _delivery, _autonomy_delivery, _dispatchers
+    global _queue_client, _initialised
+
+    with _init_lock:
+        if _initialised and not force:
+            return
+
+        _log = build_log(
+            backend=cfg.QSR_MCP_LOG_BACKEND if MCP_SERVICE_ENABLED else "memory",
+            path=cfg.QSR_MCP_LOG_PATH,
+            service=SERVICE_NAME,
+        )
+        _delivery = Delivery(webhook_url=cfg.QSR_MCP_WEBHOOK_URL)
+        # Outbound autonomy push to the Central QSR Agent; built only when the
+        # URL is configured, so the default stack performs no outbound
+        # delivery at all.
+        _autonomy_delivery = (
+            Delivery(
+                sinks=[
+                    AutonomyEventSink(
+                        cfg.QSR_AUTONOMY_EVENTS_URL,
+                        store_id=cfg.QSR_AUTONOMY_STORE_ID,
+                        token=cfg.QSR_AUTONOMY_EVENTS_TOKEN,
+                        event_types=cfg.QSR_AUTONOMY_EVENT_TYPES,
+                        queue_min_delta=cfg.QSR_AUTONOMY_QUEUE_MIN_DELTA,
+                        timeout_s=cfg.QSR_AUTONOMY_TIMEOUT_SECONDS,
+                    )
+                ]
             )
-        ]
-    )
-    if cfg.QSR_AUTONOMY_EVENTS_URL and MCP_SERVICE_ENABLED
-    else None
-)
+            if cfg.QSR_AUTONOMY_EVENTS_URL and MCP_SERVICE_ENABLED
+            else None
+        )
 
-# One FIFO worker per destination: emit() stays non-blocking, while delivery
-# order (and therefore the agent's view of "latest queue depth") is preserved.
-_dispatchers = tuple(
-    BackgroundDispatcher(delivery, name)
-    for delivery, name in (
-        (_delivery, "qsr-webhook-delivery"),
-        (_autonomy_delivery, "qsr-autonomy-delivery"),
-    )
-    if delivery is not None and delivery.sinks
-)
+        # One FIFO worker per destination: emit() stays non-blocking, while
+        # delivery order (and therefore the agent's view of "latest queue
+        # depth") is preserved.
+        _dispatchers = tuple(
+            BackgroundDispatcher(delivery, name)
+            for delivery, name in (
+                (_delivery, "qsr-webhook-delivery"),
+                (_autonomy_delivery, "qsr-autonomy-delivery"),
+            )
+            if delivery is not None and delivery.sinks
+        )
+
+        board_state.configure(cfg.QSR_MCP_BOARD_STATE_PATH)
+        menu_requests.configure(cfg.QSR_MENU_REQUESTS_PATH)
+        _queue_client = QueueClient() if cfg.QUEUE_SERVICE_ENABLED else None
+
+        _initialised = True
+
+
+def _ensure_init() -> None:
+    """Initialise on first use, so a direct tool call works standalone."""
+    if not _initialised:
+        init()
+
+
+def get_queue_client() -> QueueClient | None:
+    """Return the shared queue-service client, or ``None`` when disabled.
+
+    An accessor rather than a module global: importing the value directly
+    would capture ``None`` from before :func:`init` ran.
+    """
+    _ensure_init()
+    return _queue_client
+
 
 _policy = PolicyGate()
 _subscriptions: list[dict[str, str]] = []
-
-board_state.configure(cfg.QSR_MCP_BOARD_STATE_PATH)
-menu_requests.configure(cfg.QSR_MENU_REQUESTS_PATH)
-_queue_client = QueueClient() if cfg.QUEUE_SERVICE_ENABLED else None
 
 mcp = FastMCP(SERVICE_NAME)
 
@@ -131,6 +190,8 @@ def emit(event_type: str, payload: dict[str, Any], ref_id: str | None = None) ->
     authoritative record and delivery is best-effort.
     """
     event = new_event(event_type, SERVICE_NAME, STORE_ID, payload, ref_id)
+    _ensure_init()
+    assert _log is not None  # set by init()
     _log.append(event)
     for dispatcher in _dispatchers:
         dispatcher.submit(event)
@@ -181,36 +242,52 @@ def describe() -> dict[str, Any]:
     }
 
 
-@mcp.tool(name="subscribe", description="Subscribe to an event type.")
+@mcp.tool(
+    name="subscribe",
+    description=(
+        "Register interest in an event type. NOT IMPLEMENTED: this kiosk "
+        "does not call back to subscribers. Events are delivered by the "
+        "kiosk's own autonomy push (KIOSK_CORE_QSR_AUTONOMY_EVENTS_URL) "
+        "instead; the agent should rely on that or poll the read tools."
+    ),
+)
 def subscribe(event_type: str, condition: str, callback_url: str) -> dict[str, Any]:
+    """Acknowledge a subscription request without promising delivery.
+
+    The tool is kept so the service matches the platform-wide MCP contract,
+    but nothing in this service reads the registry, so reporting success
+    would leave the agent waiting for callbacks that never arrive. The
+    request is recorded for debugging and the no-op is stated explicitly.
+    """
     _subscriptions.append(
         {"event_type": event_type, "condition": condition, "callback_url": callback_url}
     )
-    return {"subscribed": event_type, "condition": condition}
+    logger.info(
+        "[QSR-MCP] subscribe(%s) recorded but not implemented; no callback "
+        "will be sent to %s",
+        event_type,
+        callback_url,
+    )
+    return {
+        "subscribed": False,
+        "implemented": False,
+        "event_type": event_type,
+        "condition": condition,
+        "reason": (
+            "This service does not deliver subscription callbacks. Events are "
+            "pushed to the agent's /autonomy/events inbox when "
+            "KIOSK_CORE_QSR_AUTONOMY_EVENTS_URL is configured; otherwise poll "
+            "the read tools."
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
 # Read tools
 # ---------------------------------------------------------------------------
 
-_LOG_READ_PAGE = 5000
-
-
-def _read_entire_log() -> list:
-    """Read the full durable log, oldest -> newest (both durable log
-    backends have a gapless, contiguous ``seq``, so unfiltered paging never
-    skips or re-reads rows regardless of how large the log grows)."""
-    events: list = []
-    since_seq = 0
-    while True:
-        page = _log.read(since_seq=since_seq, limit=_LOG_READ_PAGE)
-        if not page:
-            break
-        events.extend(page)
-        since_seq += len(page)
-        if len(page) < _LOG_READ_PAGE:
-            break
-    return events
+# Upper bound for get_order_stats' top_n (see the clamp there).
+_MAX_TOP_N = 50
 
 
 def _day_bounds_ms(period: str) -> tuple[int, int]:
@@ -250,9 +327,10 @@ def _register_read_tool(name: str, description: str, schema: dict[str, str]):
     schema={},
 )
 def get_queue_depth() -> dict[str, Any]:
-    if _queue_client is None:
+    client = get_queue_client()
+    if client is None:
         return {"available": False, "reason": "queue-service disabled"}
-    snapshot = _queue_client.get_queue_snapshot()
+    snapshot = client.get_queue_snapshot()
     if snapshot is None:
         return {"available": False, "reason": "queue-service unreachable"}
     return {"available": True, **snapshot}
@@ -269,11 +347,19 @@ def get_queue_depth() -> dict[str, Any]:
 )
 def get_queue_history(period: str = "today") -> dict[str, Any]:
     start_ms, end_ms = _day_bounds_ms(period)
-    samples = [
-        e
-        for e in _read_entire_log()
-        if e.event_type == "queue_depth_sample" and start_ms <= e.ts_ms < end_ms
-    ]
+    _ensure_init()
+    assert _log is not None  # set by init()
+    # Both filters are applied by the storage backend, so a period query
+    # reads only its own rows instead of pulling every event of every type
+    # onto the heap. The window itself bounds the result (one day is ~2,880
+    # samples at a 30s poll), so no additional cap is needed; "all" is
+    # unbounded by definition of the question being asked.
+    samples = _log.read(
+        event_type="queue_depth_sample",
+        since_ts_ms=start_ms,
+        until_ts_ms=end_ms,
+        limit=None,
+    )
     counts = [e.payload.get("count", 0) for e in samples]
     return {
         "period": period,
@@ -289,9 +375,13 @@ def get_queue_history(period: str = "today") -> dict[str, Any]:
         "Order activity for a period (today|yesterday|all|YYYY-MM-DD): "
         "confirmed order count, revenue, and top items."
     ),
-    schema={"period": "str (default 'today')", "top_n": "int (default 5)"},
+    schema={"period": "str (default 'today')", "top_n": "int (default 5, 1-50)"},
 )
 def get_order_stats(period: str = "today", top_n: int = 5) -> dict[str, Any]:
+    # The agent chooses top_n, so clamp rather than trust it: an unbounded
+    # (or negative) value would turn a small reporting query into a full
+    # order_items scan serialised back over MCP.
+    top_n = max(1, min(int(top_n), _MAX_TOP_N))
     date_filter, params = _order_date_filter(period)
     # Raw sqlite3 (sync) rather than the ordering module's aiosqlite
     # repository: this MCP server runs on its own thread/loop, and a
@@ -499,7 +589,10 @@ def _add_menu_item_impl(payload: dict[str, Any], reason: Optional[str] = None) -
                     "price": product["price"],
                     "reason": reason,
                 },
-                ref_id=product["product_id"],
+                # Unique per emission for the same reason as the update path:
+                # an id that repeats would be swallowed by the log's ref_id
+                # idempotency.
+                ref_id=f"{product['product_id']}:{uuid.uuid4().hex}",
             )
         except Exception:
             logger.exception("[QSR-MCP] Failed to emit menu_item_added")
@@ -510,8 +603,13 @@ def approve_menu_request(request_id: str) -> dict[str, Any]:
     """Execute a pending menu request after operator approval.
 
     Called by the operator REST endpoint, not by the agent — self-approval
-    would defeat the gate. The request is marked resolved *before* the write
-    so two concurrent approvals cannot both execute it.
+    would defeat the gate. The request is claimed *before* the write so two
+    concurrent approvals cannot both execute it.
+
+    If the write then fails, the claim is not silently consumed: a permanent
+    refusal (``menu.MenuError`` — invalid price, duplicate id) rejects the
+    request for good, while any other error hands it back to pending so the
+    operator can approve it again.
 
     Raises:
         menu.MenuError: If the request is unknown, already resolved, or the
@@ -534,14 +632,19 @@ def approve_menu_request(request_id: str) -> dict[str, Any]:
             result = _update_menu_item_impl(
                 request["payload"], request.get("reason")
             )
-    except Exception as exc:
-        # Hand the request back so a transient failure is retryable rather
-        # than silently consuming the operator's approval.
-        menu_requests.resolve(request_id, menu_requests.STATUS_REJECTED,
-                              {"error": str(exc)})
+    except menu.MenuError as exc:
+        # Permanent, caller-fixable refusal (invalid price, duplicate id).
+        # Retrying cannot help, so consume the approval and record why.
+        menu_requests.fail(request_id, str(exc))
+        raise
+    except Exception:
+        # Anything else is treated as transient (locked database, I/O error):
+        # hand the claim back to pending so the operator can approve again
+        # rather than silently consuming their approval.
+        menu_requests.release(request_id)
         raise
 
-    menu_requests.resolve(request_id, menu_requests.STATUS_APPROVED, result)
+    menu_requests.complete(request_id, result)
     return {"request_id": request_id, "executed": True, "result": result}
 
 
@@ -559,7 +662,10 @@ def _update_menu_item_impl(payload: dict[str, Any], reason: Optional[str] = None
                     "changed": outcome["changed"],
                     "reason": reason,
                 },
-                ref_id=product_id,
+                # A product can be updated many times, so the product id alone
+                # is not a unique event identity: the log is idempotent on
+                # ref_id and would silently drop every later change.
+                ref_id=f"{product_id}:{uuid.uuid4().hex}",
             )
         except Exception:
             logger.exception("[QSR-MCP] Failed to emit menu_item_updated")

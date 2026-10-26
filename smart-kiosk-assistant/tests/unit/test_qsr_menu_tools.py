@@ -182,6 +182,95 @@ def test_seeder_still_updates_yaml_owned_products(menu_env):
     assert menu.get_item("P2")["price"] == 60.0
 
 
+def test_availability_only_change_does_not_claim_the_row(menu_env):
+    """86'ing an item is usually temporary. The seeder never writes
+    ``is_available``, so an availability-only flip must leave the product
+    under YAML control rather than permanently detaching it."""
+    from kiosk_core.qsr_mcp import menu
+
+    assert menu.get_item("P1")["source"] == "yaml"
+    menu_env.update_menu_item("P1", is_available=False)
+
+    item = menu.get_item("P1")
+    assert item["is_available"] is False
+    assert item["source"] == "yaml", "a stock-out must not claim the row"
+
+
+def test_availability_only_change_still_survives_a_reseed(menu_env):
+    """Leaving the row YAML-owned is only safe because the seeder does not
+    write is_available — pin that, since the ownership rule depends on it."""
+    from kiosk_core.ordering.db import get_db
+    from kiosk_core.ordering.repository import SqliteProductRepository
+    from kiosk_core.qsr_mcp import menu
+
+    menu_env.update_menu_item("P1", is_available=False)
+
+    async def reseed():
+        async with get_db() as db:
+            repo = SqliteProductRepository(db)
+            await repo.seed_upsert(
+                Product(product_id="P1", name="Veg Burger", category="burgers", price=100.0)
+            )
+            await db.commit()
+
+    _run(reseed())
+    assert menu.get_item("P1")["is_available"] is False
+
+
+def test_seeded_field_change_does_claim_the_row(menu_env):
+    """A price change would be reverted by the seeder, so it must claim."""
+    from kiosk_core.qsr_mcp import menu
+
+    menu_env.update_menu_item("P1", price=175.0)
+    assert menu.get_item("P1")["source"] == "agent"
+
+
+def test_release_hands_a_claimed_row_back_to_yaml(menu_env):
+    """Without a release path a product is agent-owned for good, and later
+    YAML edits for it are ignored forever."""
+    from kiosk_core.ordering.db import get_db
+    from kiosk_core.ordering.repository import SqliteProductRepository
+    from kiosk_core.qsr_mcp import menu
+
+    menu_env.update_menu_item("P1", price=175.0)
+    assert menu.get_item("P1")["source"] == "agent"
+
+    released = menu.release_item("P1")
+    assert released["source"] == "yaml"
+
+    async def reseed():
+        async with get_db() as db:
+            repo = SqliteProductRepository(db)
+            written = await repo.seed_upsert(
+                Product(product_id="P1", name="Veg Burger", category="burgers", price=100.0)
+            )
+            await db.commit()
+            return written
+
+    assert _run(reseed()) is True
+    assert menu.get_item("P1")["price"] == 100.0
+
+
+def test_releasing_an_unknown_product_is_rejected(menu_env):
+    from kiosk_core.qsr_mcp import menu
+
+    with pytest.raises(menu.MenuError, match="not found"):
+        menu.release_item("NOPE")
+
+
+def test_failed_update_leaves_no_open_transaction(menu_env):
+    """The rollback path must release BEGIN IMMEDIATE's write lock, or every
+    later menu write would block until the connection was garbage-collected."""
+    from kiosk_core.qsr_mcp import menu
+
+    with pytest.raises(menu.MenuError):
+        menu.update_item("NOPE", price=5.0)
+
+    # Would raise "database is locked" if the failed call held the lock.
+    menu.update_item("P1", price=123.0)
+    assert menu.get_item("P1")["price"] == 123.0
+
+
 # ---------------------------------------------------------------------------
 # Policy gate + approval queue
 # ---------------------------------------------------------------------------
