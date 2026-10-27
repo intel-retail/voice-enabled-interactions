@@ -25,6 +25,12 @@
 #
 # Usage — set HTTP_PROXY / HTTPS_PROXY in .env, then:
 #
+#   make up PROXY=true
+#
+# That is preferred over invoking compose directly, because `make up` also
+# runs check-env and adds the identity/queue profile flags. The equivalent
+# raw command (without those) is:
+#
 #   docker compose -f docker-compose.yml -f docker-compose.proxy.yml up -d
 #
 # Values set here REPLACE anything Docker would have taken from

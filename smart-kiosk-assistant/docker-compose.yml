@@ -317,14 +317,13 @@ services:
       # Set HF_HUB_OFFLINE=0 / TRANSFORMERS_OFFLINE=0 in .env if this
       # environment has working internet/proxy access and you want live
       # Hub checks (e.g. picking up a newly-released model revision).
-      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-1}
-      TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-1}
-      # NOTE: the shipped .env.example sets these to 0 (online), which wins over
-      # the :-1 fallback above — the fallback only applies when the variable is
-      # absent entirely (raw `docker compose up` with no .env). Online is the
-      # correct default: setup_models.sh does NOT pre-fetch this service's
-      # models, they are downloaded in-container on first run. Offline mode is
-      # only safe once a previous run has populated the cache volume.
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
+      TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-0}
+      # NOTE: the fallback below matches .env.example (0 = online). Online is
+      # the correct default: setup_models.sh does NOT pre-fetch this service's
+      # models, they are downloaded in-container on first run, so a fresh host
+      # with no .env must be able to reach the Hub. Offline mode is only safe
+      # once a previous run has populated the cache volume.
       #
       # Proxy variables are intentionally NOT declared here. Docker already
       # injects HTTP_PROXY/HTTPS_PROXY/NO_PROXY from ~/.docker/config.json
@@ -434,19 +433,17 @@ services:
       # had none, so the service always made a live Hub call during FastAPI
       # lifespan regardless of what the user set in .env.
       #
-      # IMPORTANT: this does not by itself fix a no-egress host. The shipped
-      # .env.example sets HF_HUB_OFFLINE=0 (online), which wins over the :-1
-      # fallback below — the fallback only applies when the variable is absent
-      # entirely. Online is the correct default because setup_models.sh does
-      # NOT pre-fetch the TTS models; they are downloaded in-container on first
+      # IMPORTANT: this does not by itself fix a no-egress host. Online (0) is
+      # the default here and in .env.example, because setup_models.sh does NOT
+      # pre-fetch the TTS models; they are downloaded in-container on first
       # run. On a host with no route to huggingface.co that call raises
       # httpx.ConnectError at startup, the healthcheck never passes, and every
       # service gated on `depends_on: text-to-speech: service_healthy`
       # (rag-service, kiosk-core) aborts with "dependency failed to start".
-      # Fix that with a proxy (see docker-compose.proxy.yml) or by warming the
-      # cache on a connected host, then setting HF_HUB_OFFLINE=1.
-      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-1}
-      TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-1}
+      # Fix that with a proxy (`make up PROXY=true`) or by warming the cache on
+      # a connected host, then setting HF_HUB_OFFLINE=1.
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
+      TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-0}
       # Proxy variables intentionally NOT declared — see audio-analyzer above.
       NO_PROXY: *no-proxy
       no_proxy: *no-proxy
@@ -599,8 +596,8 @@ services:
       # Set HF_HUB_OFFLINE=0 / TRANSFORMERS_OFFLINE=0 in .env if this
       # environment has working internet/proxy access and you want live
       # Hub checks (e.g. picking up a newly-released model revision).
-      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-1}
-      TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-1}
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
+      TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-0}
       # Bypass corporate proxy for all intra-cluster traffic so that
       # requests to ovms-llm, kiosk-core, etc. go directly on the
       # Docker bridge network instead of through the HTTP proxy.
@@ -1024,8 +1021,8 @@ services:
       # runs on a separate machine, so add its host to KIOSK_CORE_QSR_EXTRA_NO_PROXY
       # when autonomy delivery is enabled, or the POST is sent to the proxy and
       # rejected. Note: Python's urllib matches no_proxy by suffix, not CIDR.
-      NO_PROXY: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,queue-service,172.16.0.0/12,10.0.0.0/8${KIOSK_CORE_QSR_EXTRA_NO_PROXY:+,${KIOSK_CORE_QSR_EXTRA_NO_PROXY}}"
-      no_proxy: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,queue-service,172.16.0.0/12,10.0.0.0/8${KIOSK_CORE_QSR_EXTRA_NO_PROXY:+,${KIOSK_CORE_QSR_EXTRA_NO_PROXY}}"
+      NO_PROXY: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,queue-service,rtsp-streamer,identity-service,172.16.0.0/12,10.0.0.0/8${KIOSK_CORE_QSR_EXTRA_NO_PROXY:+,${KIOSK_CORE_QSR_EXTRA_NO_PROXY}}"
+      no_proxy: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,queue-service,rtsp-streamer,identity-service,172.16.0.0/12,10.0.0.0/8${KIOSK_CORE_QSR_EXTRA_NO_PROXY:+,${KIOSK_CORE_QSR_EXTRA_NO_PROXY}}"
     volumes:
       - generated_audio:/app/generated_audio
       - kiosk_db:/app/data

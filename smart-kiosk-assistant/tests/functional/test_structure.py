@@ -138,3 +138,103 @@ class TestProjectStructure:
         assert any("8012" in p for p in port_strings), (
             f"Port 8012 not exposed by kiosk-core in docker-compose.yml; ports: {port_strings}"
         )
+
+
+class TestProxyConfiguration:
+    """Guards against drift in the shared NO_PROXY configuration."""
+
+    #: Services expected to use the shared ``x-no-proxy`` anchor verbatim.
+    _ANCHORED_SERVICES = (
+        "audio-analyzer",
+        "text-to-speech",
+        "rag-service",
+    )
+
+    @staticmethod
+    def _load_compose() -> dict:
+        import yaml
+
+        with open(_KIOSK_ROOT / "docker-compose.yml") as fh:
+            return yaml.safe_load(fh)
+
+    @pytest.mark.tier1
+    def test_anchored_services_share_the_no_proxy_list(self):
+        """Services using the anchor must all resolve to the same NO_PROXY value."""
+        compose = self._load_compose()
+        anchor = compose["x-no-proxy"]
+
+        for service in self._ANCHORED_SERVICES:
+            env = compose["services"][service]["environment"]
+            for key in ("NO_PROXY", "no_proxy"):
+                assert env[key] == anchor, (
+                    f"{service}.{key} does not match the x-no-proxy anchor. "
+                    f"Expected {anchor!r}, got {env[key]!r}"
+                )
+
+    @pytest.mark.tier1
+    def test_kiosk_core_no_proxy_prefix_matches_anchor(self):
+        """kiosk-core keeps its own literal (it appends a runtime suffix).
+
+        YAML anchors cannot be concatenated, so kiosk-core cannot reuse
+        ``x-no-proxy`` directly. Assert its prefix still matches the anchor so
+        a host added to the anchor but forgotten here fails CI instead of
+        silently diverging.
+        """
+        compose = self._load_compose()
+        anchor_hosts = [h for h in compose["x-no-proxy"].split(",") if h]
+
+        env = compose["services"]["kiosk-core"]["environment"]
+        for key in ("NO_PROXY", "no_proxy"):
+            value = env[key]
+            # Drop the ${KIOSK_CORE_QSR_EXTRA_NO_PROXY:+,...} suffix.
+            literal = value.split("${", 1)[0]
+            hosts = [h for h in literal.split(",") if h]
+
+            missing = [h for h in anchor_hosts if h not in hosts]
+            assert not missing, (
+                f"kiosk-core.{key} is missing entries present in the x-no-proxy "
+                f"anchor: {missing}. Keep the two in sync."
+            )
+
+    @pytest.mark.tier1
+    def test_main_compose_does_not_declare_empty_proxy_vars(self):
+        """Declaring HTTP_PROXY with an empty default clobbers ~/.docker/config.json.
+
+        Docker injects proxy settings from config.json only for variables that
+        are not already set, so ``HTTP_PROXY: ${HTTP_PROXY:-}`` would always
+        inject an empty value and override a working host proxy. Proxy values
+        belong in the opt-in docker-compose.proxy.yml override instead.
+        """
+        compose = self._load_compose()
+
+        offenders = []
+        for name, service in compose.get("services", {}).items():
+            env = service.get("environment") or {}
+            if not isinstance(env, dict):
+                continue
+            for key in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
+                if key in env:
+                    offenders.append(f"{name}.{key}")
+
+        assert not offenders, (
+            "docker-compose.yml must not declare proxy variables (they would "
+            "override ~/.docker/config.json with an empty value). Use "
+            f"docker-compose.proxy.yml instead. Found: {offenders}"
+        )
+
+    @pytest.mark.tier1
+    def test_proxy_override_file_exists_and_sets_proxies(self):
+        """The opt-in override must exist and set proxies for the downloading services."""
+        import yaml
+
+        path = _KIOSK_ROOT / "docker-compose.proxy.yml"
+        assert path.is_file(), "docker-compose.proxy.yml not found"
+
+        with open(path) as fh:
+            override = yaml.safe_load(fh)
+
+        for service in self._ANCHORED_SERVICES:
+            env = override["services"][service]["environment"]
+            assert "HTTP_PROXY" in env and "HTTPS_PROXY" in env, (
+                f"{service} must set HTTP_PROXY and HTTPS_PROXY in the proxy override"
+            )

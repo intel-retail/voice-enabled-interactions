@@ -74,8 +74,13 @@ inside their containers on first run, which is why `HF_HUB_OFFLINE=0`
   ```
 
   ```bash
-  docker compose -f docker-compose.yml -f docker-compose.proxy.yml up -d
+  make up PROXY=true
   ```
+
+  Prefer this over running `docker compose -f docker-compose.yml -f
+  docker-compose.proxy.yml up -d` by hand: the `make` target also runs
+  `check-env` and keeps the identity/queue profile flags that `make up`
+  normally adds (queue services are on by default via `QUEUE=true`).
 
   Intra-cluster traffic always bypasses the proxy via the shared `NO_PROXY`
   anchor in `docker-compose.yml`.
