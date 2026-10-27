@@ -25,6 +25,66 @@
   docker compose logs -f kiosk-ui
   ```
 
+## `dependency failed to start: container <name> is unhealthy`
+
+Symptom — `make up` (or `docker compose up`) aborts with one or more of:
+
+```text
+✘ Container audio-analyzer  Error dependency audio-analyzer failed to start
+✘ Container text-to-speech  Error dependency text-to-speech failed to start
+dependency failed to start: container text-to-speech is unhealthy
+```
+
+`rag-service` and `kiosk-core` gate on `depends_on: service_healthy`, so a
+single service that never reports healthy takes the whole stack down with it.
+Find the real error in the failing service's own log:
+
+```bash
+docker compose logs -f text-to-speech
+docker compose logs -f audio-analyzer
+```
+
+**Cause 1 — no route to Hugging Face.** The log ends in:
+
+```text
+httpx.ConnectError: [Errno 101] Network is unreachable
+```
+
+raised from `huggingface_hub` during FastAPI startup. The service tried a live
+Hub call (model resolution, or an OpenVINO IR export) and the host has no
+direct internet access. Fix with either:
+
+- **Cached models (recommended).** Run `./setup_models.sh` once on a connected
+  host, then force offline mode in `.env` so no Hub call is attempted at all:
+
+  ```bash
+  HF_HUB_OFFLINE=1
+  TRANSFORMERS_OFFLINE=1
+  ```
+
+- **Behind a proxy.** Set the egress proxy in `.env` and leave
+  `HF_HUB_OFFLINE=0` for the first run. Intra-cluster traffic always bypasses
+  the proxy via the `NO_PROXY` list in `docker-compose.yml`:
+
+  ```bash
+  HTTP_PROXY=http://proxy.example.com:911
+  HTTPS_PROXY=http://proxy.example.com:912
+  ```
+
+Then recreate the affected services:
+
+```bash
+docker compose up -d --force-recreate text-to-speech audio-analyzer
+```
+
+**Cause 2 — stale image.** If the log shows a configuration or missing-file
+error rather than a network error, the `:latest` tag is resolving to an old
+cached image. Rebuild that one service without the cache:
+
+```bash
+docker compose build --no-cache <service-name>
+```
+
 ## First Startup Is Slow
 
 This is expected. On first run each model-hosting service downloads or

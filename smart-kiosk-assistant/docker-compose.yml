@@ -74,6 +74,15 @@ services:
       - video
     volumes:
       - ./rtsp-streamer/start.sh:/opt/rtsp-streamer/start.sh:ro
+      # Mounted for the same reason as start.sh: the Dockerfile COPYs this
+      # file in, so a stale cached/pulled image under the unchanged :latest
+      # tag keeps serving an old (or missing) config. Without the catch-all
+      # path config MediaMTX rejects every dynamic publish with
+      # "path '<name>' is not configured", the 8554 healthcheck never passes,
+      # and `docker compose up` reports the container as unhealthy — which
+      # previously only `docker compose build --no-cache rtsp-streamer`
+      # cleared. Bind-mounting makes image staleness unable to break startup.
+      - ./rtsp-streamer/mediamtx.yml:/opt/rtsp-streamer/mediamtx.yml:ro
       - ./Sample_data:/media:ro
     healthcheck:
       test: ["CMD", "nc", "-z", "127.0.0.1", "8554"]
@@ -296,6 +305,16 @@ services:
       # Hub checks (e.g. picking up a newly-released model revision).
       HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-1}
       TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-1}
+      # Optional egress proxy, used only when HF_HUB_OFFLINE=0 forces a live
+      # Hub call (first-run model download). Unset by default so hosts with
+      # direct internet are unaffected; NO_PROXY keeps intra-cluster traffic
+      # on the Docker bridge rather than bouncing off the proxy.
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      http_proxy: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      https_proxy: ${HTTPS_PROXY:-}
+      NO_PROXY: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,172.16.0.0/12,10.0.0.0/8"
+      no_proxy: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,172.16.0.0/12,10.0.0.0/8"
       # HuggingFace token — required by Pyannote speaker diarization.
       # Set HF_TOKEN in .env (single source of truth).
       HF_TOKEN: ${HF_TOKEN:-}
@@ -391,6 +410,27 @@ services:
       # Point HF cache under ~/.cache so a single ./.cache mount persists
       # every model cache the service uses (HF, torch hub, etc.).
       HF_HOME: /app/text-to-speech/.cache/huggingface
+      # Same offline guards as audio-analyzer/rag-service. Without these the
+      # service makes a live Hub metadata call during FastAPI lifespan (model
+      # resolution, and an OpenVINO IR export for the SpeechT5/Qwen engines).
+      # On a host with no route to huggingface.co that call raises
+      # httpx.ConnectError at startup, the healthcheck never passes, and every
+      # service gated on `depends_on: text-to-speech: service_healthy`
+      # (rag-service, kiosk-core) aborts with "dependency failed to start".
+      # Default 1 (offline) is safe because setup_models.sh pre-caches the
+      # models; set HF_HUB_OFFLINE=0 in .env for a first run that must
+      # download. See the proxy passthrough below for proxied hosts.
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-1}
+      TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-1}
+      # Optional egress proxy for that first online run. Unset by default, so
+      # hosts with direct internet are unaffected; NO_PROXY keeps intra-cluster
+      # traffic on the Docker bridge rather than bouncing off the proxy.
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      http_proxy: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      https_proxy: ${HTTPS_PROXY:-}
+      NO_PROXY: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,172.16.0.0/12,10.0.0.0/8"
+      no_proxy: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,172.16.0.0/12,10.0.0.0/8"
       # ── TTS engine selection (device-combination benchmarking) ────────────
       # These four move together and MUST stay consistent — the TTS factory
       # picks an implementation from (name, runtime) and then hands `device`
@@ -544,7 +584,7 @@ services:
       TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-1}
       # Bypass corporate proxy for all intra-cluster traffic so that
       # requests to ovms-llm, kiosk-core, etc. go directly on the
-      # Docker bridge network instead of through the Intel proxy.
+      # Docker bridge network instead of through the HTTP proxy.
       NO_PROXY: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,172.16.0.0/12,10.0.0.0/8"
       no_proxy: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,172.16.0.0/12,10.0.0.0/8"
       # Domain-specific config (identity, intent rules, reply templates) is
