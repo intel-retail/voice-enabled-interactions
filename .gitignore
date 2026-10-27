@@ -27,3 +27,13 @@ smart-kiosk-assistant/.setup-venv/
 .github/workflows/copilot-setup-steps.yml
 smart-kiosk-assistant/Sample_data/sample_1.mp4
 smart-kiosk-assistant/Sample_data/sample_2.mp4
+
+# QSR MCP runtime state — the durable event log and board state default to the
+# working directory, so a local run or test leaves them next to the sources.
+# The log runs in WAL mode, so match the -wal/-shm sidecars SQLite creates too.
+smart-kiosk-assistant/qsr_mcp_events.db
+smart-kiosk-assistant/qsr_mcp_events.db-wal
+smart-kiosk-assistant/qsr_mcp_events.db-shm
+smart-kiosk-assistant/qsr_mcp_events.jsonl
+smart-kiosk-assistant/qsr_board_state.json
+smart-kiosk-assistant/qsr_menu_requests.json

@@ -1,8 +1,13 @@
 """Seed the SQLite database from YAML configuration files.
 
-Loads ``products.yaml`` and (optionally) upsert-inserts every product so the
-catalogue is always up-to-date after a restart.  This is **idempotent** — safe
-to call on every startup.
+Loads ``products.yaml`` and upsert-inserts every product so the catalogue is
+up-to-date after a restart.  This is **idempotent** — safe to call on every
+startup.
+
+``products.yaml`` supplies the *defaults*. Products that have since been
+changed through the QSR menu tools are marked ``source='agent'`` and are
+skipped here, so an agent's price change or an 86'd item is not silently
+reverted on the next restart.
 
 products.yaml format::
 
@@ -46,6 +51,7 @@ async def seed_products(products_yaml_path: str) -> int:
         return 0
 
     count = 0
+    skipped = 0
     async with get_db() as db:
         repo = SqliteProductRepository(db)
         for entry in raw_products:
@@ -57,9 +63,16 @@ async def seed_products(products_yaml_path: str) -> int:
                 is_bestseller=bool(entry.get("is_bestseller", False)),
                 is_veg=bool(entry.get("is_veg", True)),
             )
-            await repo.upsert(product)
-            count += 1
+            if await repo.seed_upsert(product):
+                count += 1
+            else:
+                skipped += 1
         await db.commit()
 
     logger.info("[SEED] Seeded %d product(s) from %s", count, path)
+    if skipped:
+        logger.info(
+            "[SEED] Left %d agent-managed product(s) untouched (source='agent')",
+            skipped,
+        )
     return count

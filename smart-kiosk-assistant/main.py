@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import threading
 from contextlib import asynccontextmanager, AsyncExitStack
 from pathlib import Path
 
@@ -64,6 +65,30 @@ async def lifespan(app: FastAPI):
         else:
             logger.info("[STARTUP] Ordering feature disabled (KIOSK_CORE_ORDERING_ENABLED=false)")
 
+        # ── QSR MCP feature startup (Central QSR Agent surface) ──────────────
+        if cfg.QSR_MCP_ENABLED:
+            from kiosk_core.qsr_mcp.mcp_service import init as init_qsr_mcp
+            from kiosk_core.qsr_mcp.mcp_server import run_mcp_server, start_queue_poller
+
+            # Explicit, before anything can use it: builds the durable log,
+            # delivery sinks and queue client, and points board-state /
+            # approval-queue persistence at their configured paths. The REST
+            # approval endpoints depend on that wiring too, not just MCP.
+            init_qsr_mcp()
+            def _run_qsr_mcp() -> None:
+                try:
+                    run_mcp_server(embedded=True)
+                except Exception:
+                    logger.exception("[QSR-MCP] MCP server thread crashed")
+
+            threading.Thread(target=_run_qsr_mcp, daemon=True, name="QSRMCPServer").start()
+            start_queue_poller()
+            logger.info(
+                "[STARTUP] QSR MCP server starting on port %s ✓", cfg.QSR_MCP_PORT
+            )
+        else:
+            logger.info("[STARTUP] QSR MCP feature disabled (KIOSK_CORE_QSR_MCP_ENABLED=false)")
+
         # ── Identity feature startup ─────────────────────────────────────────
         if cfg.IDENTITY_ENABLED:
             from kiosk_core.identity.client import IdentityClient
@@ -111,6 +136,11 @@ if cfg.ORDERING_ENABLED:
 if cfg.IDENTITY_ENABLED:
     from kiosk_core.identity.api import router as identity_router
     app.include_router(identity_router)
+
+# ── QSR menu approval router (operator-only; never an MCP tool) ──────────────
+if cfg.QSR_MCP_ENABLED:
+    from kiosk_core.qsr_mcp.api import router as qsr_router
+    app.include_router(qsr_router)
 
 
 async def _clear_stale_cart_for_new_session(history: list[dict[str, str]] | None = None) -> None:

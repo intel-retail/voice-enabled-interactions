@@ -295,8 +295,14 @@ class OrderingService:
         async with get_db() as db:
             repo = SqliteProductRepository(db)
             exact = await repo.get(ref)
-            if exact is not None:
+            if exact is not None and exact.is_available:
                 return ProductResolution(status="MATCH", product=exact, confidence=1.0)
+            if exact is not None:
+                # Exact id, but the item is off the menu. Report it as not
+                # found rather than matching it, so the agent offers an
+                # alternative instead of promising an item that place_order
+                # will then refuse.
+                return ProductResolution(status="NOT_FOUND")
             products = await repo.list_all()
 
         return _resolve_against(ref, products)
@@ -447,6 +453,12 @@ class OrderingService:
                 product = await prod_repo.get(item_in.product_id)
                 if product is None:
                     raise ValueError(f"Product not found: {item_in.product_id}")
+                if not product.is_available:
+                    # Listings already hide unavailable items, but an id can
+                    # still arrive from a stale cart, a replayed turn or a
+                    # direct API call — this is the chokepoint that actually
+                    # prevents selling something that is off the menu.
+                    raise ValueError(f"Product unavailable: {product.name}")
                 await order_repo.add_item(order_id, item_in, product.price)
 
             total = await order_repo.update_total(order_id)
@@ -514,6 +526,12 @@ class OrderingService:
                 product = await prod_repo.get(item_in.product_id)
                 if product is None:
                     raise ValueError(f"Product not found: {item_in.product_id}")
+                if not product.is_available:
+                    # Listings already hide unavailable items, but an id can
+                    # still arrive from a stale cart, a replayed turn or a
+                    # direct API call — this is the chokepoint that actually
+                    # prevents selling something that is off the menu.
+                    raise ValueError(f"Product unavailable: {product.name}")
                 await order_repo.add_item(order_id, item_in, product.price)
 
             total = await order_repo.update_total(order_id)

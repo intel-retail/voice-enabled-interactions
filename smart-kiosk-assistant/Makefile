@@ -490,8 +490,9 @@ build: check-env ## Pull images (default with .env); REGISTRY=false builds local
 	@# set -e: without it this whole recipe is one `cmd; cmd; cmd` shell line
 	@# whose exit status is that of the LAST command -- the tolerant
 	@# `pull metrics-collector || echo ...` below, which always succeeds. A
-	@# failed audio-analyzer or text-to-speech build was therefore swallowed
-	@# and the recipe still printed "✓ Images ready" and exited 0.
+	@# failed local build or a failed audio-analyzer/text-to-speech pull was
+	@# therefore swallowed and the recipe still printed "✓ Images ready" and
+	@# exited 0.
 	@set -e; \
 	if [ "$(REGISTRY)" = "false" ] || [ "$(REGISTRY)" = "FALSE" ]; then \
 		echo "$(YELLOW)  REGISTRY=false → Building local services from source$(NC)"; \

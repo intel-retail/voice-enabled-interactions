@@ -1074,6 +1074,114 @@ QUEUE_SERVICE_URL = os.getenv(
 )
 
 # ---------------------------------------------------------------------------
+# QSR MCP integration (Central QSR Agent — retail-use-cases#100/#103)
+# ---------------------------------------------------------------------------
+# Exposes kiosk-core as a fastmcp-based service (describe + read tools +
+# gated act tool) on its own port, distinct from the ordering-agent's
+# internal /mcp mount (kiosk_core/ordering/mcp_server.py). This is the
+# surface the separate-machine Central QSR Agent talks to. Same enable-flag
+# convention as ORDERING_ENABLED/IDENTITY_ENABLED above.
+QSR_MCP_ENABLED = os.getenv("KIOSK_CORE_QSR_MCP_ENABLED", "true").lower() not in ("false", "0", "no")
+
+QSR_MCP_STORE_ID = os.getenv("KIOSK_CORE_QSR_MCP_STORE_ID", "store-001")
+
+QSR_MCP_TRANSPORT = os.getenv("KIOSK_CORE_QSR_MCP_TRANSPORT", "streamable-http")
+QSR_MCP_HOST = os.getenv("KIOSK_CORE_QSR_MCP_HOST", "0.0.0.0")
+# Distinct from the ordering feature's FastAPI-mounted /mcp path and from
+# Order Accuracy's dine-in (8011) / take-away (8010) MCP ports.
+QSR_MCP_PORT = int(os.getenv("KIOSK_CORE_QSR_MCP_PORT", "8014"))
+
+QSR_MCP_LOG_BACKEND = os.getenv("KIOSK_CORE_QSR_MCP_LOG_BACKEND", "sqlite")  # sqlite | jsonl | memory
+QSR_MCP_LOG_PATH = os.getenv(
+    "KIOSK_CORE_QSR_MCP_LOG_PATH",
+    "./qsr_mcp_events.db",
+)
+
+# Optional webhook push (agent inbox); off by default, matching Order
+# Accuracy's default-safe/benchmark-clean convention.
+QSR_MCP_WEBHOOK_URL = os.getenv("KIOSK_CORE_QSR_MCP_WEBHOOK_URL")
+
+# Durable file backing the kiosk menu-board mode toggled by the
+# set_board_mode act tool (kiosk_core/qsr_mcp/board_state.py).
+QSR_MCP_BOARD_STATE_PATH = os.getenv(
+    "KIOSK_CORE_QSR_MCP_BOARD_STATE_PATH",
+    "./qsr_board_state.json",
+)
+
+# How often (seconds) the background poller samples queue-service and
+# durably logs a queue_depth_sample event (kiosk_core/qsr_mcp/mcp_server.py).
+QSR_MCP_QUEUE_POLL_SECONDS = float(os.getenv("KIOSK_CORE_QSR_MCP_QUEUE_POLL_SECONDS", "30.0"))
+
+# ---------------------------------------------------------------------------
+# QSR menu actuation (add_menu_item / update_menu_item act tools)
+# ---------------------------------------------------------------------------
+# Policy gate level per menu act tool. Updating price/availability is
+# reversible and is AUTOMATIC by default; creating a brand-new catalogue item
+# is not, so it defaults to NEEDS_APPROVAL and lands in the pending-request
+# queue for an operator to approve. Set to "automatic" to let the agent add
+# items outright. Valid: automatic | needs_approval | notify | blocked.
+QSR_MENU_UPDATE_GATE = os.getenv("KIOSK_CORE_QSR_MENU_UPDATE_GATE", "automatic").lower()
+QSR_MENU_ADD_GATE = os.getenv("KIOSK_CORE_QSR_MENU_ADD_GATE", "needs_approval").lower()
+
+# Rate limits for the menu act tools (calls per window), so a looping agent
+# cannot rewrite the catalogue unbounded.
+QSR_MENU_MAX_CALLS = int(os.getenv("KIOSK_CORE_QSR_MENU_MAX_CALLS", "20"))
+QSR_MENU_PER_SECONDS = float(os.getenv("KIOSK_CORE_QSR_MENU_PER_SECONDS", "60.0"))
+
+# Durable file holding menu changes that are awaiting operator approval
+# (kiosk_core/qsr_mcp/menu_requests.py).
+QSR_MENU_REQUESTS_PATH = os.getenv(
+    "KIOSK_CORE_QSR_MENU_REQUESTS_PATH",
+    "./qsr_menu_requests.json",
+)
+
+# ---------------------------------------------------------------------------
+# QSR Agent autonomy event delivery
+# ---------------------------------------------------------------------------
+# Outbound push of kiosk observations to the Central QSR Agent's
+# ``POST /autonomy/events`` inbox, using the same envelope as the QSR weather
+# service and Order Accuracy (intel-retail/order-accuracy#214). This is the
+# inverse direction of the MCP read tools: the agent pulls via :8014/mcp, and
+# the kiosk pushes events here so Hermes can reason without polling.
+#
+# Disabled unless the URL is set, so the default stack (and every benchmark
+# run) performs no outbound delivery at all.
+QSR_AUTONOMY_EVENTS_URL = os.getenv("KIOSK_CORE_QSR_AUTONOMY_EVENTS_URL", "").strip()
+
+# Optional bearer token, forwarded as an Authorization header. The agent (or a
+# proxy in front of it) must validate it for this to provide authentication.
+QSR_AUTONOMY_EVENTS_TOKEN = os.getenv("KIOSK_CORE_QSR_AUTONOMY_EVENTS_TOKEN", "").strip() or None
+
+# Identifies this restaurant to the agent. MUST equal the agent's
+# QSR_RESTAURANT_ID (default "qsr-001") or every event is rejected. Deliberately
+# separate from QSR_MCP_STORE_ID ("store-001"), which labels our own durable log.
+QSR_AUTONOMY_STORE_ID = os.getenv("KIOSK_CORE_QSR_AUTONOMY_STORE_ID", "qsr-001")
+
+# Which internal event types are eligible for forwarding.
+QSR_AUTONOMY_EVENT_TYPES = tuple(
+    t.strip()
+    for t in os.getenv(
+        "KIOSK_CORE_QSR_AUTONOMY_EVENT_TYPES", "queue_depth_sample,board_mode_changed"
+    ).split(",")
+    if t.strip()
+)
+
+# HTTP timeout (seconds) for a single delivery attempt.
+QSR_AUTONOMY_TIMEOUT_SECONDS = float(
+    os.getenv("KIOSK_CORE_QSR_AUTONOMY_TIMEOUT_SECONDS", "5.0")
+)
+
+# Minimum change in queue depth before a new queue_count_changed event is
+# forwarded. The agent's contract states the producer owns change detection
+# ("The autonomy process has no source polling loop"), but our poller samples
+# on a fixed interval, so without this every QSR_MCP_QUEUE_POLL_SECONDS tick
+# would POST an event. 1 = forward on any change; raise it to suppress
+# single-person jitter on a busy store.
+QSR_AUTONOMY_QUEUE_MIN_DELTA = int(
+    os.getenv("KIOSK_CORE_QSR_AUTONOMY_QUEUE_MIN_DELTA", "1")
+)
+
+# ---------------------------------------------------------------------------
 # Conversation recording (offline analysis)
 # ---------------------------------------------------------------------------
 # Single master switch: when false (default), kiosk_core.conversation_recorder

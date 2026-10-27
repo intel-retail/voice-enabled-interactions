@@ -31,7 +31,12 @@ CREATE TABLE IF NOT EXISTS products (
     category       TEXT NOT NULL,
     price          REAL NOT NULL,
     is_bestseller  INTEGER NOT NULL DEFAULT 0,
-    is_veg         INTEGER NOT NULL DEFAULT 1
+    is_veg         INTEGER NOT NULL DEFAULT 1,
+    -- 0 hides the item from the menu and refuses it at order time.
+    is_available   INTEGER NOT NULL DEFAULT 1,
+    -- 'yaml' = owned by products.yaml and re-seeded on every startup.
+    -- 'agent' = changed via the QSR menu tools; the seeder must not clobber it.
+    source         TEXT    NOT NULL DEFAULT 'yaml'
 );
 
 CREATE TABLE IF NOT EXISTS users (
@@ -85,6 +90,20 @@ async def init_db(db_path: str | None = None) -> None:
         try:
             await db.execute(
                 "ALTER TABLE products ADD COLUMN is_veg INTEGER NOT NULL DEFAULT 1"
+            )
+        except aiosqlite.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
+        try:
+            await db.execute(
+                "ALTER TABLE products ADD COLUMN is_available INTEGER NOT NULL DEFAULT 1"
+            )
+        except aiosqlite.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
+        try:
+            await db.execute(
+                "ALTER TABLE products ADD COLUMN source TEXT NOT NULL DEFAULT 'yaml'"
             )
         except aiosqlite.OperationalError as exc:
             if "duplicate column" not in str(exc).lower():

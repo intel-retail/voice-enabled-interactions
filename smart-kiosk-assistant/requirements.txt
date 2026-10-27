@@ -33,6 +33,13 @@ websockets==16.0
 # Ordering feature
 aiosqlite==0.20.0
 PyYAML==6.0.2
+
+# fastmcp: MCP server framework used by both the ordering feature's internal
+# /mcp mount (kiosk_core/ordering/mcp_server.py) and the Central QSR Agent
+# surface (kiosk_core/qsr_mcp/, retail-use-cases#100/#103). qsr_mcp owns its
+# own durable event log/delivery/policy-gate plumbing directly (see
+# kiosk_core/qsr_mcp/event_log.py, delivery.py, policy.py) instead of the
+# external mcp-service-sdk package.
 fastmcp==3.2.0
 
 # VLM metrics logging (kiosk_core.audio_session._emit_vlm_metrics /

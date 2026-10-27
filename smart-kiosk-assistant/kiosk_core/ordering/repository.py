@@ -28,7 +28,10 @@ logger = logging.getLogger(__name__)
 class AbstractProductRepository(ABC):
     @abstractmethod
     async def list_all(
-        self, category: str | None = None, is_veg: bool | None = None
+        self,
+        category: str | None = None,
+        is_veg: bool | None = None,
+        include_unavailable: bool = False,
     ) -> list[Product]:
         ...
 
@@ -41,8 +44,15 @@ class AbstractProductRepository(ABC):
         ...
 
     @abstractmethod
+    async def seed_upsert(self, product: Product) -> bool:
+        ...
+
+    @abstractmethod
     async def list_bestsellers(
-        self, category: str | None = None, is_veg: bool | None = None
+        self,
+        category: str | None = None,
+        is_veg: bool | None = None,
+        include_unavailable: bool = False,
     ) -> list[Product]:
         ...
 
@@ -94,20 +104,32 @@ class SqliteProductRepository(AbstractProductRepository):
     def __init__(self, db: aiosqlite.Connection):
         self._db = db
 
-    _COLUMNS = "product_id, name, category, price, is_bestseller, is_veg"
+    _COLUMNS = "product_id, name, category, price, is_bestseller, is_veg, is_available"
 
     @staticmethod
     def _row_to_product(r) -> Product:
         return Product(
             product_id=r[0], name=r[1], category=r[2], price=r[3],
-            is_bestseller=bool(r[4]), is_veg=bool(r[5]),
+            is_bestseller=bool(r[4]), is_veg=bool(r[5]), is_available=bool(r[6]),
         )
 
     async def list_all(
-        self, category: str | None = None, is_veg: bool | None = None
+        self,
+        category: str | None = None,
+        is_veg: bool | None = None,
+        include_unavailable: bool = False,
     ) -> list[Product]:
+        """List catalogue products.
+
+        Args:
+            include_unavailable: Unavailable items are hidden by default so
+                the agent never offers something that cannot be ordered.
+                Only operator/menu-management callers should pass ``True``.
+        """
         clauses: list[str] = []
         params: list[object] = []
+        if not include_unavailable:
+            clauses.append("is_available = 1")
         if category:
             clauses.append("category = ?")
             params.append(category)
@@ -150,8 +172,44 @@ class SqliteProductRepository(AbstractProductRepository):
             ),
         )
 
+    async def seed_upsert(self, product: Product) -> bool:
+        """Upsert a product from ``products.yaml`` without clobbering the agent.
+
+        ``products.yaml`` is the *default* catalogue and is re-applied on every
+        startup. A row changed through the QSR menu tools is marked
+        ``source='agent'`` and is deliberately left alone here — otherwise an
+        agent's price change or an 86'd item would silently revert on the next
+        restart. Rows still owned by YAML keep tracking the file, so editing
+        the YAML remains the normal operator workflow.
+
+        Returns:
+            ``True`` if the row was inserted or refreshed from YAML, ``False``
+            if it was skipped because the agent now owns it.
+        """
+        cursor = await self._db.execute(
+            """
+            INSERT INTO products (product_id, name, category, price, is_bestseller, is_veg, source)
+            VALUES (?, ?, ?, ?, ?, ?, 'yaml')
+            ON CONFLICT(product_id) DO UPDATE SET
+                name          = excluded.name,
+                category      = excluded.category,
+                price         = excluded.price,
+                is_bestseller = excluded.is_bestseller,
+                is_veg        = excluded.is_veg
+            WHERE products.source = 'yaml'
+            """,
+            (
+                product.product_id, product.name, product.category, product.price,
+                int(product.is_bestseller), int(product.is_veg),
+            ),
+        )
+        return cursor.rowcount > 0
+
     async def list_bestsellers(
-        self, category: str | None = None, is_veg: bool | None = None
+        self,
+        category: str | None = None,
+        is_veg: bool | None = None,
+        include_unavailable: bool = False,
     ) -> list[Product]:
         """Return only the products flagged ``is_bestseller`` in the catalogue.
 
@@ -170,6 +228,8 @@ class SqliteProductRepository(AbstractProductRepository):
         """
         clauses = ["is_bestseller = 1"]
         params: list[object] = []
+        if not include_unavailable:
+            clauses.append("is_available = 1")
         if category:
             clauses.append("category = ?")
             params.append(category)

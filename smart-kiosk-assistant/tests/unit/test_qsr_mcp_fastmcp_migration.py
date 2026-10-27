@@ -1,0 +1,708 @@
+"""Regression tests for the Smart Kiosk QSR MCP surface's migration off
+``mcp_service_sdk`` and onto ``fastmcp`` directly.
+
+Pins the exact tool/event contract the Central QSR Agent depends on (tool
+names, descriptions, input schemas, and representative ``tools/call``
+results), captured as a baseline against the pre-migration,
+``mcp_service_sdk``-backed implementation before the rewrite (see
+``docs/qsr-mcp.md``), plus event persistence/replay/rate-limit behaviour of
+the in-tree durable log and policy gate that replaced the SDK's.
+
+Runs the real ``fastmcp.FastMCP`` app in-process (``Client(mcp)``, no
+network) against isolated temp files so it never touches a real
+``qsr_mcp_events.db`` / ``qsr_board_state.json`` / ``kiosk.db``.
+"""
+from __future__ import annotations
+
+import asyncio
+import importlib
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from unittest.mock import MagicMock
+
+sys.modules.setdefault("sounddevice", MagicMock())
+
+
+@pytest.fixture
+def qsr_env(monkeypatch, tmp_path):
+    """Isolate the QSR MCP surface's on-disk state for one test."""
+    monkeypatch.setenv("KIOSK_CORE_QSR_MCP_ENABLED", "true")
+    monkeypatch.setenv(
+        "KIOSK_CORE_QSR_MCP_LOG_PATH", str(tmp_path / "events.db")
+    )
+    monkeypatch.setenv(
+        "KIOSK_CORE_QSR_MCP_BOARD_STATE_PATH", str(tmp_path / "board_state.json")
+    )
+    monkeypatch.setenv(
+        "KIOSK_CORE_QSR_MENU_REQUESTS_PATH", str(tmp_path / "menu_requests.json")
+    )
+    monkeypatch.setenv("KIOSK_CORE_QUEUE_SERVICE_ENABLED", "false")
+    monkeypatch.setenv("KIOSK_CORE_DB_PATH", str(tmp_path / "kiosk.db"))
+    # Fresh state per test: mcp_service.py reads these env vars when its
+    # ``init()`` runs, and the singletons it configures live in other
+    # modules, so those must be *reloaded*, not just deleted-and-reimported.
+    # ``from kiosk_core import config`` resolves via an attribute already
+    # cached on the ``kiosk_core`` package object once anything has imported
+    # it, so removing "kiosk_core.config" from sys.modules alone does not
+    # force a reimport — ``importlib.reload`` re-executes each module in
+    # place (updating that same object/attribute), which does.
+    import kiosk_core.config as cfg_module
+    importlib.reload(cfg_module)
+    import kiosk_core.qsr_mcp.board_state as board_state_module
+    importlib.reload(board_state_module)
+    import kiosk_core.qsr_mcp.menu_requests as menu_requests_module
+    importlib.reload(menu_requests_module)
+    import kiosk_core.qsr_mcp.mcp_service as mcp_service
+    importlib.reload(mcp_service)
+    # The reload leaves the module uninitialised by design; build its runtime
+    # state the way the app's startup does rather than relying on import.
+    mcp_service.init(force=True)
+
+    return mcp_service
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+# ---------------------------------------------------------------------------
+# Baseline: tools/list — names, descriptions, input schemas must be
+# byte-for-byte identical to the pre-migration mcp_service_sdk contract.
+# ---------------------------------------------------------------------------
+
+_EXPECTED_TOOLS = {
+    "describe": {
+        "description": "Describe this service's contract.",
+        "input_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {},
+        },
+    },
+    "subscribe": {
+        "description": (
+            "Register interest in an event type. NOT IMPLEMENTED: this kiosk "
+            "does not call back to subscribers. Events are delivered by the "
+            "kiosk's own autonomy push (KIOSK_CORE_QSR_AUTONOMY_EVENTS_URL) "
+            "instead; the agent should rely on that or poll the read tools."
+        ),
+        "input_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "event_type": {"type": "string"},
+                "condition": {"type": "string"},
+                "callback_url": {"type": "string"},
+            },
+            "required": ["event_type", "condition", "callback_url"],
+        },
+    },
+    "get_queue_depth": {
+        "description": (
+            "Current kiosk queue depth (people waiting) and status "
+            "(LOW/MEDIUM/HIGH)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {},
+        },
+    },
+    "get_queue_history": {
+        "description": (
+            "Queue-depth trend for a period (today|yesterday|all|YYYY-MM-DD): "
+            "sample count, average, and max depth \u2014 answers 'is the queue "
+            "always deep at this time?'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"period": {"default": "today", "type": "string"}},
+        },
+    },
+    "get_order_stats": {
+        "description": (
+            "Order activity for a period (today|yesterday|all|YYYY-MM-DD): "
+            "confirmed order count, revenue, and top items."
+        ),
+        "input_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "period": {"default": "today", "type": "string"},
+                "top_n": {"default": 5, "type": "integer"},
+            },
+        },
+    },
+    "get_board_state": {
+        "description": (
+            "Current kiosk menu-board mode (full|simplified) and when/why "
+            "it last changed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {},
+        },
+    },
+    "set_board_mode": {
+        "description": (
+            "[gate=automatic] Simplify or restore the kiosk's on-screen "
+            "menu board (qsr-design action #6: deep queue -> simplify "
+            "board)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "mode": {"type": "string"},
+                "reason": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": None,
+                },
+            },
+            "required": ["mode"],
+        },
+    },
+}
+
+
+# Tools added after the migration. Listed explicitly so the assertions below
+# stay exact: a removal or an unintended addition still fails.
+_POST_MIGRATION_TOOLS = {"add_menu_item", "update_menu_item", "get_menu_requests"}
+
+
+def test_tools_list_matches_pre_migration_baseline(qsr_env):
+    """`tools/list` still exposes the original 7 tools unchanged, with the
+    same descriptions and input schemas as the mcp_service_sdk-backed
+    server, plus the explicitly-listed menu tools added since."""
+    from fastmcp import Client
+
+    async def go():
+        async with Client(qsr_env.mcp) as client:
+            return await client.list_tools()
+
+    tools = _run(go())
+    # The MCP Tool model renamed this field to camelCase; accept either so the
+    # baseline keeps being checked across SDK versions rather than erroring out.
+    def _schema_of(tool):
+        schema = getattr(tool, "inputSchema", None)
+        if schema is None:
+            schema = getattr(tool, "input_schema", None)
+        return schema
+
+    actual = {t.name: {"description": t.description, "input_schema": _schema_of(t)} for t in tools}
+    assert set(actual) == set(_EXPECTED_TOOLS) | _POST_MIGRATION_TOOLS
+    for name, expected in _EXPECTED_TOOLS.items():
+        assert actual[name] == expected, name
+
+
+def test_describe_matches_pre_migration_baseline(qsr_env):
+    """`describe()` keeps the exact event_types/read_tools/act_tools shape
+    the SDK's ``ServiceServer.describe()`` produced, for every entry that
+    existed then. Entries added since are asserted separately below so this
+    test still fails if a pre-existing one changes or disappears."""
+    from fastmcp import Client
+
+    async def go():
+        async with Client(qsr_env.mcp) as client:
+            return await client.call_tool("describe", {})
+
+    result = _run(go())
+    baseline = {
+        "service": "smart_kiosk",
+        "store_id": "store-001",
+        "event_types": {
+            "queue_depth_sample": {
+                "count": "int",
+                "nearby": "int",
+                "status": "str",
+            },
+            "board_mode_changed": {"mode": "str", "reason": "str|None"},
+        },
+        "read_tools": {
+            "get_queue_depth": {
+                "description": _EXPECTED_TOOLS["get_queue_depth"]["description"],
+                "schema": {},
+            },
+            "get_queue_history": {
+                "description": _EXPECTED_TOOLS["get_queue_history"]["description"],
+                "schema": {"period": "str (default 'today')"},
+            },
+            "get_order_stats": {
+                "description": _EXPECTED_TOOLS["get_order_stats"]["description"],
+                "schema": {
+                    "period": "str (default 'today')",
+                    "top_n": "int (default 5, 1-50)",
+                },
+            },
+            "get_board_state": {
+                "description": _EXPECTED_TOOLS["get_board_state"]["description"],
+                "schema": {},
+            },
+        },
+        "act_tools": {
+            "set_board_mode": {
+                "description": (
+                    "Simplify or restore the kiosk's on-screen menu board "
+                    "(qsr-design action #6: deep queue -> simplify board)."
+                ),
+                "schema": {
+                    "mode": "str ('full'|'simplified')",
+                    "reason": "str|None",
+                },
+                "gate": "automatic",
+            }
+        },
+    }
+
+    actual = result.data
+    assert actual["service"] == baseline["service"]
+    assert actual["store_id"] == baseline["store_id"]
+
+    # Every pre-existing entry must be byte-identical...
+    for section in ("event_types", "read_tools", "act_tools"):
+        for key, expected in baseline[section].items():
+            assert actual[section][key] == expected, f"{section}.{key}"
+
+    # ...and the only additions are the documented menu ones.
+    assert set(actual["read_tools"]) - set(baseline["read_tools"]) == {
+        "get_menu_requests"
+    }
+    assert set(actual["act_tools"]) - set(baseline["act_tools"]) == {
+        "add_menu_item",
+        "update_menu_item",
+    }
+    assert set(actual["event_types"]) - set(baseline["event_types"]) == {
+        "menu_item_added",
+        "menu_item_updated",
+        "menu_change_requested",
+        "menu_change_resolved",
+    }
+    # add_menu_item must stay behind the approval gate by default.
+    assert actual["act_tools"]["add_menu_item"]["gate"] == "needs_approval"
+    assert actual["act_tools"]["update_menu_item"]["gate"] == "automatic"
+
+
+def test_set_board_mode_wire_contract_and_board_state(qsr_env):
+    """``set_board_mode`` keeps the SDK's `call_action` wire-level return
+    shape (``executed``/``level``/``result``), and ``get_board_state``
+    reflects the change."""
+    from fastmcp import Client
+
+    async def go():
+        async with Client(qsr_env.mcp) as client:
+            before = await client.call_tool("get_board_state", {})
+            set_result = await client.call_tool(
+                "set_board_mode", {"mode": "simplified", "reason": "queue deep"}
+            )
+            after = await client.call_tool("get_board_state", {})
+            return before.data, set_result.data, after.data
+
+    before, set_result, after = _run(go())
+    assert before == {"mode": "full", "reason": None, "updated_at": None}
+    assert set_result["executed"] is True
+    assert set_result["level"] == "automatic"
+    assert set_result["result"]["mode"] == "simplified"
+    assert set_result["result"]["reason"] == "queue deep"
+    assert after["mode"] == "simplified"
+    assert after["reason"] == "queue deep"
+    assert after["updated_at"] is not None
+
+
+def test_set_board_mode_rate_limit_matches_baseline(qsr_env):
+    """20 calls/60s succeed; the 21st is gated off with the SDK's exact
+    rate-limit decision shape (``executed: false``, same ``level``)."""
+    from fastmcp import Client
+
+    async def go():
+        async with Client(qsr_env.mcp) as client:
+            results = []
+            for i in range(21):
+                r = await client.call_tool(
+                    "set_board_mode", {"mode": "full", "reason": f"call-{i}"}
+                )
+                results.append(r.data)
+            return results
+
+    results = _run(go())
+    assert [r["executed"] for r in results] == [True] * 20 + [False]
+    assert results[-1] == {
+        "executed": False,
+        "level": "automatic",
+        "reason": "rate limit exceeded",
+    }
+
+
+def test_subscribe_reports_that_it_is_a_no_op(qsr_env):
+    """`subscribe` is still exposed (Kiosk, unlike Order Accuracy, does not
+    strip it) but must not claim a delivery it never performs: nothing in
+    this service reads the subscription registry, so an agent told
+    ``subscribed: true`` would wait forever for callbacks."""
+    from fastmcp import Client
+
+    async def go():
+        async with Client(qsr_env.mcp) as client:
+            return await client.call_tool(
+                "subscribe",
+                {
+                    "event_type": "board_mode_changed",
+                    "condition": "*",
+                    "callback_url": "http://example.invalid/cb",
+                },
+            )
+
+    result = _run(go())
+    assert result.data["subscribed"] is False
+    assert result.data["implemented"] is False
+    assert result.data["event_type"] == "board_mode_changed"
+    assert result.data["condition"] == "*"
+    assert "autonomy" in result.data["reason"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Event persistence + replay — the durable log that replaced
+# mcp_service_sdk's SQLiteLog/JSONLFileLog.
+# ---------------------------------------------------------------------------
+
+
+def test_sqlite_log_persistence_ordering_and_idempotent_replay(tmp_path):
+    from kiosk_core.qsr_mcp.event_log import SQLiteLog, new_event
+
+    db_path = str(tmp_path / "events.db")
+    log = SQLiteLog(path=db_path, service="smart_kiosk")
+    ev1 = new_event("queue_depth_sample", "smart_kiosk", "store-001", {"count": 1})
+    ev2 = new_event("queue_depth_sample", "smart_kiosk", "store-001", {"count": 2})
+    seq1 = log.append(ev1)
+    seq2 = log.append(ev2)
+    assert seq2 == seq1 + 1
+
+    # Idempotent on ref_id: re-appending the same event is a no-op.
+    assert log.append(ev1) == seq1
+
+    all_events = log.read()
+    assert [e.payload["count"] for e in all_events] == [1, 2]
+
+    replayed = list(log.replay())
+    assert [e.ref_id for e in replayed] == [ev1.ref_id, ev2.ref_id]
+
+    # Restart-safety: a fresh SQLiteLog opened on the same path sees
+    # everything already persisted (no populated DB is lost/recreated).
+    reopened = SQLiteLog(path=db_path, service="smart_kiosk")
+    assert len(reopened.read()) == 2
+
+
+def test_jsonl_log_persistence_ordering_and_idempotent_replay(tmp_path):
+    from kiosk_core.qsr_mcp.event_log import JSONLFileLog, new_event
+
+    path = str(tmp_path / "events.jsonl")
+    log = JSONLFileLog(path=path, service="smart_kiosk")
+    ev1 = new_event("board_mode_changed", "smart_kiosk", "store-001", {"mode": "full"})
+    ev2 = new_event(
+        "board_mode_changed", "smart_kiosk", "store-001", {"mode": "simplified"}
+    )
+    seq1 = log.append(ev1)
+    seq2 = log.append(ev2)
+    assert seq2 == seq1 + 1
+    assert log.append(ev1) == seq1  # idempotent
+
+    # Restart-safety: a fresh JSONLFileLog rebuilds its seen/seq state from
+    # the file on disk, so a populated log file is never silently dropped.
+    reopened = JSONLFileLog(path=path, service="smart_kiosk")
+    assert [e.ref_id for e in reopened.read()] == [ev1.ref_id, ev2.ref_id]
+    assert list(reopened.replay()) == reopened.read()
+
+
+def test_new_log_reads_pre_migration_sqlite_file_unmodified(tmp_path):
+    """A durable log file produced by the pre-migration mcp_service_sdk
+    SQLiteLog (same table/columns/envelope JSON shape) must still be
+    readable byte-for-byte by the new in-tree SQLiteLog — no migration step
+    is required, and the populated DB is never recreated."""
+    import json
+    import sqlite3
+
+    from kiosk_core.qsr_mcp.event_log import SQLiteLog
+
+    db_path = str(tmp_path / "legacy_events.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE events (
+            seq          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ref_id       TEXT UNIQUE NOT NULL,
+            event_type   TEXT NOT NULL,
+            ts_ms        INTEGER NOT NULL,
+            envelope     TEXT NOT NULL
+        )
+        """
+    )
+    envelope = {
+        "event_type": "board_mode_changed",
+        "service": "smart_kiosk",
+        "store_id": "store-001",
+        "payload": {"mode": "simplified", "reason": "legacy"},
+        "ref_id": "legacy-ref-id",
+        "ts_ms": 1700000000000,
+        "schema_version": 1,
+    }
+    conn.execute(
+        "INSERT INTO events (ref_id, event_type, ts_ms, envelope) VALUES (?, ?, ?, ?)",
+        (
+            envelope["ref_id"],
+            envelope["event_type"],
+            envelope["ts_ms"],
+            json.dumps(envelope, separators=(",", ":"), sort_keys=True),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    log = SQLiteLog(path=db_path, service="smart_kiosk")
+    rows = log.read()
+    assert len(rows) == 1
+    assert rows[0].ref_id == "legacy-ref-id"
+    assert rows[0].payload == {"mode": "simplified", "reason": "legacy"}
+    assert rows[0].ts_ms == 1700000000000
+
+
+# ---------------------------------------------------------------------------
+# Policy gate parity
+# ---------------------------------------------------------------------------
+
+
+def test_policy_gate_blocks_unregistered_action():
+    from kiosk_core.qsr_mcp.policy import GateLevel, PolicyGate
+
+    gate = PolicyGate()
+    decision = gate.evaluate("not_a_real_action", {})
+    assert decision.allowed is False
+    assert decision.level is GateLevel.BLOCKED
+    assert decision.reason == "not on allow-list"
+
+
+def test_policy_gate_automatic_rate_limit():
+    from kiosk_core.qsr_mcp.policy import GateLevel, PolicyGate
+
+    gate = PolicyGate()
+    gate.register("do_thing", GateLevel.AUTOMATIC, max_calls=2, per_seconds=60.0)
+    d1 = gate.evaluate("do_thing", {})
+    d2 = gate.evaluate("do_thing", {})
+    d3 = gate.evaluate("do_thing", {})
+    assert [d1.allowed, d2.allowed, d3.allowed] == [True, True, False]
+    assert d3.reason == "rate limit exceeded"
+
+
+# ---------------------------------------------------------------------------
+# Explicit initialisation
+# ---------------------------------------------------------------------------
+
+def test_importing_the_module_opens_no_log_and_no_sockets(monkeypatch, tmp_path):
+    """Importing must stay side-effect free. Building the durable log at
+    import time created `qsr_mcp_events.db` on disk and an httpx connection
+    pool merely because something did `import mcp_service` — which is also
+    why the tests had to reload modules in a fixed order."""
+    import importlib
+
+    db_path = tmp_path / "events.db"
+    monkeypatch.setenv("KIOSK_CORE_QSR_MCP_ENABLED", "true")
+    monkeypatch.setenv("KIOSK_CORE_QSR_MCP_LOG_BACKEND", "sqlite")
+    monkeypatch.setenv("KIOSK_CORE_QSR_MCP_LOG_PATH", str(db_path))
+    monkeypatch.setenv("KIOSK_CORE_QUEUE_SERVICE_ENABLED", "true")
+
+    import kiosk_core.config as cfg_module
+    importlib.reload(cfg_module)
+    import kiosk_core.qsr_mcp.mcp_service as mcp_service
+    importlib.reload(mcp_service)
+
+    assert not db_path.exists(), "import must not create the event log"
+    assert mcp_service._log is None
+    assert mcp_service._queue_client is None
+
+    mcp_service.init()
+    assert db_path.exists()
+    assert mcp_service._log is not None
+    assert mcp_service._queue_client is not None
+
+
+def test_init_is_idempotent(monkeypatch, tmp_path):
+    import importlib
+
+    monkeypatch.setenv("KIOSK_CORE_QSR_MCP_LOG_BACKEND", "memory")
+    monkeypatch.setenv("KIOSK_CORE_QUEUE_SERVICE_ENABLED", "false")
+    monkeypatch.setenv(
+        "KIOSK_CORE_QSR_MCP_BOARD_STATE_PATH", str(tmp_path / "board.json")
+    )
+    import kiosk_core.config as cfg_module
+    importlib.reload(cfg_module)
+    import kiosk_core.qsr_mcp.mcp_service as mcp_service
+    importlib.reload(mcp_service)
+
+    mcp_service.init()
+    first = mcp_service._log
+    mcp_service.init()
+    assert mcp_service._log is first, "a second init must not rebuild the log"
+    mcp_service.init(force=True)
+    assert mcp_service._log is not first, "force=True must rebuild"
+
+
+def test_tools_work_without_an_explicit_init(monkeypatch, tmp_path):
+    """`init()` is explicit for the app, but a direct tool call must still
+    work standalone rather than raising AttributeError on a None log."""
+    import importlib
+
+    monkeypatch.setenv("KIOSK_CORE_QSR_MCP_LOG_BACKEND", "memory")
+    monkeypatch.setenv("KIOSK_CORE_QUEUE_SERVICE_ENABLED", "false")
+    import kiosk_core.config as cfg_module
+    importlib.reload(cfg_module)
+    import kiosk_core.qsr_mcp.mcp_service as mcp_service
+    importlib.reload(mcp_service)
+
+    assert mcp_service._log is None
+    result = mcp_service.get_queue_history(period="today")
+    assert result["samples"] == 0
+    assert mcp_service._log is not None, "first use must self-initialise"
+
+
+# ---------------------------------------------------------------------------
+# Queue-history aggregation
+# ---------------------------------------------------------------------------
+
+def test_sqlite_aggregate_matches_the_python_fallback(tmp_path):
+    """period='all' must not load every sample ever recorded just to reduce
+    it to three numbers. The SQL path has to agree with the row-by-row one."""
+    from kiosk_core.qsr_mcp.event_log import (
+        JSONLFileLog,
+        SQLiteLog,
+        new_event,
+        summarise_numeric,
+    )
+
+    counts = [3, 7, 2, 11, 5]
+    sqlite_log = SQLiteLog(":memory:", "svc")
+    jsonl_log = JSONLFileLog(str(tmp_path / "log.jsonl"), "svc")
+    for i, count in enumerate(counts):
+        for log in (sqlite_log, jsonl_log):
+            log.append(
+                new_event("queue_depth_sample", "svc", "s1", {"count": count}, f"r{i}")
+            )
+            # A different event type carrying the same field must be excluded.
+            log.append(
+                new_event("board_mode_changed", "svc", "s1", {"count": 999}, f"b{i}")
+            )
+
+    expected = (len(counts), round(sum(counts) / len(counts), 2), max(counts))
+    for log in (sqlite_log, jsonl_log):
+        summary = summarise_numeric(log, "count", event_type="queue_depth_sample")
+        assert (summary.count, summary.average, summary.maximum) == expected
+
+    assert hasattr(sqlite_log, "aggregate_numeric")
+    assert not hasattr(jsonl_log, "aggregate_numeric")
+    sqlite_log.close()
+
+
+def test_aggregate_respects_the_time_window():
+    from kiosk_core.qsr_mcp.event_log import SQLiteLog, new_event, summarise_numeric
+
+    log = SQLiteLog(":memory:", "svc")
+    log.append(new_event("queue_depth_sample", "svc", "s1", {"count": 4}, "a"))
+    empty = summarise_numeric(
+        log, "count", event_type="queue_depth_sample", since_ts_ms=10**15
+    )
+    assert (empty.count, empty.average, empty.maximum) == (0, 0.0, 0)
+    log.close()
+
+
+def test_aggregate_rejects_a_non_identifier_field():
+    """The field name is interpolated into the JSON path, so it must be
+    validated rather than trusted."""
+    from kiosk_core.qsr_mcp.event_log import SQLiteLog
+
+    log = SQLiteLog(":memory:", "svc")
+    with pytest.raises(ValueError):
+        log.aggregate_numeric("count'; DROP TABLE events--")
+    log.close()
+
+
+def test_aggregate_ignores_non_numeric_payload_values(tmp_path):
+    """SQLite folds a string "7" into AVG, and text sorts above every number
+    in MAX, so int(maximum) would raise. Both backends must skip them."""
+    from kiosk_core.qsr_mcp.event_log import (
+        JSONLFileLog,
+        SQLiteLog,
+        new_event,
+        summarise_numeric,
+    )
+
+    sqlite_log = SQLiteLog(":memory:", "svc")
+    jsonl_log = JSONLFileLog(str(tmp_path / "log.jsonl"), "svc")
+    for i, count in enumerate([4, "7", None, True, 6]):
+        for log in (sqlite_log, jsonl_log):
+            log.append(
+                new_event("queue_depth_sample", "svc", "s1", {"count": count}, f"r{i}")
+            )
+
+    for log in (sqlite_log, jsonl_log):
+        summary = summarise_numeric(log, "count", event_type="queue_depth_sample")
+        assert (summary.count, summary.average, summary.maximum) == (2, 5.0, 6)
+    sqlite_log.close()
+
+
+def test_the_queue_poller_does_not_hold_a_closed_client(monkeypatch):
+    """init(force=True) closes the previous client. A poller that captured it
+    once would call a closed httpx client every interval, forever."""
+    from kiosk_core.qsr_mcp import mcp_server
+
+    seen: list[object] = []
+
+    class StopPolling(BaseException):
+        """Not an Exception: the loop deliberately swallows those."""
+
+    class Client:
+        def __init__(self, label):
+            self.label = label
+
+        def get_queue_snapshot(self):
+            seen.append(self.label)
+            raise StopPolling  # end the loop after one sample
+
+        def close(self):
+            pass
+
+    clients = iter([Client("first"), Client("second")])
+    monkeypatch.setattr(mcp_server, "get_queue_client", lambda: next(clients))
+    monkeypatch.setattr(mcp_server.time, "sleep", lambda _: None)
+
+    with pytest.raises(StopPolling):
+        mcp_server._poll_queue_forever(0)
+
+    # The first call is the "is queue-service enabled?" probe; the sample must
+    # come from a freshly resolved client, not that captured one.
+    assert seen == ["second"]
+
+
+def test_the_queue_poller_survives_a_missing_client(monkeypatch):
+    """Returning on a None client would end the thread for good, so queue
+    history would stop growing silently if queue-service came back."""
+    from kiosk_core.qsr_mcp import mcp_server
+
+    class StopPolling(BaseException):
+        """Not an Exception: the loop deliberately swallows those."""
+
+    class Client:
+        def get_queue_snapshot(self):
+            raise StopPolling
+
+    # None on the second iteration must be skipped, not fatal.
+    clients = iter([Client(), None, Client()])
+    monkeypatch.setattr(mcp_server, "get_queue_client", lambda: next(clients))
+    monkeypatch.setattr(mcp_server.time, "sleep", lambda _: None)
+
+    with pytest.raises(StopPolling):
+        mcp_server._poll_queue_forever(0)

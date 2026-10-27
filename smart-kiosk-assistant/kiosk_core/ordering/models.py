@@ -20,6 +20,8 @@ class Product(BaseModel):
     price: float
     is_bestseller: bool = False
     is_veg: bool = True
+    # False removes the item from the menu and blocks it at order time.
+    is_available: bool = True
 
 
 class ProductResolution(BaseModel):
