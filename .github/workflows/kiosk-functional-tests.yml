@@ -207,10 +207,19 @@ jobs:
           cache-dependency-path: smart-kiosk-assistant/rag-service/requirements.txt
 
       - name: Install Python dependencies
+        # aiohttp is a real rag-service dependency (rag-service/requirements.txt),
+        # not a test extra. tests/conftest.py falls back to a minimal aiohttp
+        # stub when the import fails, but that stub only defines ClientError,
+        # ClientTimeout and ClientSession — and google-genai (pulled in by
+        # google-adk) reads aiohttp.ClientConnectorError at import time, which
+        # the stub does not have. Installing the real package keeps the stub
+        # unused here; it exists for developers running the suite without the
+        # full requirements file.
         run: |
           python -m pip install --upgrade pip
           pip install \
             "google-adk>=1.28.1" \
+            "aiohttp>=3.9.0" \
             "numpy==1.26.4" \
             "PyYAML==6.0.2" \
             pytest==8.3.5 \
