@@ -130,6 +130,11 @@ class TestOrderingProducts:
             "price": 129.0,
             "is_bestseller": True,
             "is_veg": True,
+            # Seeded rows are available by default. The QSR agent can flip
+            # this to hide an item from listings and refuse it at order time;
+            # `source` is deliberately not exposed here — it is ownership
+            # bookkeeping for the YAML seeder, not catalogue data.
+            "is_available": True,
         }
 
         missing = ordering_app.get("/api/v1/products/DOES-NOT-EXIST")
