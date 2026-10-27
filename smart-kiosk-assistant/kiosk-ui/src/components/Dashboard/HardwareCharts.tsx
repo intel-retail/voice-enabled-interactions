@@ -162,9 +162,12 @@ interface HardwareChartsProps {
   metrics: MetricsResponse;
   /** Non-null when the metrics poll is failing — shown instead of the LIVE badge. */
   error?: string | null;
+  /** Epoch ms of the last successful poll; used to show how stale the
+   *  retained sample is while the collector is unreachable. */
+  lastUpdated?: number | null;
 }
 
-export function HardwareCharts({ metrics, error = null }: HardwareChartsProps) {
+export function HardwareCharts({ metrics, error = null, lastUpdated = null }: HardwareChartsProps) {
   const cpu = toChartPoints(metrics.cpu_utilization);
   const gpu = toChartPoints(metrics.gpu_utilization);
   const npu = toChartPoints(metrics.npu_utilization);
@@ -202,9 +205,25 @@ export function HardwareCharts({ metrics, error = null }: HardwareChartsProps) {
 
       {error && (
         <p className="rounded border border-red-200 bg-red-50 px-2 py-1 text-[10px] text-red-700">
-          Cannot reach metrics-collector: {error}
+          Metrics unavailable: {error}
+          {lastUpdated !== null && (
+            <span className="text-red-600">
+              {' '}
+              — showing last reading from {new Date(lastUpdated).toLocaleTimeString()}
+            </span>
+          )}
         </p>
       )}
+
+      {/* Charts are dimmed while the poll is failing so the retained sample is
+          not mistaken for a current reading. */}
+      <div
+        className={
+          error
+            ? 'space-y-2 opacity-50 grayscale transition-opacity'
+            : 'space-y-2 transition-opacity'
+        }
+      >
 
       {/* Summary bar: CPU / GPU / NPU at a glance */}
       <div className="grid grid-cols-3 gap-2">
@@ -261,6 +280,7 @@ export function HardwareCharts({ metrics, error = null }: HardwareChartsProps) {
         fill="#64748b"
         fillOpacity={0.1}
       />
+      </div>
     </div>
   );
 }

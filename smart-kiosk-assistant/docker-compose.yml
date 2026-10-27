@@ -22,6 +22,20 @@
 # pull/up` users who don't go through `make`. Set REGISTRY_REPO in .env only
 # if you publish to a different registry/namespace.
 
+# ---------------------------------------------------------------------------
+# Shared NO_PROXY list for every service that talks to a sibling container.
+#
+# Defined once here because the same literal was previously repeated across
+# four services (eight lines, upper and lower case) — the next service added
+# would inevitably be missing from one copy.
+#
+# Covers every container name in this file plus the Docker bridge CIDRs, so
+# intra-cluster traffic never bounces off a corporate proxy. kiosk-core is
+# deliberately NOT using this anchor: it appends the runtime-resolved
+# ${KIOSK_CORE_QSR_EXTRA_NO_PROXY} suffix, and YAML anchors cannot concatenate.
+# Keep the two in sync when adding a service.
+x-no-proxy: &no-proxy "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,queue-service,rtsp-streamer,identity-service,172.16.0.0/12,10.0.0.0/8"
+
 services:
 
   # ---------------------------------------------------------------------------
@@ -305,16 +319,22 @@ services:
       # Hub checks (e.g. picking up a newly-released model revision).
       HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-1}
       TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-1}
-      # Optional egress proxy, used only when HF_HUB_OFFLINE=0 forces a live
-      # Hub call (first-run model download). Unset by default so hosts with
-      # direct internet are unaffected; NO_PROXY keeps intra-cluster traffic
-      # on the Docker bridge rather than bouncing off the proxy.
-      HTTP_PROXY: ${HTTP_PROXY:-}
-      http_proxy: ${HTTP_PROXY:-}
-      HTTPS_PROXY: ${HTTPS_PROXY:-}
-      https_proxy: ${HTTPS_PROXY:-}
-      NO_PROXY: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,172.16.0.0/12,10.0.0.0/8"
-      no_proxy: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,172.16.0.0/12,10.0.0.0/8"
+      # NOTE: the shipped .env.example sets these to 0 (online), which wins over
+      # the :-1 fallback above — the fallback only applies when the variable is
+      # absent entirely (raw `docker compose up` with no .env). Online is the
+      # correct default: setup_models.sh does NOT pre-fetch this service's
+      # models, they are downloaded in-container on first run. Offline mode is
+      # only safe once a previous run has populated the cache volume.
+      #
+      # Proxy variables are intentionally NOT declared here. Docker already
+      # injects HTTP_PROXY/HTTPS_PROXY/NO_PROXY from ~/.docker/config.json
+      # (proxies.default) when they are not otherwise set. Declaring them with
+      # a `${HTTP_PROXY:-}` default would inject an EMPTY value and silently
+      # override that mechanism, breaking first-run downloads on exactly the
+      # proxied hosts this is meant to help. Use docker-compose.proxy.yml to
+      # set proxies explicitly from .env instead.
+      NO_PROXY: *no-proxy
+      no_proxy: *no-proxy
       # HuggingFace token — required by Pyannote speaker diarization.
       # Set HF_TOKEN in .env (single source of truth).
       HF_TOKEN: ${HF_TOKEN:-}
@@ -410,27 +430,26 @@ services:
       # Point HF cache under ~/.cache so a single ./.cache mount persists
       # every model cache the service uses (HF, torch hub, etc.).
       HF_HOME: /app/text-to-speech/.cache/huggingface
-      # Same offline guards as audio-analyzer/rag-service. Without these the
-      # service makes a live Hub metadata call during FastAPI lifespan (model
-      # resolution, and an OpenVINO IR export for the SpeechT5/Qwen engines).
-      # On a host with no route to huggingface.co that call raises
+      # Same offline guards as audio-analyzer/rag-service; this block previously
+      # had none, so the service always made a live Hub call during FastAPI
+      # lifespan regardless of what the user set in .env.
+      #
+      # IMPORTANT: this does not by itself fix a no-egress host. The shipped
+      # .env.example sets HF_HUB_OFFLINE=0 (online), which wins over the :-1
+      # fallback below — the fallback only applies when the variable is absent
+      # entirely. Online is the correct default because setup_models.sh does
+      # NOT pre-fetch the TTS models; they are downloaded in-container on first
+      # run. On a host with no route to huggingface.co that call raises
       # httpx.ConnectError at startup, the healthcheck never passes, and every
       # service gated on `depends_on: text-to-speech: service_healthy`
       # (rag-service, kiosk-core) aborts with "dependency failed to start".
-      # Default 1 (offline) is safe because setup_models.sh pre-caches the
-      # models; set HF_HUB_OFFLINE=0 in .env for a first run that must
-      # download. See the proxy passthrough below for proxied hosts.
+      # Fix that with a proxy (see docker-compose.proxy.yml) or by warming the
+      # cache on a connected host, then setting HF_HUB_OFFLINE=1.
       HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-1}
       TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-1}
-      # Optional egress proxy for that first online run. Unset by default, so
-      # hosts with direct internet are unaffected; NO_PROXY keeps intra-cluster
-      # traffic on the Docker bridge rather than bouncing off the proxy.
-      HTTP_PROXY: ${HTTP_PROXY:-}
-      http_proxy: ${HTTP_PROXY:-}
-      HTTPS_PROXY: ${HTTPS_PROXY:-}
-      https_proxy: ${HTTPS_PROXY:-}
-      NO_PROXY: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,172.16.0.0/12,10.0.0.0/8"
-      no_proxy: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,172.16.0.0/12,10.0.0.0/8"
+      # Proxy variables intentionally NOT declared — see audio-analyzer above.
+      NO_PROXY: *no-proxy
+      no_proxy: *no-proxy
       # ── TTS engine selection (device-combination benchmarking) ────────────
       # These four move together and MUST stay consistent — the TTS factory
       # picks an implementation from (name, runtime) and then hands `device`
@@ -585,8 +604,8 @@ services:
       # Bypass corporate proxy for all intra-cluster traffic so that
       # requests to ovms-llm, kiosk-core, etc. go directly on the
       # Docker bridge network instead of through the HTTP proxy.
-      NO_PROXY: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,172.16.0.0/12,10.0.0.0/8"
-      no_proxy: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,172.16.0.0/12,10.0.0.0/8"
+      NO_PROXY: *no-proxy
+      no_proxy: *no-proxy
       # Domain-specific config (identity, intent rules, reply templates) is
       # mounted from the consuming application rather than baked into the image.
       # Non-kiosk deployments override this path (or leave it unset for
@@ -1069,8 +1088,8 @@ services:
       # Required for Level Zero to enumerate the Intel NPU. Harmless when no
       # NPU node is mapped — OpenVINO then reports CPU/GPU only.
       ZE_ENABLE_ALT_DRIVERS:     libze_intel_npu.so
-      NO_PROXY: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,identity-service,172.16.0.0/12,10.0.0.0/8"
-      no_proxy: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,identity-service,172.16.0.0/12,10.0.0.0/8"
+      NO_PROXY: *no-proxy
+      no_proxy: *no-proxy
     volumes:
       # Shared SQLite DB (same file kiosk-core uses).
       - kiosk_db:/app/data

@@ -41,6 +41,40 @@ session and product ordering, `kiosk-ui` is the React front end, and
 > in-container ASR, TTS, embedding, and reranker models. Allow extra time on
 > the first run depending on your connection.
 
+## Device support (CPU, GPU, NPU)
+
+CPU and iGPU are supported everywhere in the stack. **NPU is only partially
+supported, and choosing it without checking the constraints below produces a
+deployment that either crash-loops or silently runs on CPU.** Read this before
+setting `TARGET_DEVICE` in [Step 3](#step-3-create-env-and-set-required-variables).
+
+| Component | CPU | GPU | NPU |
+|---|---|---|---|
+| `ovms-llm` (served LLM) | ✅ | ✅ | ❌ **Not supported** |
+| `audio-analyzer` ASR | ✅ | ✅ | ⚠️ `whisper-tiny` / `whisper-base` only |
+| `queue-service`, `identity-service` | ✅ | ✅ | ✅ |
+
+- **Do not set `TARGET_DEVICE=NPU` for the LLM.** OVMS serves the NPU through a
+  Stateful servable that caps prompts at 1024 tokens, so LLM turns fail with
+  "Sorry, I encountered an error". `setup_models.sh --device NPU` refuses to run
+  for this reason and exits with an error. Use `GPU` (or `CPU`) instead.
+- **NPU is usable for the non-LLM models.** If you only want the queue,
+  identity and ASR models on the NPU, pass `--skip-ovms` to acknowledge that
+  the LLM is not being prepared for NPU:
+
+  ```bash
+  ./setup_models.sh --device NPU --skip-ovms
+  ```
+
+  The OVMS LLM must still be served on `GPU` or `CPU`.
+- **ASR on NPU needs a small checkpoint.** `whisper-small` and larger fail to
+  compile with `Check '!self_attn_nodes.empty()' failed`.
+- **NPU passthrough requires `ACCEL_MOUNT_PATH`** in `.env`. Without it the
+  container has no accel node, OpenVINO silently falls back to CPU, and the run
+  is mislabelled rather than failed.
+
+See [Troubleshooting](troubleshooting.md) for the full diagnostics and fixes.
+
 ## Step 1: Install Docker and Intel GPU Drivers
 
 Skip if Docker is already installed (`docker --version` and
@@ -204,30 +238,6 @@ rtsp://rtsp-streamer:8554/queue
 ```
 
 ## Step 6: Build Images and Start the Stack
-
-### Device support (CPU, GPU, NPU)
-
-CPU and iGPU are supported everywhere in the stack. **NPU is only partially
-supported, and choosing it without checking the constraints below produces a
-deployment that either crash-loops or silently runs on CPU.**
-
-| Component | CPU | GPU | NPU |
-|---|---|---|---|
-| `ovms-llm` (served LLM) | ✅ | ✅ | ❌ **Not supported** |
-| `audio-analyzer` ASR | ✅ | ✅ | ⚠️ `whisper-tiny` / `whisper-base` only |
-| `queue-service`, `identity-service` | ✅ | ✅ | ✅ |
-
-- **Do not set `TARGET_DEVICE=NPU`.** OVMS serves the NPU through a Stateful
-  servable that caps prompts at 1024 tokens, so LLM turns fail with
-  "Sorry, I encountered an error". `setup_models.sh --device NPU` refuses to run
-  for this reason. Use `GPU` (or `CPU`).
-- **ASR on NPU needs a small checkpoint.** `whisper-small` and larger fail to
-  compile with `Check '!self_attn_nodes.empty()' failed`.
-- **NPU passthrough requires `ACCEL_MOUNT_PATH`** in `.env`. Without it the
-  container has no accel node, OpenVINO silently falls back to CPU, and the run
-  is mislabelled rather than failed.
-
-See [Troubleshooting](troubleshooting.md) for the full diagnostics and fixes.
 
 ```bash
 make build           # pull released images (shipped .env has REGISTRY=true)

@@ -380,6 +380,42 @@ check-env: ## Validate .env and all required variables before running the stack
 		echo "  $(GREEN)✓ TARGET_DEVICE=$(TARGET_DEVICE)$(NC)"; \
 	fi; \
 	\
+	HF_OFFLINE="$(HF_HUB_OFFLINE)"; \
+	CACHE_WARM=0; \
+	for V in audio_analyzer_cache text_to_speech_cache rag_service_hf_cache; do \
+		if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -q "$$V$$"; then \
+			CACHE_WARM=$$((CACHE_WARM+1)); \
+		fi; \
+	done; \
+	if [ "$$HF_OFFLINE" = "1" ]; then \
+		if [ "$$CACHE_WARM" -lt 3 ]; then \
+			echo "  $(RED)✗ HF_HUB_OFFLINE=1 but the model caches are not warm$(NC) ($$CACHE_WARM/3 cache volumes exist)"; \
+			echo "    setup_models.sh does NOT pre-fetch the ASR/TTS/RAG models — they are"; \
+			echo "    downloaded in-container on the first online run. Starting offline with an"; \
+			echo "    empty cache makes the services fail their healthcheck, and everything"; \
+			echo "    gated on them aborts with 'dependency failed to start'."; \
+			echo "    Set HF_HUB_OFFLINE=0 (and TRANSFORMERS_OFFLINE=0) for the first run."; \
+			ERRORS=$$((ERRORS+1)); \
+		else \
+			echo "  $(GREEN)✓ HF_HUB_OFFLINE=1 with warm model caches$(NC)"; \
+		fi; \
+	else \
+		if curl -s --connect-timeout 5 --max-time 8 -o /dev/null https://huggingface.co 2>/dev/null; then \
+			echo "  $(GREEN)✓ HF_HUB_OFFLINE=0 and huggingface.co is reachable$(NC)"; \
+		elif [ "$$CACHE_WARM" -ge 3 ]; then \
+			echo "  $(YELLOW)⚠ huggingface.co is unreachable$(NC) (model caches look warm, so startup will likely still work)"; \
+			echo "    If a service fails its healthcheck, set HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 in .env."; \
+		else \
+			echo "  $(RED)✗ HF_HUB_OFFLINE=0 but huggingface.co is unreachable and the caches are cold$(NC)"; \
+			echo "    The audio-analyzer/text-to-speech containers will raise"; \
+			echo "    httpx.ConnectError at startup and never become healthy."; \
+			echo "    Behind a proxy? Set HTTP_PROXY/HTTPS_PROXY in .env and start with:"; \
+			echo "      docker compose -f docker-compose.yml -f docker-compose.proxy.yml up -d"; \
+			echo "    See docs/user-guide/troubleshooting.md."; \
+			ERRORS=$$((ERRORS+1)); \
+		fi; \
+	fi; \
+	\
 	if [ "$(_RTSP_SOURCE_MODE_RAW)" != "" ] && [ "$(_RTSP_SOURCE_MODE_RAW)" != "sample" ] && [ "$(_RTSP_SOURCE_MODE_RAW)" != "live" ]; then \
 		echo "  $(RED)✗ RTSP_SOURCE_MODE='$(_RTSP_SOURCE_MODE_RAW)' is invalid$(NC)  (must be sample | live)"; \
 		ERRORS=$$((ERRORS+1)); \
