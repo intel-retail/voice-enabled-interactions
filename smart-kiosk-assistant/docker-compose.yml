@@ -305,33 +305,31 @@ services:
       # ./.cache mount persists every model cache the service uses
       # (huggingface, openai-whisper, torch hub, etc.).
       HF_HOME: /app/audio_analyzer/.cache/huggingface
-      # Force fully offline operation for HF model/tokenizer loading. The
-      # pyannote diarization pipeline's local files (segmentation, embedding,
-      # plda incl. xvec_transform.npz) are already fully cached under
-      # ./models by ensure_model.py — but without these flags,
-      # huggingface_hub still makes a live metadata/revision check on every
-      # load even when local files are present, which crashes/silently
+      # HF model/tokenizer loading mode. The pyannote diarization pipeline's
+      # local files (segmentation, embedding, plda incl. xvec_transform.npz)
+      # are cached under ./models by ensure_model.py — but with offline mode
+      # OFF, huggingface_hub still makes a live metadata/revision check on
+      # every load even when local files are present, which crashes/silently
       # disables diarization when there is no network/proxy access at all.
-      # Confirmed fix: with HF_HUB_OFFLINE=1 forced, PyannoteDiarizer loads
-      # successfully from local cache with zero network calls.
-      # Set HF_HUB_OFFLINE=0 / TRANSFORMERS_OFFLINE=0 in .env if this
-      # environment has working internet/proxy access and you want live
-      # Hub checks (e.g. picking up a newly-released model revision).
+      # Setting HF_HUB_OFFLINE=1 suppresses those calls entirely and lets
+      # PyannoteDiarizer load from local cache with zero network access.
+      #
+      # The fallback here is 0 (online), matching .env.example. Online is the
+      # correct default: setup_models.sh does NOT pre-fetch this service's
+      # models, they are downloaded in-container on first run, so a fresh host
+      # with no .env must be able to reach the Hub. Set HF_HUB_OFFLINE=1 and
+      # TRANSFORMERS_OFFLINE=1 in .env only once a previous run has populated
+      # the cache volume — that is also the fix for a host with no egress.
+      # `make check-env` reports whether the caches actually look populated.
       HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
       TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-0}
-      # NOTE: the fallback below matches .env.example (0 = online). Online is
-      # the correct default: setup_models.sh does NOT pre-fetch this service's
-      # models, they are downloaded in-container on first run, so a fresh host
-      # with no .env must be able to reach the Hub. Offline mode is only safe
-      # once a previous run has populated the cache volume.
-      #
       # Proxy variables are intentionally NOT declared here. Docker already
       # injects HTTP_PROXY/HTTPS_PROXY/NO_PROXY from ~/.docker/config.json
       # (proxies.default) when they are not otherwise set. Declaring them with
       # a `${HTTP_PROXY:-}` default would inject an EMPTY value and silently
       # override that mechanism, breaking first-run downloads on exactly the
-      # proxied hosts this is meant to help. Use docker-compose.proxy.yml to
-      # set proxies explicitly from .env instead.
+      # proxied hosts this is meant to help. Use `make up PROXY=true` (which
+      # layers docker-compose.proxy.yml) to set proxies explicitly from .env.
       NO_PROXY: *no-proxy
       no_proxy: *no-proxy
       # HuggingFace token — required by Pyannote speaker diarization.
@@ -588,14 +586,17 @@ services:
       # brake on spoken answer length: the model paraphrases whatever it is
       # given, so 2000 chars of context produced a 20-second spoken reply.
       RAG_MAX_CONTEXT_CHARS: ${RAG_MAX_CONTEXT_CHARS:-1800}
-      # Force fully offline operation for HF tokenizer/model loading — the
-      # tokenizer is already cached in the rag_service_hf_cache volume, and
-      # newer `transformers` versions otherwise make a live Hub call
+      # HF tokenizer/model loading mode. The tokenizer is cached in the
+      # rag_service_hf_cache volume, but with offline mode OFF newer
+      # `transformers` versions still make a live Hub call
       # (list_repo_templates) even when local files exist, which crashes
       # startup when there is no network/proxy access at all.
-      # Set HF_HUB_OFFLINE=0 / TRANSFORMERS_OFFLINE=0 in .env if this
-      # environment has working internet/proxy access and you want live
-      # Hub checks (e.g. picking up a newly-released model revision).
+      #
+      # The fallback here is 0 (online), matching .env.example, so a fresh
+      # host can populate the cache on first run. Set HF_HUB_OFFLINE=1 and
+      # TRANSFORMERS_OFFLINE=1 in .env once that cache is warm — that is also
+      # the fix for a host with no egress. `make check-env` reports whether
+      # the caches actually look populated.
       HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
       TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-0}
       # Bypass corporate proxy for all intra-cluster traffic so that
