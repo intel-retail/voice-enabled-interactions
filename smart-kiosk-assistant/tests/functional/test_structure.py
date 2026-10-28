@@ -238,3 +238,11 @@ class TestProxyConfiguration:
             assert "HTTP_PROXY" in env and "HTTPS_PROXY" in env, (
                 f"{service} must set HTTP_PROXY and HTTPS_PROXY in the proxy override"
             )
+            # Must read dedicated names: compose resolves the shell before
+            # .env, so plain HTTPS_PROXY would leak the host shell's proxy.
+            assert "KIOSK_HTTP_PROXY" in env["HTTP_PROXY"], (
+                f"{service} proxy override must read KIOSK_HTTP_PROXY"
+            )
+            assert "KIOSK_HTTPS_PROXY" in env["HTTPS_PROXY"] and "${HTTPS_PROXY" not in env["HTTPS_PROXY"], (
+                f"{service} HTTPS proxy must come from KIOSK_HTTPS_PROXY, not the shell's HTTPS_PROXY"
+            )

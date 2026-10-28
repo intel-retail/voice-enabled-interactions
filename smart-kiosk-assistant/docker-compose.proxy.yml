@@ -23,7 +23,13 @@
 #
 # Keeping it opt-in means an empty proxy is never injected implicitly.
 #
-# Usage — set HTTP_PROXY / HTTPS_PROXY in .env, then:
+# Usage — set KIOSK_HTTP_PROXY / KIOSK_HTTPS_PROXY in .env, then:
+#
+# The KIOSK_ prefix is deliberate. Compose resolves ${VAR} from the shell
+# BEFORE .env, so reading plain HTTPS_PROXY would silently pick up the host
+# shell's own proxy (often a host-only one the containers cannot reach) and
+# could mix it with the HTTP proxy from .env. Dedicated names are only ever
+# taken from .env or an explicit export.
 #
 #   make up PROXY=true
 #
@@ -42,21 +48,21 @@
 services:
   audio-analyzer:
     environment:
-      HTTP_PROXY: ${HTTP_PROXY:?set HTTP_PROXY in .env to use docker-compose.proxy.yml}
-      http_proxy: ${HTTP_PROXY}
-      HTTPS_PROXY: ${HTTPS_PROXY:-${HTTP_PROXY}}
-      https_proxy: ${HTTPS_PROXY:-${HTTP_PROXY}}
+      HTTP_PROXY: ${KIOSK_HTTP_PROXY:?set KIOSK_HTTP_PROXY in .env to use docker-compose.proxy.yml}
+      http_proxy: ${KIOSK_HTTP_PROXY}
+      HTTPS_PROXY: ${KIOSK_HTTPS_PROXY:-${KIOSK_HTTP_PROXY}}
+      https_proxy: ${KIOSK_HTTPS_PROXY:-${KIOSK_HTTP_PROXY}}
 
   text-to-speech:
     environment:
-      HTTP_PROXY: ${HTTP_PROXY:?set HTTP_PROXY in .env to use docker-compose.proxy.yml}
-      http_proxy: ${HTTP_PROXY}
-      HTTPS_PROXY: ${HTTPS_PROXY:-${HTTP_PROXY}}
-      https_proxy: ${HTTPS_PROXY:-${HTTP_PROXY}}
+      HTTP_PROXY: ${KIOSK_HTTP_PROXY:?set KIOSK_HTTP_PROXY in .env to use docker-compose.proxy.yml}
+      http_proxy: ${KIOSK_HTTP_PROXY}
+      HTTPS_PROXY: ${KIOSK_HTTPS_PROXY:-${KIOSK_HTTP_PROXY}}
+      https_proxy: ${KIOSK_HTTPS_PROXY:-${KIOSK_HTTP_PROXY}}
 
   rag-service:
     environment:
-      HTTP_PROXY: ${HTTP_PROXY:?set HTTP_PROXY in .env to use docker-compose.proxy.yml}
-      http_proxy: ${HTTP_PROXY}
-      HTTPS_PROXY: ${HTTPS_PROXY:-${HTTP_PROXY}}
-      https_proxy: ${HTTPS_PROXY:-${HTTP_PROXY}}
+      HTTP_PROXY: ${KIOSK_HTTP_PROXY:?set KIOSK_HTTP_PROXY in .env to use docker-compose.proxy.yml}
+      http_proxy: ${KIOSK_HTTP_PROXY}
+      HTTPS_PROXY: ${KIOSK_HTTPS_PROXY:-${KIOSK_HTTP_PROXY}}
+      https_proxy: ${KIOSK_HTTPS_PROXY:-${KIOSK_HTTP_PROXY}}

@@ -69,8 +69,8 @@ inside their containers on first run, which is why `HF_HUB_OFFLINE=0`
 
   ```bash
   # .env
-  HTTP_PROXY=http://proxy.example.com:3128
-  HTTPS_PROXY=http://proxy.example.com:3128
+  KIOSK_HTTP_PROXY=http://proxy.example.com:3128
+  KIOSK_HTTPS_PROXY=http://proxy.example.com:3128   # optional; defaults to KIOSK_HTTP_PROXY
   ```
 
   ```bash
