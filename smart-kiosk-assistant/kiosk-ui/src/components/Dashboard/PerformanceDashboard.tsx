@@ -37,6 +37,10 @@ type Tab = 'performance' | 'settings' | 'qsr';
 interface PerformanceDashboardProps {
   kpis: KpiBundle;
   metrics: MetricsResponse;
+  /** Non-null when the metrics poll is failing; forwarded to HardwareCharts. */
+  metricsError?: string | null;
+  /** Epoch ms of the last successful metrics poll; forwarded to HardwareCharts. */
+  metricsLastUpdated?: number | null;
   phase: VoicePhase;
   orderActive: boolean;
   // DeviceSettings props
@@ -52,6 +56,8 @@ interface PerformanceDashboardProps {
 export function PerformanceDashboard({
   kpis,
   metrics,
+  metricsError = null,
+  metricsLastUpdated = null,
   phase,
   orderActive,
   devices,
@@ -143,7 +149,11 @@ export function PerformanceDashboard({
             <div className="h-px bg-gray-200" />
 
             {/* Hardware Charts */}
-            <HardwareCharts metrics={metrics} />
+            <HardwareCharts
+              metrics={metrics}
+              error={metricsError}
+              lastUpdated={metricsLastUpdated}
+            />
           </div>
         )}
 

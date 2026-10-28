@@ -1,0 +1,68 @@
+# docker-compose.proxy.yml — OPT-IN egress proxy override
+#
+# Only needed when BOTH of the following are true:
+#   1. this host reaches the internet through a proxy, AND
+#   2. a service still has to download models (HF_HUB_OFFLINE=0, first run).
+#
+# Most proxied hosts do NOT need this file. Docker already injects
+# HTTP_PROXY / HTTPS_PROXY / NO_PROXY into every container from
+# ~/.docker/config.json (the `proxies.default` block) whenever those variables
+# are not otherwise set. That mechanism is preferred — it is host-local and
+# needs no change to this repo.
+#
+# This file exists for hosts that keep the proxy in .env rather than in
+# config.json. It is a SEPARATE file, not part of docker-compose.yml, for a
+# specific reason: declaring `HTTP_PROXY: ${HTTP_PROXY:-}` in the main compose
+# file injects an EMPTY value when the variable is unset, which silently
+# overrides the config.json mechanism above and breaks the first-run download
+# on exactly the proxied hosts it was meant to help. Verified behaviour:
+#
+#   $ docker compose run --rm probe       # with proxies.default in config.json
+#   HTTP_PROXY=                           # <- clobbered by the empty default
+#   http_proxy=http://proxy.example.com:3128   # <- config.json value survived
+#
+# Keeping it opt-in means an empty proxy is never injected implicitly.
+#
+# Usage — set KIOSK_HTTP_PROXY / KIOSK_HTTPS_PROXY in .env, then:
+#
+# The KIOSK_ prefix is deliberate. Compose resolves ${VAR} from the shell
+# BEFORE .env, so reading plain HTTPS_PROXY would silently pick up the host
+# shell's own proxy (often a host-only one the containers cannot reach) and
+# could mix it with the HTTP proxy from .env. Dedicated names are only ever
+# taken from .env or an explicit export.
+#
+#   make up PROXY=true
+#
+# That is preferred over invoking compose directly, because `make up` also
+# runs check-env and adds the identity/queue profile flags. The equivalent
+# raw command (without those) is:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.proxy.yml up -d
+#
+# Values set here REPLACE anything Docker would have taken from
+# ~/.docker/config.json for these services.
+#
+# NO_PROXY is deliberately not re-declared: docker-compose.yml already applies
+# the shared `*no-proxy` anchor to these services, and that still applies here.
+
+services:
+  audio-analyzer:
+    environment:
+      HTTP_PROXY: ${KIOSK_HTTP_PROXY:?set KIOSK_HTTP_PROXY in .env to use docker-compose.proxy.yml}
+      http_proxy: ${KIOSK_HTTP_PROXY}
+      HTTPS_PROXY: ${KIOSK_HTTPS_PROXY:-${KIOSK_HTTP_PROXY}}
+      https_proxy: ${KIOSK_HTTPS_PROXY:-${KIOSK_HTTP_PROXY}}
+
+  text-to-speech:
+    environment:
+      HTTP_PROXY: ${KIOSK_HTTP_PROXY:?set KIOSK_HTTP_PROXY in .env to use docker-compose.proxy.yml}
+      http_proxy: ${KIOSK_HTTP_PROXY}
+      HTTPS_PROXY: ${KIOSK_HTTPS_PROXY:-${KIOSK_HTTP_PROXY}}
+      https_proxy: ${KIOSK_HTTPS_PROXY:-${KIOSK_HTTP_PROXY}}
+
+  rag-service:
+    environment:
+      HTTP_PROXY: ${KIOSK_HTTP_PROXY:?set KIOSK_HTTP_PROXY in .env to use docker-compose.proxy.yml}
+      http_proxy: ${KIOSK_HTTP_PROXY}
+      HTTPS_PROXY: ${KIOSK_HTTPS_PROXY:-${KIOSK_HTTP_PROXY}}
+      https_proxy: ${KIOSK_HTTPS_PROXY:-${KIOSK_HTTP_PROXY}}

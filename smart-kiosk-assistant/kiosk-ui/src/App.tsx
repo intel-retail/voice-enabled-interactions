@@ -15,7 +15,7 @@ import { useMetrics } from './hooks/useMetrics';
 export default function App() {
   const { devices, selectedId, setSelectedId, error: micError } = useMicDevices();
   const { kpis, refresh: refreshKpis } = useKpis();
-  const { metrics } = useMetrics();
+  const { metrics, error: metricsError, lastUpdated: metricsLastUpdated } = useMetrics();
   const [ingestBusy, setIngestBusy] = useState(false);
 
   const onTurnComplete = useCallback(() => {
@@ -154,6 +154,8 @@ export default function App() {
           <PerformanceDashboard
             kpis={kpis}
             metrics={metrics}
+            metricsError={metricsError}
+            metricsLastUpdated={metricsLastUpdated}
             phase={phase}
             orderActive={orderActive}
             devices={devices}

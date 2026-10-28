@@ -25,6 +25,105 @@
   docker compose logs -f kiosk-ui
   ```
 
+## `dependency failed to start: container <name> is unhealthy`
+
+Symptom — `make up` (or `docker compose up`) aborts with one or more of:
+
+```text
+✘ Container audio-analyzer  Error dependency audio-analyzer failed to start
+✘ Container text-to-speech  Error dependency text-to-speech failed to start
+dependency failed to start: container text-to-speech is unhealthy
+```
+
+`rag-service` and `kiosk-core` gate on `depends_on: service_healthy`, so a
+single service that never reports healthy takes the whole stack down with it.
+Find the real error in the failing service's own log:
+
+```bash
+docker compose logs -f text-to-speech
+docker compose logs -f audio-analyzer
+```
+
+**Cause 1 — no route to Hugging Face.** The log ends in:
+
+```text
+httpx.ConnectError: [Errno 101] Network is unreachable
+```
+
+raised from `huggingface_hub` during FastAPI startup. The service tried a live
+Hub call (model resolution, or an OpenVINO IR export) and the host has no
+direct internet access.
+
+Note that `setup_models.sh` does **not** pre-fetch these models — it only
+handles the OVMS LLM, the queue-analytics YOLO model and Silero VAD. The
+`audio-analyzer`, `text-to-speech` and `rag-service` models are downloaded
+inside their containers on first run, which is why `HF_HUB_OFFLINE=0`
+(online) is the shipped default in `.env.example`. Fix with either:
+
+- **Behind a proxy (first run on a proxied host).** Keep `HF_HUB_OFFLINE=0`
+  so the models can be fetched. If your proxy is already configured in
+  `~/.docker/config.json` under `proxies.default`, Docker injects it for you
+  and there is nothing to do. Otherwise set it in `.env` and start the stack
+  with the opt-in override — the variables are deliberately not applied
+  without it, so an empty value can never clobber your `config.json` proxy:
+
+  ```bash
+  # .env
+  KIOSK_HTTP_PROXY=http://proxy.example.com:3128
+  KIOSK_HTTPS_PROXY=http://proxy.example.com:3128   # optional; defaults to KIOSK_HTTP_PROXY
+  ```
+
+  ```bash
+  make up PROXY=true
+  ```
+
+  Prefer this over running `docker compose -f docker-compose.yml -f
+  docker-compose.proxy.yml up -d` by hand: the `make` target also runs
+  `check-env` and keeps the identity/queue profile flags that `make up`
+  normally adds (queue services are on by default via `QUEUE=true`).
+
+  Intra-cluster traffic always bypasses the proxy via the shared `NO_PROXY`
+  anchor in `docker-compose.yml`.
+
+- **Warm cache, then go offline.** Start the stack once on a connected host
+  so each service populates its Hugging Face cache volume, then set offline
+  mode so no Hub call is attempted at all:
+
+  ```bash
+  HF_HUB_OFFLINE=1
+  TRANSFORMERS_OFFLINE=1
+  ```
+
+  Do **not** set these on a host that has never completed a successful online
+  run — with an empty cache the services will fail to find their models.
+
+Then recreate the affected services:
+
+```bash
+docker compose up -d --force-recreate text-to-speech audio-analyzer
+```
+
+**Cause 2 — stale image.** If the log shows a configuration or missing-file
+error rather than a network error, the `:latest` tag is resolving to an old
+cached image. How you refresh it depends on `REGISTRY` in your `.env`:
+
+```bash
+# REGISTRY=true (the shipped default) — images are pulled, not built,
+# so --no-cache has no effect. Re-pull instead:
+docker compose pull <service-name>
+
+# REGISTRY=false — images are built locally:
+docker compose build --no-cache <service-name>
+# or, for the whole stack:
+make build
+```
+
+Then recreate the service:
+
+```bash
+docker compose up -d --force-recreate <service-name>
+```
+
 ## First Startup Is Slow
 
 This is expected. On first run each model-hosting service downloads or

@@ -71,6 +71,12 @@ export KIOSK_METRICS_HOST_DIR := ./$(METRICS_DIR)
 
 COMPOSE_FILE     ?= docker-compose.yml
 
+# Compose derives volume names as <project>_<volume>. The project is
+# COMPOSE_PROJECT_NAME when set, otherwise the directory name. Used by
+# check-env to inspect the right volumes instead of suffix-matching, which
+# would also hit same-named volumes from another checkout or project.
+_COMPOSE_PROJECT = $(if $(strip $(COMPOSE_PROJECT_NAME)),$(strip $(COMPOSE_PROJECT_NAME)),$(notdir $(CURDIR)))
+
 # REGISTRY=false  → build images locally from source
 # REGISTRY=true   → pull pre-built images from the registry
 #
@@ -129,7 +135,19 @@ _RTSP_SOURCE_MODE      = $(if $(_RTSP_SOURCE_MODE_RAW),$(_RTSP_SOURCE_MODE_RAW),
 _RTSP_LIVE_ON          = $(filter live,$(_RTSP_SOURCE_MODE))
 _CAMERA_DEVICE_RAW     = $(strip $(CAMERA_DEVICE))
 _RTSP_CAMERA_DEVICE    = $(if $(_RTSP_LIVE_ON),$(_CAMERA_DEVICE_RAW),/dev/null)
-COMPOSE_BASE           = RTSP_SOURCE_MODE=$(_RTSP_SOURCE_MODE) RTSP_CAMERA_DEVICE=$(_RTSP_CAMERA_DEVICE) docker compose -f $(COMPOSE_FILE)
+COMPOSE_BASE           = RTSP_SOURCE_MODE=$(_RTSP_SOURCE_MODE) RTSP_CAMERA_DEVICE=$(_RTSP_CAMERA_DEVICE) docker compose -f $(COMPOSE_FILE) $(_PROXY_FILE)
+
+# PROXY=true appends the opt-in egress-proxy override, so proxied hosts get
+# check-env, the identity/queue profiles and the proxy settings in one command:
+#
+#   make up PROXY=true
+#
+# Running `docker compose -f docker-compose.yml -f docker-compose.proxy.yml up`
+# by hand works too, but skips check-env and drops the profile flags that
+# `make up` adds (queue services are on by default via QUEUE=true).
+PROXY       ?= false
+_PROXY_ON    = $(filter true,$(strip $(PROXY)))
+_PROXY_FILE  = $(if $(_PROXY_ON),-f docker-compose.proxy.yml,)
 
 # Services with fully local build contexts (built from source in this repo).
 # metrics-collector is NOT in this list: its source now lives in the
@@ -378,6 +396,71 @@ check-env: ## Validate .env and all required variables before running the stack
 		ERRORS=$$((ERRORS+1)); \
 	else \
 		echo "  $(GREEN)✓ TARGET_DEVICE=$(TARGET_DEVICE)$(NC)"; \
+	fi; \
+	\
+	HF_OFFLINE="$(HF_HUB_OFFLINE)"; \
+	PROJ="$(_COMPOSE_PROJECT)"; \
+	PROBE_IMG=""; \
+	for I in alpine:latest busybox:latest alpine busybox; do \
+		if docker image inspect "$$I" >/dev/null 2>&1; then PROBE_IMG="$$I"; break; fi; \
+	done; \
+	CACHE_WARM=0; CACHE_SEEN=0; CACHE_VERIFIED=1; \
+	for V in audio_analyzer_cache text_to_speech_cache rag_service_hf_cache; do \
+		VOL="$${PROJ}_$${V}"; \
+		docker volume inspect "$$VOL" >/dev/null 2>&1 || continue; \
+		CACHE_SEEN=$$((CACHE_SEEN+1)); \
+		if [ -n "$$PROBE_IMG" ]; then \
+			if docker run --rm -v "$$VOL":/c:ro "$$PROBE_IMG" \
+				sh -c 'find /c -maxdepth 5 \( -name "models--*" -o -name "*.safetensors" -o -name "*.bin" -o -name "*.xml" \) -print -quit 2>/dev/null | grep -q .' \
+				>/dev/null 2>&1; then \
+				CACHE_WARM=$$((CACHE_WARM+1)); \
+			fi; \
+		else \
+			CACHE_VERIFIED=0; \
+		fi; \
+	done; \
+	if [ "$$CACHE_VERIFIED" = "0" ]; then CACHE_WARM="$$CACHE_SEEN"; fi; \
+	\
+	NET_OK=""; NET_HOW=""; \
+	if [ -n "$$PROBE_IMG" ]; then \
+		NET_HOW="from a container"; \
+		if docker run --rm "$$PROBE_IMG" \
+			sh -c 'wget -q -T 4 --spider https://huggingface.co 2>/dev/null || nc -z -w 4 huggingface.co 443' \
+			>/dev/null 2>&1; then NET_OK=1; fi; \
+	else \
+		NET_HOW="from the host (no local probe image; containers may differ)"; \
+		if curl -s --connect-timeout 3 --max-time 5 -o /dev/null https://huggingface.co 2>/dev/null; then NET_OK=1; fi; \
+	fi; \
+	\
+	if [ "$$HF_OFFLINE" = "1" ]; then \
+		if [ "$$CACHE_WARM" -lt 3 ]; then \
+			echo "  $(YELLOW)⚠ HF_HUB_OFFLINE=1 but only $$CACHE_WARM/3 model caches look populated$(NC)"; \
+			if [ "$$CACHE_VERIFIED" = "0" ]; then \
+				echo "    (volume existence only — no local alpine/busybox image to inspect contents)"; \
+			fi; \
+			echo "    setup_models.sh does NOT pre-fetch the ASR/TTS/RAG models — they are"; \
+			echo "    downloaded in-container on the first online run. Starting offline with an"; \
+			echo "    empty cache makes those services fail their healthcheck, and everything"; \
+			echo "    gated on them aborts with 'dependency failed to start'."; \
+			echo "    If this is a first run, set HF_HUB_OFFLINE=0 and TRANSFORMERS_OFFLINE=0 in .env."; \
+		else \
+			echo "  $(GREEN)✓ HF_HUB_OFFLINE=1 with populated model caches$(NC)"; \
+		fi; \
+	else \
+		if [ -n "$$NET_OK" ]; then \
+			echo "  $(GREEN)✓ HF_HUB_OFFLINE=0 and huggingface.co is reachable$(NC) ($$NET_HOW)"; \
+		elif [ "$$CACHE_WARM" -ge 3 ]; then \
+			echo "  $(YELLOW)⚠ huggingface.co looked unreachable$(NC) ($$NET_HOW) — model caches look populated, so startup should still work"; \
+		else \
+			echo "  $(YELLOW)⚠ huggingface.co looked unreachable$(NC) ($$NET_HOW) and only $$CACHE_WARM/3 model caches look populated"; \
+			echo "    This is a heuristic, not a verdict — it does not block startup."; \
+			echo "    If the containers do have egress (for example a proxy configured in"; \
+			echo "    ~/.docker/config.json), ignore this and continue."; \
+			echo "    If they do not, audio-analyzer/text-to-speech will raise httpx.ConnectError"; \
+			echo "    at startup and never become healthy. Behind a proxy kept in .env, run:"; \
+			echo "      make up PROXY=true"; \
+			echo "    See docs/user-guide/troubleshooting.md."; \
+		fi; \
 	fi; \
 	\
 	if [ "$(_RTSP_SOURCE_MODE_RAW)" != "" ] && [ "$(_RTSP_SOURCE_MODE_RAW)" != "sample" ] && [ "$(_RTSP_SOURCE_MODE_RAW)" != "live" ]; then \

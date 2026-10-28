@@ -22,6 +22,20 @@
 # pull/up` users who don't go through `make`. Set REGISTRY_REPO in .env only
 # if you publish to a different registry/namespace.
 
+# ---------------------------------------------------------------------------
+# Shared NO_PROXY list for every service that talks to a sibling container.
+#
+# Defined once here because the same literal was previously repeated across
+# four services (eight lines, upper and lower case) — the next service added
+# would inevitably be missing from one copy.
+#
+# Covers every container name in this file plus the Docker bridge CIDRs, so
+# intra-cluster traffic never bounces off a corporate proxy. kiosk-core is
+# deliberately NOT using this anchor: it appends the runtime-resolved
+# ${KIOSK_CORE_QSR_EXTRA_NO_PROXY} suffix, and YAML anchors cannot concatenate.
+# Keep the two in sync when adding a service.
+x-no-proxy: &no-proxy "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,queue-service,rtsp-streamer,identity-service,172.16.0.0/12,10.0.0.0/8"
+
 services:
 
   # ---------------------------------------------------------------------------
@@ -74,6 +88,15 @@ services:
       - video
     volumes:
       - ./rtsp-streamer/start.sh:/opt/rtsp-streamer/start.sh:ro
+      # Mounted for the same reason as start.sh: the Dockerfile COPYs this
+      # file in, so a stale cached/pulled image under the unchanged :latest
+      # tag keeps serving an old (or missing) config. Without the catch-all
+      # path config MediaMTX rejects every dynamic publish with
+      # "path '<name>' is not configured", the 8554 healthcheck never passes,
+      # and `docker compose up` reports the container as unhealthy — which
+      # previously only `docker compose build --no-cache rtsp-streamer`
+      # cleared. Bind-mounting makes image staleness unable to break startup.
+      - ./rtsp-streamer/mediamtx.yml:/opt/rtsp-streamer/mediamtx.yml:ro
       - ./Sample_data:/media:ro
     healthcheck:
       test: ["CMD", "nc", "-z", "127.0.0.1", "8554"]
@@ -282,20 +305,33 @@ services:
       # ./.cache mount persists every model cache the service uses
       # (huggingface, openai-whisper, torch hub, etc.).
       HF_HOME: /app/audio_analyzer/.cache/huggingface
-      # Force fully offline operation for HF model/tokenizer loading. The
-      # pyannote diarization pipeline's local files (segmentation, embedding,
-      # plda incl. xvec_transform.npz) are already fully cached under
-      # ./models by ensure_model.py — but without these flags,
-      # huggingface_hub still makes a live metadata/revision check on every
-      # load even when local files are present, which crashes/silently
+      # HF model/tokenizer loading mode. The pyannote diarization pipeline's
+      # local files (segmentation, embedding, plda incl. xvec_transform.npz)
+      # are cached under ./models by ensure_model.py — but with offline mode
+      # OFF, huggingface_hub still makes a live metadata/revision check on
+      # every load even when local files are present, which crashes/silently
       # disables diarization when there is no network/proxy access at all.
-      # Confirmed fix: with HF_HUB_OFFLINE=1 forced, PyannoteDiarizer loads
-      # successfully from local cache with zero network calls.
-      # Set HF_HUB_OFFLINE=0 / TRANSFORMERS_OFFLINE=0 in .env if this
-      # environment has working internet/proxy access and you want live
-      # Hub checks (e.g. picking up a newly-released model revision).
-      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-1}
-      TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-1}
+      # Setting HF_HUB_OFFLINE=1 suppresses those calls entirely and lets
+      # PyannoteDiarizer load from local cache with zero network access.
+      #
+      # The fallback here is 0 (online), matching .env.example. Online is the
+      # correct default: setup_models.sh does NOT pre-fetch this service's
+      # models, they are downloaded in-container on first run, so a fresh host
+      # with no .env must be able to reach the Hub. Set HF_HUB_OFFLINE=1 and
+      # TRANSFORMERS_OFFLINE=1 in .env only once a previous run has populated
+      # the cache volume — that is also the fix for a host with no egress.
+      # `make check-env` reports whether the caches actually look populated.
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
+      TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-0}
+      # Proxy variables are intentionally NOT declared here. Docker already
+      # injects HTTP_PROXY/HTTPS_PROXY/NO_PROXY from ~/.docker/config.json
+      # (proxies.default) when they are not otherwise set. Declaring them with
+      # a `${HTTP_PROXY:-}` default would inject an EMPTY value and silently
+      # override that mechanism, breaking first-run downloads on exactly the
+      # proxied hosts this is meant to help. Use `make up PROXY=true` (which
+      # layers docker-compose.proxy.yml) to set proxies explicitly from .env.
+      NO_PROXY: *no-proxy
+      no_proxy: *no-proxy
       # HuggingFace token — required by Pyannote speaker diarization.
       # Set HF_TOKEN in .env (single source of truth).
       HF_TOKEN: ${HF_TOKEN:-}
@@ -391,6 +427,24 @@ services:
       # Point HF cache under ~/.cache so a single ./.cache mount persists
       # every model cache the service uses (HF, torch hub, etc.).
       HF_HOME: /app/text-to-speech/.cache/huggingface
+      # Same offline guards as audio-analyzer/rag-service; this block previously
+      # had none, so the service always made a live Hub call during FastAPI
+      # lifespan regardless of what the user set in .env.
+      #
+      # IMPORTANT: this does not by itself fix a no-egress host. Online (0) is
+      # the default here and in .env.example, because setup_models.sh does NOT
+      # pre-fetch the TTS models; they are downloaded in-container on first
+      # run. On a host with no route to huggingface.co that call raises
+      # httpx.ConnectError at startup, the healthcheck never passes, and every
+      # service gated on `depends_on: text-to-speech: service_healthy`
+      # (rag-service, kiosk-core) aborts with "dependency failed to start".
+      # Fix that with a proxy (`make up PROXY=true`) or by warming the cache on
+      # a connected host, then setting HF_HUB_OFFLINE=1.
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
+      TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-0}
+      # Proxy variables intentionally NOT declared — see audio-analyzer above.
+      NO_PROXY: *no-proxy
+      no_proxy: *no-proxy
       # ── TTS engine selection (device-combination benchmarking) ────────────
       # These four move together and MUST stay consistent — the TTS factory
       # picks an implementation from (name, runtime) and then hands `device`
@@ -532,21 +586,24 @@ services:
       # brake on spoken answer length: the model paraphrases whatever it is
       # given, so 2000 chars of context produced a 20-second spoken reply.
       RAG_MAX_CONTEXT_CHARS: ${RAG_MAX_CONTEXT_CHARS:-1800}
-      # Force fully offline operation for HF tokenizer/model loading — the
-      # tokenizer is already cached in the rag_service_hf_cache volume, and
-      # newer `transformers` versions otherwise make a live Hub call
+      # HF tokenizer/model loading mode. The tokenizer is cached in the
+      # rag_service_hf_cache volume, but with offline mode OFF newer
+      # `transformers` versions still make a live Hub call
       # (list_repo_templates) even when local files exist, which crashes
       # startup when there is no network/proxy access at all.
-      # Set HF_HUB_OFFLINE=0 / TRANSFORMERS_OFFLINE=0 in .env if this
-      # environment has working internet/proxy access and you want live
-      # Hub checks (e.g. picking up a newly-released model revision).
-      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-1}
-      TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-1}
+      #
+      # The fallback here is 0 (online), matching .env.example, so a fresh
+      # host can populate the cache on first run. Set HF_HUB_OFFLINE=1 and
+      # TRANSFORMERS_OFFLINE=1 in .env once that cache is warm — that is also
+      # the fix for a host with no egress. `make check-env` reports whether
+      # the caches actually look populated.
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
+      TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-0}
       # Bypass corporate proxy for all intra-cluster traffic so that
       # requests to ovms-llm, kiosk-core, etc. go directly on the
-      # Docker bridge network instead of through the Intel proxy.
-      NO_PROXY: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,172.16.0.0/12,10.0.0.0/8"
-      no_proxy: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,172.16.0.0/12,10.0.0.0/8"
+      # Docker bridge network instead of through the HTTP proxy.
+      NO_PROXY: *no-proxy
+      no_proxy: *no-proxy
       # Domain-specific config (identity, intent rules, reply templates) is
       # mounted from the consuming application rather than baked into the image.
       # Non-kiosk deployments override this path (or leave it unset for
@@ -965,8 +1022,8 @@ services:
       # runs on a separate machine, so add its host to KIOSK_CORE_QSR_EXTRA_NO_PROXY
       # when autonomy delivery is enabled, or the POST is sent to the proxy and
       # rejected. Note: Python's urllib matches no_proxy by suffix, not CIDR.
-      NO_PROXY: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,queue-service,172.16.0.0/12,10.0.0.0/8${KIOSK_CORE_QSR_EXTRA_NO_PROXY:+,${KIOSK_CORE_QSR_EXTRA_NO_PROXY}}"
-      no_proxy: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,queue-service,172.16.0.0/12,10.0.0.0/8${KIOSK_CORE_QSR_EXTRA_NO_PROXY:+,${KIOSK_CORE_QSR_EXTRA_NO_PROXY}}"
+      NO_PROXY: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,queue-service,rtsp-streamer,identity-service,172.16.0.0/12,10.0.0.0/8${KIOSK_CORE_QSR_EXTRA_NO_PROXY:+,${KIOSK_CORE_QSR_EXTRA_NO_PROXY}}"
+      no_proxy: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,queue-service,rtsp-streamer,identity-service,172.16.0.0/12,10.0.0.0/8${KIOSK_CORE_QSR_EXTRA_NO_PROXY:+,${KIOSK_CORE_QSR_EXTRA_NO_PROXY}}"
     volumes:
       - generated_audio:/app/generated_audio
       - kiosk_db:/app/data
@@ -1029,8 +1086,8 @@ services:
       # Required for Level Zero to enumerate the Intel NPU. Harmless when no
       # NPU node is mapped — OpenVINO then reports CPU/GPU only.
       ZE_ENABLE_ALT_DRIVERS:     libze_intel_npu.so
-      NO_PROXY: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,identity-service,172.16.0.0/12,10.0.0.0/8"
-      no_proxy: "localhost,127.0.0.1,ovms-llm,kiosk-core,audio-analyzer,text-to-speech,metrics-collector,rag-service,identity-service,172.16.0.0/12,10.0.0.0/8"
+      NO_PROXY: *no-proxy
+      no_proxy: *no-proxy
     volumes:
       # Shared SQLite DB (same file kiosk-core uses).
       - kiosk_db:/app/data

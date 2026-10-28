@@ -25,7 +25,8 @@ session and product ordering, `kiosk-ui` is the React front end, and
 - [Docker](https://docs.docker.com/engine/install/) 24.0+
 - [Docker Compose](https://docs.docker.com/compose/install/) V2+
 - [Make](https://www.gnu.org/software/make/) (`sudo apt install make`)
-- Intel hardware (CPU, iGPU, or NPU)
+- Intel hardware (CPU, iGPU, or NPU — see
+  [Device support](#device-support-cpu-gpu-npu) before choosing NPU)
 - Intel GPU drivers (recommended) — see the
   [Intel GPU driver guide](https://dgpu-docs.intel.com)
 - A [HuggingFace account and access token](https://huggingface.co/settings/tokens),
@@ -39,6 +40,40 @@ session and product ordering, `kiosk-ui` is the React front end, and
 > **Note:** First-time setup downloads the OVMS LLM model (~4 GB) plus the
 > in-container ASR, TTS, embedding, and reranker models. Allow extra time on
 > the first run depending on your connection.
+
+## Device support (CPU, GPU, NPU)
+
+CPU and iGPU are supported everywhere in the stack. **NPU is only partially
+supported, and choosing it without checking the constraints below produces a
+deployment that either crash-loops or silently runs on CPU.** Read this before
+setting `TARGET_DEVICE` in [Step 3](#step-3-create-env-and-set-required-variables).
+
+| Component | CPU | GPU | NPU |
+|---|---|---|---|
+| `ovms-llm` (served LLM) | ✅ | ✅ | ❌ **Not supported** |
+| `audio-analyzer` ASR | ✅ | ✅ | ⚠️ `whisper-tiny` / `whisper-base` only |
+| `queue-service`, `identity-service` | ✅ | ✅ | ✅ |
+
+- **Do not set `TARGET_DEVICE=NPU` for the LLM.** OVMS serves the NPU through a
+  Stateful servable that caps prompts at 1024 tokens, so LLM turns fail with
+  "Sorry, I encountered an error". `setup_models.sh --device NPU` refuses to run
+  for this reason and exits with an error. Use `GPU` (or `CPU`) instead.
+- **NPU is usable for the non-LLM models.** If you only want the queue,
+  identity and ASR models on the NPU, pass `--skip-ovms` to acknowledge that
+  the LLM is not being prepared for NPU:
+
+  ```bash
+  ./setup_models.sh --device NPU --skip-ovms
+  ```
+
+  The OVMS LLM must still be served on `GPU` or `CPU`.
+- **ASR on NPU needs a small checkpoint.** `whisper-small` and larger fail to
+  compile with `Check '!self_attn_nodes.empty()' failed`.
+- **NPU passthrough requires `ACCEL_MOUNT_PATH`** in `.env`. Without it the
+  container has no accel node, OpenVINO silently falls back to CPU, and the run
+  is mislabelled rather than failed.
+
+See [Troubleshooting](troubleshooting.md) for the full diagnostics and fixes.
 
 ## Step 1: Install Docker and Intel GPU Drivers
 
@@ -221,6 +256,21 @@ service images from the registry rather than compiling them. To build the local
 service images from source instead, set `REGISTRY=false` (`make build
 REGISTRY=false`); `ovms-llm` always uses a pre-built upstream image and is pulled
 automatically. A from-source build takes 10–20 minutes the first time.
+
+> **`REGISTRY` and `REGISTRY_REPO` are two different settings.** They are easy
+> to confuse because of the similar names:
+>
+> | Variable | Shipped value | Read by | Meaning |
+> |---|---|---|---|
+> | `REGISTRY` | `true` | the `Makefile` only | Build mode: `true` = pull released images, `false` = build from source |
+> | `REGISTRY_REPO` | `intel` | `docker-compose.yml` | Image **name prefix**, e.g. `intel/kiosk-core:latest` |
+>
+> Every `image:` entry in `docker-compose.yml` resolves through
+> `${REGISTRY_REPO:-intel}`, never through `REGISTRY`. Keep `REGISTRY_REPO=intel`
+> unless you publish these images under your own namespace — setting it to a
+> `true`/`false` value makes Compose try to pull from a registry account literally
+> named `true` and every pull fails. Change `REGISTRY` only to switch between
+> pulling and building.
 
 The default stack starts ten containers (`QUEUE=true` by default; identity is
 off):

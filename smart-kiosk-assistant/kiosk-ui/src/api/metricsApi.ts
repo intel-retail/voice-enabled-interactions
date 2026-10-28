@@ -1,15 +1,20 @@
 import { endpoints } from '../constants';
 import type { ChartPoint, MetricSeriesItem, MetricsResponse } from '../types';
 
-/** Fetch time-series metrics from the metrics-collector service. */
+/**
+ * Fetch time-series metrics from the metrics-collector service.
+ *
+ * Throws on transport failure, timeout or a non-OK response. Callers must
+ * surface that rather than substituting an empty object: an unreachable
+ * collector and a collector with no samples yet both render as blank charts,
+ * which previously made outages effectively undiagnosable from the UI.
+ */
 export async function fetchMetrics(): Promise<MetricsResponse> {
-  try {
-    const res = await fetch(endpoints.metrics, { signal: AbortSignal.timeout(4000) });
-    if (!res.ok) return {};
-    return await res.json();
-  } catch {
-    return {};
+  const res = await fetch(endpoints.metrics, { signal: AbortSignal.timeout(4000) });
+  if (!res.ok) {
+    throw new Error(`metrics-collector returned HTTP ${res.status}`);
   }
+  return (await res.json()) as MetricsResponse;
 }
 
 /** Convert a [[ts, value, ...], ...] series into recharts points. */

@@ -160,9 +160,14 @@ function HardwareChart({ label, deviceTag, points, stroke, fill, fillOpacity = 0
 
 interface HardwareChartsProps {
   metrics: MetricsResponse;
+  /** Non-null when the metrics poll is failing — shown instead of the LIVE badge. */
+  error?: string | null;
+  /** Epoch ms of the last successful poll; used to show how stale the
+   *  retained sample is while the collector is unreachable. */
+  lastUpdated?: number | null;
 }
 
-export function HardwareCharts({ metrics }: HardwareChartsProps) {
+export function HardwareCharts({ metrics, error = null, lastUpdated = null }: HardwareChartsProps) {
   const cpu = toChartPoints(metrics.cpu_utilization);
   const gpu = toChartPoints(metrics.gpu_utilization);
   const npu = toChartPoints(metrics.npu_utilization);
@@ -179,11 +184,46 @@ export function HardwareCharts({ metrics }: HardwareChartsProps) {
         <h2 className="text-xs font-semibold uppercase tracking-widest text-gray-400">
           Hardware Utilization
         </h2>
-        <span className="flex items-center gap-1.5 rounded-full bg-green-100 px-2.5 py-0.5 text-[10px] font-semibold text-green-700">
-          <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-green-500" />
-          LIVE
+        <span
+          className={
+            error
+              ? 'flex items-center gap-1.5 rounded-full bg-red-100 px-2.5 py-0.5 text-[10px] font-semibold text-red-700'
+              : 'flex items-center gap-1.5 rounded-full bg-green-100 px-2.5 py-0.5 text-[10px] font-semibold text-green-700'
+          }
+          title={error ?? undefined}
+        >
+          <span
+            className={
+              error
+                ? 'inline-block h-1.5 w-1.5 rounded-full bg-red-500'
+                : 'inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-green-500'
+            }
+          />
+          {error ? 'UNAVAILABLE' : 'LIVE'}
         </span>
       </div>
+
+      {error && (
+        <p className="rounded border border-red-200 bg-red-50 px-2 py-1 text-[10px] text-red-700">
+          Metrics unavailable: {error}
+          {lastUpdated !== null && (
+            <span className="text-red-600">
+              {' '}
+              — showing last reading from {new Date(lastUpdated).toLocaleTimeString()}
+            </span>
+          )}
+        </p>
+      )}
+
+      {/* Charts are dimmed while the poll is failing so the retained sample is
+          not mistaken for a current reading. */}
+      <div
+        className={
+          error
+            ? 'space-y-2 opacity-50 grayscale transition-opacity'
+            : 'space-y-2 transition-opacity'
+        }
+      >
 
       {/* Summary bar: CPU / GPU / NPU at a glance */}
       <div className="grid grid-cols-3 gap-2">
@@ -240,6 +280,7 @@ export function HardwareCharts({ metrics }: HardwareChartsProps) {
         fill="#64748b"
         fillOpacity={0.1}
       />
+      </div>
     </div>
   );
 }
