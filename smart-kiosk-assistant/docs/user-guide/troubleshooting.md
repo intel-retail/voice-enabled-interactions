@@ -68,7 +68,7 @@ inside their containers on first run, which is why `HF_HUB_OFFLINE=0`
   without it, so an empty value can never clobber your `config.json` proxy:
 
   ```bash
-  # .env
+  # .env  (uncomment these two lines)
   KIOSK_HTTP_PROXY=http://proxy.example.com:3128
   KIOSK_HTTPS_PROXY=http://proxy.example.com:3128   # optional; defaults to KIOSK_HTTP_PROXY
   ```
@@ -76,6 +76,20 @@ inside their containers on first run, which is why `HF_HUB_OFFLINE=0`
   ```bash
   make up PROXY=true
   ```
+
+  Exporting them in your shell works too, but only while the two lines in
+  `.env` stay commented out — the Makefile does `-include .env`, and in GNU
+  make a makefile assignment silently overrides the environment, so an
+  uncommented `KIOSK_HTTP_PROXY=` would discard your exported value:
+
+  ```bash
+  export KIOSK_HTTP_PROXY="$http_proxy"
+  export KIOSK_HTTPS_PROXY="$https_proxy"
+  make up PROXY=true
+  ```
+
+  If `.env` was created before this behaviour was fixed it may still contain
+  the uncommented empty assignments; comment them out or fill them in.
 
   Prefer this over running `docker compose -f docker-compose.yml -f
   docker-compose.proxy.yml up -d` by hand: the `make` target also runs
