@@ -55,6 +55,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+# Sibling harness module (same directory). Imported for the shared
+# "the host cannot run this at all" exception type so a missing ffmpeg and a
+# missing websockets abort the run the same way instead of being recorded as
+# per-turn failures by whichever harness happens to be driving.
+from v2v_fixture_benchmark import BenchmarkEnvironmentError
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -528,18 +534,31 @@ def resample_wav_to_16k_mono(wav_bytes: bytes) -> bytes:
     tier B representative of production instead of failing — or silently
     measuring a different sample rate — whenever the TTS backend changes.
     """
-    result = subprocess.run(
-        [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-            "-i", "pipe:0",
-            "-ar", "16000", "-ac", "1", "-sample_fmt", "s16",
-            "-f", "wav", "pipe:1",
-        ],
-        input=wav_bytes,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-i", "pipe:0",
+                "-ar", "16000", "-ac", "1", "-sample_fmt", "s16",
+                "-f", "wav", "pipe:1",
+            ],
+            input=wav_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        # ffmpeg is a host binary, not a pip dependency, so a fresh machine
+        # that installed the Python requirements can still land here. Raised
+        # as an environment error because every subsequent turn would fail
+        # identically -- previously this surfaced once per turn as
+        # "tts synth failed: [Errno 2] No such file or directory: 'ffmpeg'".
+        raise BenchmarkEnvironmentError(
+            "ffmpeg was not found on PATH. The benchmark resamples every "
+            "synthesised prompt to 16kHz mono PCM before replaying it. "
+            "Install it (Debian/Ubuntu: 'sudo apt-get install -y ffmpeg'), or "
+            "run 'make check-benchmark-env' to verify the host first."
+        ) from exc
     if result.returncode != 0 or not result.stdout.startswith(b"RIFF"):
         raise RuntimeError(
             f"ffmpeg resample to 16kHz mono failed: {result.stderr.decode(errors='replace')[:300]}"

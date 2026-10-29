@@ -414,6 +414,11 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"    - {line!r}")
         return 0
 
+    # Fail before any stack interaction: a missing host dependency is not a
+    # property of the run being measured, and discovering it turn-by-turn
+    # costs a full bring-up, a settle and a discarded warmup first.
+    v2v.ensure_uplink_available(args.uplink)
+
     # ``segments`` preserves scenario boundaries so each scripted conversation
     # replays as ONE kiosk-core conversation (shared conversation_id across its
     # turns). This matters for any script that builds a cart over several turns
@@ -482,6 +487,11 @@ def main(argv: list[str] | None = None) -> int:
                             args.lead_pad_seconds,
                             trail_pad,
                         )
+                    except v2v.BenchmarkEnvironmentError:
+                        # Host-level fault (e.g. no ffmpeg): every remaining
+                        # turn would fail the same way, so abort instead of
+                        # filling the report with identical errors.
+                        raise
                     except Exception as exc:  # noqa: BLE001
                         print(f"[v2v-scripted]   TTS synthesis FAILED: {exc}")
                         turn = v2v.TurnResult(fixture=f"{script_name}:line{i}", run=run, error=f"tts synth failed: {exc}")
@@ -539,4 +549,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except v2v.BenchmarkEnvironmentError as exc:
+        # One actionable line instead of a traceback: this is a host setup
+        # problem, and the person hitting it is usually not the person who
+        # wrote the harness.
+        print(f"\n[v2v-scripted] ENVIRONMENT ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(2) from None

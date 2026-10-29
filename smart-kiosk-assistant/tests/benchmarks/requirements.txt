@@ -1,0 +1,27 @@
+# Host-side dependencies for the voice-to-voice benchmark harness.
+#
+# Everything else in this stack runs in Docker, but `make benchmark` runs the
+# measurement harness ON THE HOST: performance-tools'
+# benchmark_smart_kiosk_v2v.py re-invokes
+# tests/benchmarks/v2v_scripted_conversation_benchmark.py with sys.executable.
+# That interpreter therefore needs these packages, and nothing used to declare
+# them -- on a machine whose system python lacked websockets every turn failed
+# with "No module named 'websockets'", recorded as six turn-level errors rather
+# than one environment error.
+#
+# Keep this list minimal and keep it honest. The harness is otherwise pure
+# stdlib (urllib/wave/json/subprocess) and kiosk_core/config.py imports only
+# os + pathlib, so this is the complete Python footprint. Do NOT point the
+# benchmark venv at the application's own requirements.txt: that is the
+# container's dependency set (fastapi/uvicorn/onnxruntime/fastmcp/...), none of
+# which the host harness imports.
+#
+# ffmpeg is also required but cannot be installed from PyPI -- `make
+# check-benchmark-env` checks for it on PATH instead. See
+# tests/benchmarks/agent_latency_benchmark.py's resample_wav_to_16k_mono.
+
+# Used by v2v_fixture_benchmark._stream_fixture_over_ws for the default
+# hands-free WebSocket uplink (--uplink ws / V2V_UPLINK=ws). Pinned to the same
+# version the application pins in ../../requirements.txt so the harness speaks
+# the same client implementation kiosk-core is tested against.
+websockets==16.0

@@ -58,6 +58,41 @@ Quote `voice_to_voice_answer_ms` when comparing pipeline changes. Quote
 Disable the opener with `KIOSK_CORE_OPENER_ENABLED=false` to measure the
 pipeline alone.
 
+## Host prerequisites
+
+Everything in this stack runs in Docker **except the measurement harness**,
+which runs on the host: the orchestrator re-invokes the in-application harness
+with `sys.executable`, so the host interpreter needs its own dependencies.
+
+`make benchmark` handles this automatically. It builds a small venv
+(`.venv-benchmark`, from `tests/benchmarks/requirements.txt`) and launches the
+orchestrator with it, so the run no longer depends on what the system
+`python3` happens to have installed. Two things are checked before the stack
+is started, by `make check-benchmark-env`:
+
+| Requirement | Why | If missing |
+| --- | --- | --- |
+| `websockets` | Default `--uplink ws` (the browser's hands-free path) | Installed into `.venv-benchmark` automatically |
+| `ffmpeg` | Resamples every synthesised prompt to 16 kHz mono PCM | **Install it yourself** — not a PyPI package: `sudo apt-get install -y ffmpeg` |
+
+Both are verified up front deliberately. A missing host dependency is not a
+property of the pipeline being measured, and discovering it mid-run used to
+cost a full stack bring-up and a discarded warmup before surfacing as a
+report in which every turn carried the same error — which reads like a broken
+stack rather than a broken host.
+
+Useful targets:
+
+```bash
+make check-benchmark-env   # verify the host, start nothing
+make benchmark-venv        # (re)build .venv-benchmark
+```
+
+On a host with no PyPI access, `V2V_UPLINK=rest make benchmark` replays over
+the legacy chunked-WAV transport, which is pure stdlib. It still needs
+`ffmpeg`, and it measures a different uplink — never mix its numbers with
+`ws`-uplink numbers in one comparison.
+
 ## Reading a benchmark run
 
 `make benchmark` writes per-run artifacts to `results/`:
