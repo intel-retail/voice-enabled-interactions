@@ -2,6 +2,10 @@ __pycache__/
 *.py[cod]
 *.pyo
 .venv/
+# Host venv used only to run the benchmark harness (`make benchmark-venv`).
+# Not matched by `.venv/` above, which only covers a directory named exactly
+# ".venv". Machine-local and rebuildable from tests/benchmarks/requirements.txt.
+.venv-benchmark/
 *.egg-info/
 
 # Generated TTS audio output — runtime artefacts

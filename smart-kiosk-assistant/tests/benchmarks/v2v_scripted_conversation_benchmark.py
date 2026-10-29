@@ -83,6 +83,7 @@ for _p in (BENCHMARKS_DIR, REPO_ROOT):
 
 import v2v_fixture_benchmark as v2v  # noqa: E402  (path inserts above must run first)
 from agent_latency_benchmark import (  # noqa: E402
+    ensure_services_healthy,
     resample_wav_to_16k_mono,
     synthesize_prompt_wav,
 )
@@ -414,6 +415,11 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"    - {line!r}")
         return 0
 
+    # Fail before any stack interaction: a missing host dependency is not a
+    # property of the run being measured, and discovering it turn-by-turn
+    # costs a full bring-up, a settle and a discarded warmup first.
+    v2v.ensure_uplink_available(args.uplink)
+
     # ``segments`` preserves scenario boundaries so each scripted conversation
     # replays as ONE kiosk-core conversation (shared conversation_id across its
     # turns). This matters for any script that builds a cart over several turns
@@ -451,6 +457,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[v2v-scripted] waiting for kiosk-core at {v2v.CORE_BASE_URL} ...")
     v2v.wait_for_core()
 
+    # kiosk-core can report healthy while the services it delegates to are
+    # still crash-looping; every turn would then fail identically on the first
+    # synth or transcription call. Both are on the critical path of this
+    # benchmark, so treat them as a hard precondition rather than a per-turn
+    # failure.
+    print("[v2v-scripted] verifying text-to-speech and audio-analyzer ...")
+    ensure_services_healthy(("text-to-speech", "audio-analyzer"))
+
     report = v2v.BenchmarkReport(
         label=label,
         started_at=datetime.now(UTC).isoformat(),
@@ -482,6 +496,11 @@ def main(argv: list[str] | None = None) -> int:
                             args.lead_pad_seconds,
                             trail_pad,
                         )
+                    except v2v.BenchmarkEnvironmentError:
+                        # Host-level fault (e.g. no ffmpeg): every remaining
+                        # turn would fail the same way, so abort instead of
+                        # filling the report with identical errors.
+                        raise
                     except Exception as exc:  # noqa: BLE001
                         print(f"[v2v-scripted]   TTS synthesis FAILED: {exc}")
                         turn = v2v.TurnResult(fixture=f"{script_name}:line{i}", run=run, error=f"tts synth failed: {exc}")
@@ -539,4 +558,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except v2v.BenchmarkEnvironmentError as exc:
+        # One actionable line instead of a traceback: this is a host setup
+        # problem, and the person hitting it is usually not the person who
+        # wrote the harness.
+        print(f"\n[v2v-scripted] ENVIRONMENT ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(2) from None

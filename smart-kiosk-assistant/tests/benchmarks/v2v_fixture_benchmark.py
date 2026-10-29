@@ -92,6 +92,19 @@ CONTAINER_TTS_URL = "http://text-to-speech:8011/v1/audio/speech"
 #   --fixture /path/to/your_recording.wav
 DEFAULT_FIXTURES: list[Path] = []
 
+
+class BenchmarkEnvironmentError(RuntimeError):
+    """The host cannot run the benchmark at all (missing dependency/tool).
+
+    Distinct from a turn that genuinely failed against a running stack. The
+    harnesses record turn-level failures in ``TurnResult.error`` and keep
+    going; this class is deliberately allowed to propagate so the run aborts
+    immediately with one actionable message instead of producing a full report
+    in which every turn carries the same environment error and the summary
+    implies the stack is broken.
+    """
+
+
 # Bypass any corporate proxy for localhost calls, consistent with the sibling
 # benchmarks (see agent_latency_benchmark.py).
 _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -999,6 +1012,41 @@ def _stream_fixture_over_rest(
     return session_id, snapshot
 
 
+def _ws_connect():
+    """Resolve the websockets sync client, or raise a usable error.
+
+    Kept as a lazy import so the dependency-free ``--uplink rest`` path still
+    runs on a host without ``websockets`` installed. The translation to
+    :class:`BenchmarkEnvironmentError` is what stops a missing host dependency
+    from being misreported: ``replay_fixture`` catches per-turn exceptions and
+    records them as ``TurnResult.error``, so a bare ``ModuleNotFoundError``
+    used to surface as N turns each failing with "No module named
+    'websockets'" -- which reads like a stack fault, not a host fault.
+    """
+    try:
+        from websockets.sync.client import connect
+    except ModuleNotFoundError as exc:  # pragma: no cover - env-dependent
+        raise BenchmarkEnvironmentError(
+            "the 'websockets' package is required for --uplink ws but is not "
+            f"installed for {sys.executable}. Install the benchmark host "
+            "dependencies with 'make benchmark-venv' (or "
+            "'python3 -m pip install -r tests/benchmarks/requirements.txt'), "
+            "or use the stdlib-only transport with '--uplink rest' / "
+            "V2V_UPLINK=rest."
+        ) from exc
+    return connect
+
+
+def ensure_uplink_available(uplink: str) -> None:
+    """Fail fast, before any turn runs, if the chosen uplink is unusable.
+
+    Called once by the harnesses at startup so a host-dependency problem costs
+    a second rather than a full stack bring-up plus a discarded warmup.
+    """
+    if uplink == "ws":
+        _ws_connect()
+
+
 def _stream_fixture_over_ws(
     session_payload: dict[str, Any],
     fixture: Path,
@@ -1014,7 +1062,7 @@ def _stream_fixture_over_ws(
     harness is headless, so it never reports ``playback_started``). Returns
     ``(session_id, final_snapshot)``.
     """
-    from websockets.sync.client import connect  # local import: optional dep
+    connect = _ws_connect()
 
     ws_url = derive_ws_stream_url()
     # proxy=None bypasses any inherited *_proxy/socks_proxy env vars: the
@@ -1110,6 +1158,12 @@ def replay_fixture(
         result.reply = snapshot.get("response", "") or ""
         if snapshot.get("error"):
             result.error = str(snapshot["error"])
+    except BenchmarkEnvironmentError:
+        # Not a turn failure -- the host itself cannot run the benchmark, and
+        # every remaining turn would fail identically. Propagate so the run
+        # aborts with one actionable message rather than writing a report whose
+        # turns all carry the same environment error.
+        raise
     except Exception as exc:  # noqa: BLE001
         result.error = str(exc)
         return result
