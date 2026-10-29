@@ -11,7 +11,7 @@
 		test clean clean-metrics dev-build update-submodule update-submodules \
 		benchmark-v2v list-profiles validate-profile _write-provenance \
 		benchmark-matrix compare-profiles \
-		benchmark-venv check-benchmark-env
+		benchmark-venv check-benchmark-env install-host-deps
 
 # =============================================================================
 # Load .env (silent if missing — check-env will warn)
@@ -150,6 +150,35 @@ PROXY       ?= false
 _PROXY_ON    = $(filter true,$(strip $(PROXY)))
 _PROXY_FILE  = $(if $(_PROXY_ON),-f docker-compose.proxy.yml,)
 
+# With PROXY=true the caller has explicitly asked to be proxied, so falling
+# back to the shell's own proxy is intent rather than accident -- which is the
+# reason docker-compose.proxy.yml refuses to read HTTP_PROXY directly (doing so
+# would inject every developer's ambient proxy, including host-only ones
+# containers cannot reach, into runs that never asked for one).
+#
+# An explicit KIOSK_HTTP_PROXY always wins. The test is `ifeq (,$(strip ...))`
+# rather than `?=` because a .env created before these assignments were
+# commented out still defines them as empty, which `?=` would treat as set.
+ifneq ($(_PROXY_ON),)
+ifeq ($(strip $(KIOSK_HTTP_PROXY)),)
+KIOSK_HTTP_PROXY := $(or $(http_proxy),$(HTTP_PROXY))
+_PROXY_DERIVED   := 1
+endif
+ifeq ($(strip $(KIOSK_HTTPS_PROXY)),)
+KIOSK_HTTPS_PROXY := $(or $(https_proxy),$(HTTPS_PROXY),$(KIOSK_HTTP_PROXY))
+endif
+export KIOSK_HTTP_PROXY
+export KIOSK_HTTPS_PROXY
+# Never derive a proxy silently: it changes container egress, and a wrong value
+# surfaces as every model download hanging with no stated cause.
+ifdef _PROXY_DERIVED
+$(info [proxy] PROXY=true, using proxy from the shell: $(KIOSK_HTTP_PROXY))
+ifneq (,$(or $(findstring 127.0.0.1,$(KIOSK_HTTP_PROXY)),$(findstring localhost,$(KIOSK_HTTP_PROXY))))
+$(warning [proxy] $(KIOSK_HTTP_PROXY) is loopback: inside a container that is the container itself, not this host. Downloads will hang. Set KIOSK_HTTP_PROXY to a routable address.)
+endif
+endif
+endif
+
 # Services with fully local build contexts (built from source in this repo).
 # metrics-collector is NOT in this list: its source now lives in the
 # edge-ai-suites repo (multi_modal_patient_monitoring/services/metrics-
@@ -247,6 +276,7 @@ help: ## Show this help message
 	@echo "$(YELLOW)Benchmark:$(NC)"
 	@echo "  make benchmark            Run the voice-to-voice latency benchmark (brings stack up/down itself)"
 	@echo "  make check-benchmark-env  Verify host deps for the benchmark (websockets, ffmpeg), start nothing"
+	@echo "  make install-host-deps    Install the system packages the benchmark host needs (uses sudo)"
 	@echo "  make benchmark-venv       (Re)build .venv-benchmark used to run the benchmark harness"
 	@echo "  make consolidate-metrics  Consolidate ./metrics + ./results into results/consolidated_metrics.csv"
 	@echo "  make plot-metrics         Generate results/plot_metrics.png (CPU/GPU/NPU/memory usage)"
@@ -898,6 +928,7 @@ $(_BENCH_STAMP): $(_BENCH_REQS)
 			echo "$(RED)Could not create $(_BENCH_VENV).$(NC)"; \
 			echo "  The venv module is missing. On Debian/Ubuntu:"; \
 			echo "    $(YELLOW)sudo apt-get install -y python3-venv$(NC)"; \
+			echo "  or run $(YELLOW)make install-host-deps$(NC)."; \
 			echo "  Or skip the venv entirely by installing the deps yourself:"; \
 			echo "    $(YELLOW)python3 -m pip install --user -r $(_BENCH_REQS)$(NC)"; \
 			exit 1; \
@@ -916,6 +947,29 @@ $(_BENCH_STAMP): $(_BENCH_REQS)
 	}
 	@touch $@
 	@echo "$(GREEN)✓ Benchmark venv ready ($$($(_BENCH_PY) -c 'import sys; print(sys.version.split()[0])'))$(NC)"
+
+install-host-deps: ## Install the system packages the benchmark host needs (uses sudo)
+	@# Opt-in, and never a prerequisite of another target: every other setup
+	@# path here (setup_models.sh included) installs into venvs with pip and
+	@# never touches system packages, so escalating to sudo stays something the
+	@# operator types. check-benchmark-env only ever prints this command.
+	@command -v apt-get >/dev/null 2>&1 || { \
+		echo "$(RED)install-host-deps supports Debian/Ubuntu (apt-get) only.$(NC)"; \
+		echo "  Install with your package manager, then run $(YELLOW)make check-benchmark-env$(NC):"; \
+		echo "    ffmpeg       (resampling + silencedetect in the V2V harness)"; \
+		echo "    python3-venv (builds $(_BENCH_VENV))"; \
+		exit 1; \
+	}
+	@missing=""; \
+	command -v ffmpeg >/dev/null 2>&1 || missing="$$missing ffmpeg"; \
+	python3 -c 'import venv' >/dev/null 2>&1 || missing="$$missing python3-venv"; \
+	if [ -z "$$missing" ]; then \
+		echo "$(GREEN)✓ Host packages already present (ffmpeg, python3-venv)$(NC)"; \
+	else \
+		echo "$(BLUE)Installing:$$missing$(NC) (sudo required)"; \
+		sudo apt-get update && sudo apt-get install -y$$missing || exit 1; \
+	fi
+	@$(MAKE) --no-print-directory check-benchmark-env
 
 check-benchmark-env: benchmark-venv ## Verify the host can run the benchmark harness (fails fast)
 	@# Runs before the stack is started. Without this, a missing host
@@ -936,6 +990,7 @@ check-benchmark-env: benchmark-venv ## Verify the host can run the benchmark har
 		echo "    (tests/benchmarks/agent_latency_benchmark.py). Without it every turn"; \
 		echo "    fails as 'tts synth failed'. It cannot be installed from PyPI."; \
 		echo "    Fix (Debian/Ubuntu): $(YELLOW)sudo apt-get install -y ffmpeg$(NC)"; \
+		echo "    Or:                  $(YELLOW)make install-host-deps$(NC)"; \
 		fail=1; \
 	fi; \
 	if [ "$$fail" -ne 0 ]; then \

@@ -83,6 +83,7 @@ for _p in (BENCHMARKS_DIR, REPO_ROOT):
 
 import v2v_fixture_benchmark as v2v  # noqa: E402  (path inserts above must run first)
 from agent_latency_benchmark import (  # noqa: E402
+    ensure_services_healthy,
     resample_wav_to_16k_mono,
     synthesize_prompt_wav,
 )
@@ -455,6 +456,14 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"[v2v-scripted] waiting for kiosk-core at {v2v.CORE_BASE_URL} ...")
     v2v.wait_for_core()
+
+    # kiosk-core can report healthy while the services it delegates to are
+    # still crash-looping; every turn would then fail identically on the first
+    # synth or transcription call. Both are on the critical path of this
+    # benchmark, so treat them as a hard precondition rather than a per-turn
+    # failure.
+    print("[v2v-scripted] verifying text-to-speech and audio-analyzer ...")
+    ensure_services_healthy(("text-to-speech", "audio-analyzer"))
 
     report = v2v.BenchmarkReport(
         label=label,

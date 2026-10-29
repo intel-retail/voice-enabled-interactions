@@ -88,8 +88,22 @@ inside their containers on first run, which is why `HF_HUB_OFFLINE=0`
   make up PROXY=true
   ```
 
+  Simplest of all: if your shell already has `http_proxy`/`https_proxy` set,
+  `PROXY=true` picks them up on its own and you need set nothing:
+
+  ```bash
+  make up PROXY=true
+  ```
+
+  That fallback is deliberately gated on `PROXY=true`. Reading the ambient
+  proxy on every run would silently inject each developer's own proxy —
+  including host-only ones containers cannot reach — into runs that never
+  asked to be proxied. An explicit `KIOSK_HTTP_PROXY` always takes priority.
+
   If `.env` was created before this behaviour was fixed it may still contain
-  the uncommented empty assignments; comment them out or fill them in.
+  the uncommented empty assignments; comment them out or fill them in. (The
+  `PROXY=true` fallback handles that case too — it treats an empty value as
+  unset.)
 
   Prefer this over running `docker compose -f docker-compose.yml -f
   docker-compose.proxy.yml up -d` by hand: the `make` target also runs

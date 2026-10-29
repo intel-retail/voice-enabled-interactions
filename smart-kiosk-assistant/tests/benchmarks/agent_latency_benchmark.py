@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import statistics
 import subprocess
@@ -270,6 +271,79 @@ def stack_up(timeout: float) -> None:
         sys.stderr.write(proc.stderr)
         raise RuntimeError(f"`make up` failed with exit code {proc.returncode}")
     print("[stack] make up completed")
+
+
+def ensure_services_healthy(
+    required: tuple[str, ...],
+    timeout: float | None = None,
+    poll_interval: float = 3.0,
+) -> None:
+    """Fail fast unless every named service in ``HEALTH_CHECKS`` is healthy.
+
+    The benchmark orchestrator only gates on kiosk-core, rag-service and
+    ovms-llm, so a crash-looping text-to-speech or audio-analyzer still prints
+    "All services healthy" and the run proceeds -- then every turn fails on its
+    first synth or transcription call. Checking the services the voice path
+    actually depends on turns that into one actionable environment error before
+    any measurement starts.
+
+    Args:
+        required: Service names to require, as spelled in ``HEALTH_CHECKS``.
+        timeout: Seconds to keep polling. Defaults to
+            ``V2V_SERVICE_HEALTH_TIMEOUT`` (180s) -- generous because on a cold
+            host these services may still be downloading model weights, and
+            failing a genuinely-still-starting stack would be worse than the
+            bug this guards against.
+        poll_interval: Seconds between polls.
+
+    Raises:
+        BenchmarkEnvironmentError: If any required service is still unhealthy
+            when the timeout expires, or if a name is not a known service.
+    """
+    if timeout is None:
+        timeout = float(os.getenv("V2V_SERVICE_HEALTH_TIMEOUT", "180"))
+
+    checks = {name: (url, expect) for name, url, expect in HEALTH_CHECKS}
+    unknown = [name for name in required if name not in checks]
+    if unknown:
+        raise BenchmarkEnvironmentError(
+            f"Unknown service name(s) in health preflight: {', '.join(unknown)}. "
+            f"Known services: {', '.join(checks)}."
+        )
+
+    deadline = time.monotonic() + timeout
+    pending = list(required)
+    announced = False
+    while pending and time.monotonic() < deadline:
+        for name in list(pending):
+            url, expect = checks[name]
+            try:
+                status, body = _request(url, timeout=5.0)
+                if status == 200 and expect in body.decode(errors="ignore").lower():
+                    pending.remove(name)
+            except Exception:
+                pass
+        if pending:
+            if not announced:
+                # Say so before the first sleep: a cold start can sit here for
+                # minutes and silence is indistinguishable from a hang.
+                print(
+                    f"[preflight] waiting up to {timeout:.0f}s for: "
+                    f"{', '.join(pending)} (still starting?)"
+                )
+                announced = True
+            time.sleep(poll_interval)
+
+    if pending:
+        detail = ", ".join(f"{name} ({checks[name][0]})" for name in pending)
+        raise BenchmarkEnvironmentError(
+            f"Required service(s) never became healthy: {detail}. "
+            "The benchmark needs these for every turn, so the run would only "
+            "produce empty transcripts and null latencies. Inspect with "
+            "'docker compose logs <service>'. A container stuck in a restart "
+            "loop on a proxied host is usually a blocked model download -- see "
+            "docs/user-guide/troubleshooting.md."
+        )
 
 
 def wait_for_health(timeout: float, poll_interval: float = 5.0) -> dict[str, float]:
