@@ -259,6 +259,175 @@ def test_chat_records_scripted_adk_tool_calls(
     assert "reply" in result
 
 
+def _event_summary(session: Any) -> list[tuple[str, str]]:
+    """``(role, what)`` per event: the text, or ``call:``/``result:`` and a tool name."""
+    out = []
+    for event in session.events:
+        for part in event.content.parts:
+            if part.function_call:
+                out.append((event.content.role, f"call:{part.function_call.name}"))
+            elif part.function_response:
+                out.append((event.content.role, f"result:{part.function_response.name}"))
+            else:
+                out.append((event.content.role, part.text))
+    return out
+
+
+def _agent_with_real_sessions() -> OrderingAgent:
+    from agentic.adk_runtime import create_session_service
+
+    agent = OrderingAgent()
+    agent._bootstrapped = True
+    agent._agent = SimpleNamespace(name="kiosk_ordering_agent")
+    agent._session_service = create_session_service()
+    return agent
+
+
+def _get_session(agent: OrderingAgent, session_id: str) -> Any:
+    return _run(agent._session_service.get_session(
+        app_name="kiosk_ordering_agent", user_id="user-1", session_id=session_id,
+    ))
+
+
+def test_directive_turn_is_recorded_for_the_tool_path(monkeypatch) -> None:
+    """Observed: "and a Pepsi." after a directive-mode burger had no context."""
+    pytest.importorskip("google.adk")
+    monkeypatch.setattr(ordering_agent, "get_all_tools", lambda: {"dummy": object()})
+    monkeypatch.setattr(ordering_agent.directive_mode, "DIRECTIVE_MODE", True)
+    monkeypatch.setattr(
+        ordering_agent.directive_mode, "get_menu_block", AsyncMock(return_value="menu")
+    )
+    payload = {
+        "order_id": 7,
+        "total": 169.0,
+        "items": [{"product_name": "Classic Chicken Burger", "quantity": 1, "unit_price": 169.0}],
+        "just_added": [{"name": "Classic Chicken Burger", "quantity": 1}],
+        "upsell_suggestions": [{"product": {"name": "Classic French Fries"}, "display": "fries"}],
+    }
+    reply = "Got it. A classic chicken burger. Your total is now ₹169."
+    monkeypatch.setattr(
+        ordering_agent.directive_mode,
+        "run_turn",
+        AsyncMock(return_value={
+            "reply": reply, "tool_calls": ["place_order"], "cart_payload": payload,
+        }),
+    )
+    agent = _agent_with_real_sessions()
+
+    result = _run(agent.chat(
+        message="Add a classic chicken burger.", session_id="session-1", user_id="user-1",
+    ))
+
+    assert result["reply"] == reply
+    session = _get_session(agent, "session-1")
+    # The total tail is left out of the recorded reply, as directive mode
+    # leaves it out of its own history; the total is in the tool result.
+    assert _event_summary(session) == [
+        ("user", "Add a classic chicken burger."),
+        ("model", "call:place_order"),
+        ("user", "result:place_order"),
+        ("model", "Got it. A classic chicken burger."),
+    ]
+    call = session.events[1].content.parts[0].function_call
+    assert call.args == {"items": [{"product_id": "Classic Chicken Burger", "quantity": 1}]}
+    result_event = session.events[2]
+    assert result_event.author == "kiosk_ordering_agent"
+    assert result_event.content.parts[0].function_response.id == call.id
+    cart = agent._cart_states["session-1"]
+    assert cart.known_items == payload["items"]
+    assert cart.pending_upsell == {"name": "Classic French Fries"}
+
+
+def _record(agent: OrderingAgent, tools: list[str], payload: dict[str, Any]) -> Any:
+    """Record one directive-mode turn in session-1 and return the session."""
+    _run(agent._record_directive_turn(
+        "user-1", "session-1", None, "message",
+        {"reply": "Got it.", "tool_calls": tools, "cart_payload": payload},
+    ))
+    return _get_session(agent, "session-1")
+
+
+def test_directive_confirm_clears_the_known_cart() -> None:
+    """After a confirm, the next order's items must not read as re-adds."""
+    pytest.importorskip("google.adk")
+    agent = _agent_with_real_sessions()
+    cart = agent._cart_states.setdefault("session-1", ordering_agent._CartState())
+    cart.known_items = [{"product_name": "Classic Chicken Burger", "quantity": 1}]
+    cart.pending_upsell = {"name": "Classic French Fries"}
+    confirmed = {
+        "order_id": 7, "status": "confirmed", "total": 169.0,
+        "items": [{"product_name": "Classic Chicken Burger", "quantity": 1}],
+    }
+
+    session = _record(agent, ["place_order", "confirm_active_order"], confirmed)
+
+    assert cart.known_items == []
+    assert cart.pending_upsell is None
+    assert _event_summary(session)[1:3] == [
+        ("model", "call:confirm_active_order"),
+        ("user", "result:confirm_active_order"),
+    ]
+
+
+def test_directive_remove_keeps_the_open_upsell_offer() -> None:
+    """Same as the tool path: a removal does not answer the upsell question."""
+    pytest.importorskip("google.adk")
+    agent = _agent_with_real_sessions()
+    cart = agent._cart_states.setdefault("session-1", ordering_agent._CartState())
+    cart.pending_upsell = {"name": "Classic French Fries"}
+    items = [{"product_name": "Classic Chicken Burger", "quantity": 1}]
+
+    _record(agent, ["remove_from_order"], {"order_id": 7, "status": "draft", "items": items})
+
+    assert cart.known_items == items
+    assert cart.pending_upsell == {"name": "Classic French Fries"}
+
+
+def test_directive_add_and_remove_records_only_the_final_cart() -> None:
+    """The last result holds the whole cart; an earlier add has no result of its own."""
+    pytest.importorskip("google.adk")
+    agent = _agent_with_real_sessions()
+    items = [{"product_name": "Pepsi (330 ml)", "quantity": 1}]
+
+    session = _record(
+        agent, ["place_order", "remove_from_order"],
+        {"order_id": 7, "status": "draft", "items": items},
+    )
+
+    assert _event_summary(session) == [
+        ("user", "message"),
+        ("model", "call:remove_from_order"),
+        ("user", "result:remove_from_order"),
+        ("model", "Got it."),
+    ]
+
+
+def test_directive_price_turn_is_recorded_as_text_only(monkeypatch) -> None:
+    pytest.importorskip("google.adk")
+    monkeypatch.setattr(ordering_agent, "get_all_tools", lambda: {"dummy": object()})
+    monkeypatch.setattr(ordering_agent.directive_mode, "DIRECTIVE_MODE", True)
+    monkeypatch.setattr(
+        ordering_agent.directive_mode, "get_menu_block", AsyncMock(return_value="menu")
+    )
+    reply = "Let me check. The Chocolate Brownie costs ₹89."
+    monkeypatch.setattr(
+        ordering_agent.directive_mode,
+        "run_turn",
+        AsyncMock(return_value={"reply": reply, "tool_calls": [], "cart_payload": None}),
+    )
+    agent = _agent_with_real_sessions()
+
+    _run(agent.chat(
+        message="How much is the chocolate brownie?", session_id="session-2", user_id="user-1",
+    ))
+
+    assert _event_summary(_get_session(agent, "session-2")) == [
+        ("user", "How much is the chocolate brownie?"),
+        ("model", reply),
+    ]
+    assert "session-2" not in agent._cart_states
+
+
 class _FakeSessionService:
     """Session service that makes _ensure_session a no-op."""
 
