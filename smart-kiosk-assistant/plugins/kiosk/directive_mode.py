@@ -178,6 +178,40 @@ def scrub_directives(text: str) -> str:
     return _STRAY_DIRECTIVE_RE.sub("", text).strip()
 
 
+# One <act>...</act> block, with any whitespace before it.
+_ACT_BLOCK_RE = re.compile(r"\s*<act>(.*?)</act>", re.DOTALL)
+
+
+def collect_act_blocks(text: str) -> tuple[list[str], bool]:
+    """Collect consecutive ``<act>`` blocks from the start of ``text``.
+
+    The prompt asks for several changes in one directive separated by
+    semicolons, but the model often writes one ``<act>`` per item instead:
+    "Add one burger and three chicken sandwiches" came back as
+    ``<act>add|Burger|1</act><act>add|Chicken Sandwich|3</act>``. Reading only
+    the first block added the burger alone while the spoken reply confirmed
+    both items.
+
+    Args:
+        text: The stream from the first ``<act>`` onward.
+
+    Returns:
+        ``(bodies, done)``. ``bodies`` holds every complete block's body in
+        order. ``done`` is False while the text after the last complete block
+        is empty, whitespace, or the start of another ``<act>`` (another block
+        may still be streaming), and True once anything else follows.
+    """
+    bodies: list[str] = []
+    pos = 0
+    while (match := _ACT_BLOCK_RE.match(text, pos)) is not None:
+        bodies.append(match.group(1))
+        pos = match.end()
+    rest = text[pos:].lstrip()
+    if not rest or rest.startswith(f"<{_ACT_TAG}>") or f"<{_ACT_TAG}>".startswith(rest):
+        return bodies, False
+    return bodies, True
+
+
 # Verbs the parser accepts. Anything else is treated as unparseable and falls
 # back, rather than being guessed at.
 _ADD, _REMOVE, _CONFIRM = "add", "remove", "confirm"
@@ -234,6 +268,44 @@ def parse_directive(raw: str) -> list[dict[str, Any]] | None:
                 return None
         actions.append({"verb": verb, "name": fields[1], "quantity": quantity})
     return actions or None
+
+
+# "one more" or "another", not followed by a count ("another two burgers").
+# A count followed by "piece" names a size ("another ten piece nuggets"), so
+# it does not block the match.
+_NUMBER_WORDS = (
+    r"two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\d+"
+)
+_ONE_MORE_RE = re.compile(
+    rf"\b(?:one\s+more|another)\b"
+    rf"(?!\s+(?:{_NUMBER_WORDS})\b(?!\s*-?\s*pieces?\b))",
+    re.IGNORECASE,
+)
+
+
+def apply_one_more(actions: list[dict[str, Any]], message: str) -> list[dict[str, Any]]:
+    """Set the quantity to 1 when the customer asked for "one more" of an item.
+
+    With the item already in the cart, the model writes the new total instead
+    of the increment: "Add one more Chocolate Shake" with one shake in the
+    cart came back as ``add|Chocolate Shake|2``, and ``place_order`` adds, so
+    the cart ended with three. A prompt rule saying quantities are increments
+    did not change this.
+
+    Only a turn with exactly one add is changed. With several adds the
+    message does not say which item "one more" belongs to.
+
+    Args:
+        actions: Output of :func:`parse_directive`.
+        message: The customer's utterance for this turn.
+
+    Returns:
+        ``actions``, with the single add's quantity set to 1 when it applies.
+    """
+    adds = [a for a in actions if a["verb"] == _ADD]
+    if len(adds) != 1 or adds[0]["quantity"] == 1 or not _ONE_MORE_RE.search(message or ""):
+        return actions
+    return [dict(a, quantity=1) if a is adds[0] else a for a in actions]
 
 
 def parse_price_directive(raw: str) -> str | None:
@@ -398,6 +470,10 @@ THEN the directive.
 Example:
 Customer: two classic chicken burgers
 You: Got it. Two chicken burgers.<act>add|Classic Chicken Burger|2</act>
+
+Example with two items (one directive, semicolon between the changes):
+Customer: one classic chicken burger and two regular fries
+You: Got it. A chicken burger and two fries.<act>add|Classic Chicken Burger|1;add|Classic French Fries (Regular)|2</act>
 
 PRICE QUESTIONS — follow this exactly.
 When the customer asks how much a single menu item costs, begin with a SHORT generic
@@ -724,7 +800,20 @@ async def run_turn(
         # single raw completion (no ADK LiteLlm wrapper), so nothing else
         # times its prefill separately.
         "first_delta_ms": None,
+        # True once the leftover prose before the first directive has been
+        # flushed; an <act> turn keeps reading after its first close tag.
+        "leftover_flushed": False,
     }
+
+    def _dispatch_acts(bodies: list[str]) -> None:
+        """Run every collected <act> block as one combined directive."""
+        state["tag_dispatched"] = True
+        actions = parse_directive(";".join(b.strip() for b in bodies))
+        if actions:
+            actions = apply_one_more(actions, message)
+            state["task"] = asyncio.create_task(_execute(actions, user_id))
+        else:
+            state["task"] = "unparseable"
 
     def _emit_prose(prose: str) -> None:
         """Pull any newly-completed sentences out of ``prose`` and speak them."""
@@ -792,8 +881,8 @@ async def run_turn(
             raise _StopGeneration
 
         close_tag = f"</{state['tag']}>" if state["tag"] else None
-        if state["tag"] and not state["tag_dispatched"] and close_tag in buf:
-            state["tag_dispatched"] = True
+        if state["tag"] and not state["tag_dispatched"] and close_tag in buf and not state["leftover_flushed"]:
+            state["leftover_flushed"] = True
             # Prose is frozen now (no further growth possible), so flush
             # whatever incomplete sentence is still sitting in the remainder
             # rather than silently dropping it — the model may not always
@@ -816,21 +905,27 @@ async def run_turn(
                             on_safe_sentence(leftover)
             state["rest"] = ""
 
+        if state["tag"] == _ACT_TAG and not state["tag_dispatched"] and close_tag in buf:
+            # Keep reading while only further <act> blocks follow, then run
+            # them all at once (see collect_act_blocks). Prose was spoken
+            # before the first tag, so this waits on the cart update only,
+            # never on first audio.
+            bodies, done = collect_act_blocks(buf[buf.index(f"<{_ACT_TAG}>"):])
+            if not done:
+                return
+            _dispatch_acts(bodies)
+            raise _StopGeneration
+
+        if state["tag"] == _CHECK_PRICE_TAG and not state["tag_dispatched"] and close_tag in buf:
+            state["tag_dispatched"] = True
             after_open = buf.split(f"<{state['tag']}>", 1)[1]
             directive_body, closed, _ = after_open.partition(close_tag)
             if closed:
-                if state["tag"] == _ACT_TAG:
-                    actions = parse_directive(directive_body)
-                    if actions:
-                        state["task"] = asyncio.create_task(_execute(actions, user_id))
-                    else:
-                        state["task"] = "unparseable"
-                else:  # _CHECK_PRICE_TAG
-                    item_name = parse_price_directive(directive_body)
-                    if item_name:
-                        state["task"] = asyncio.create_task(_execute_price(item_name))
-                    else:
-                        state["task"] = "unparseable"
+                item_name = parse_price_directive(directive_body)
+                if item_name:
+                    state["task"] = asyncio.create_task(_execute_price(item_name))
+                else:
+                    state["task"] = "unparseable"
             # Nothing usable follows the directive in this layout — it is
             # the last thing in the reply — so stop reading the stream
             # instead of paying for tail tokens that will only be discarded.
@@ -856,6 +951,12 @@ async def run_turn(
             except Exception:
                 logger.exception("[DIRECTIVE] dispatch task failed during generation error")
         raise
+    # The stream ended right after the last <act> block (nothing else followed
+    # to mark it done), so run what was collected.
+    if state["tag"] == _ACT_TAG and not state["tag_dispatched"] and f"</{_ACT_TAG}>" in state["buf"]:
+        buf = state["buf"]
+        bodies, _ = collect_act_blocks(buf[buf.index(f"<{_ACT_TAG}>"):])
+        _dispatch_acts(bodies)
     gen_ms = (time.monotonic() - t0) * 1000.0
     # Recorded here (not by a wrapper like ADK's _TimedLiteLlm) because
     # directive mode calls the raw completion API directly — nothing else
