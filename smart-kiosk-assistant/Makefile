@@ -5,7 +5,7 @@
 # Smart Kiosk Assistant - Makefile
 # =============================================================================
 
-.PHONY: help init-env setup-dirs setup-models download-sample-video check-env show-config \
+.PHONY: help init-env setup-dirs setup-models setup-silero-vad download-sample-video check-env show-config \
 		build up down restart status logs \
 		logs-ovms logs-rag logs-core logs-ui logs-audio logs-tts logs-metrics \
 		test clean clean-metrics dev-build update-submodule update-submodules \
@@ -251,6 +251,7 @@ help: ## Show this help message
 	@echo "  make init-env          Create .env from .env.example"
 	@echo "  make setup-dirs        Create required runtime directories"
 	@echo "  make setup-models      Download OVMS LLM model (Qwen3-4B) via setup_models.sh"
+	@echo "  make setup-silero-vad  Download and verify kiosk-core's Silero VAD model (local builds run this)"
 	@echo "  make download-sample-video  Download sample_1/sample_2 videos into SAMPLE_DATA_DIR"
 	@echo "  make check-env         Validate .env and required variables"
 	@echo "  make show-config       Print resolved configuration"
@@ -362,6 +363,18 @@ setup-models: ## Download the OVMS LLM model (Qwen3-4B) via setup_models.sh
 		./setup_models.sh --device $(TARGET_DEVICE); \
 	fi
 	@echo "$(GREEN)✓ Model download complete$(NC)"
+
+# kiosk_core/models/silero_vad.onnx is not in git and the kiosk-core image
+# bakes in whatever is on disk (COPY . .). Every target that builds kiosk-core
+# locally depends on this, so the image never ships without the model.
+# setup_models.sh owns the URL and the pinned sha256; this only calls it.
+setup-silero-vad: ## Download and verify kiosk-core's Silero VAD model (local builds run this)
+	@./setup_models.sh --silero-only || { \
+		echo "$(RED)✗ kiosk_core/models/silero_vad.onnx is missing or failed its checksum, so kiosk-core was not built or started.$(NC)"; \
+		echo "  Fix the download (network or proxy), then run: ./setup_models.sh --silero-only"; \
+		echo "  To build without Silero on purpose, set KIOSK_CORE_SILERO_VAD_ENABLED=false in .env."; \
+		exit 1; \
+	}
 
 download-sample-video: setup-dirs ## Download sample videos (sample_1, sample_2) into SAMPLE_DATA_DIR (URLs from .env)
 	@echo "$(BLUE)Downloading sample videos into $(SAMPLE_DATA_DIR)...$(NC)"
@@ -601,7 +614,14 @@ show-config: ## Print resolved configuration
 # Build
 # =============================================================================
 
-build: check-env ## Pull images (default with .env); REGISTRY=false builds locally
+# Only a local build needs the Silero model on disk. A pulled kiosk-core image
+# carries its own copy, and kiosk-core checks for it at startup either way.
+# `up` depends on it too: docker compose up builds a missing kiosk-core image.
+# KIOSK_CORE_SILERO_VAD_ENABLED=false (the RMS VAD on purpose) skips the check.
+_SILERO_ON        = $(if $(filter false False FALSE 0 no No NO,$(KIOSK_CORE_SILERO_VAD_ENABLED)),,true)
+_SILERO_BUILD_DEP = $(if $(and $(filter false FALSE,$(REGISTRY)),$(_SILERO_ON)),setup-silero-vad,)
+
+build: check-env $(_SILERO_BUILD_DEP) ## Pull images (default with .env); REGISTRY=false builds locally
 	@echo "$(BLUE)Preparing Docker images...$(NC)"
 	@# set -e: without it this whole recipe is one `cmd; cmd; cmd` shell line
 	@# whose exit status is that of the LAST command -- the tolerant
@@ -643,7 +663,7 @@ build: check-env ## Pull images (default with .env); REGISTRY=false builds local
 # Up / Down
 # =============================================================================
 
-up: check-env setup-dirs clean-metrics ## Start all services
+up: check-env setup-dirs $(_SILERO_BUILD_DEP) clean-metrics ## Start all services
 	@echo "$(BLUE)Starting Smart Kiosk Assistant...$(NC)"
 	REGISTRY_REPO=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) $(_IDENTITY_PROFILE) $(_QUEUE_PROFILE) up -d
 	@echo ""
@@ -767,7 +787,7 @@ logs-identity: ## Tail identity-service logs
 # Development
 # =============================================================================
 
-dev-build: ## Rebuild and restart a single service: make dev-build SVC=rag-service
+dev-build: $(if $(and $(filter kiosk-core,$(SVC)),$(_SILERO_ON)),setup-silero-vad,) ## Rebuild and restart a single service: make dev-build SVC=rag-service
 	@if [ -z "$(SVC)" ]; then \
 		echo "$(RED)Error: specify a service — e.g. make dev-build SVC=rag-service$(NC)"; \
 		exit 1; \

@@ -818,8 +818,9 @@ DEFAULT_PREROLL_SECONDS = float(os.getenv("KIOSK_CORE_PREROLL_SECONDS", "0.3"))
 # Cost is small and bounded: a ~2MB int8 ONNX graph pinned to one intra-op
 # thread, run on 0.1s frames.
 #
-# Fails open — the constructor falls back to the RMS VAD if onnxruntime or the
-# model file is unavailable, so this flag cannot break a session. Set
+# Required when enabled: kiosk-core refuses to start if the model file is
+# missing or won't load (see require_silero_vad_model). A session whose sample
+# rate Silero does not support still falls back to the RMS VAD. Set
 # KIOSK_CORE_SILERO_VAD_ENABLED=false to restore the RMS-only path.
 KIOSK_CORE_SILERO_VAD_ENABLED = os.getenv("KIOSK_CORE_SILERO_VAD_ENABLED", "true").lower() not in (
     "false",

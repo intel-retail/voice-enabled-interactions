@@ -36,8 +36,34 @@ if cfg.ORDERING_ENABLED:
     _mcp_http_app = mcp.http_app()
 
 
+def _require_silero_vad_model() -> None:
+    """Stop startup when Silero VAD is enabled and its model will not load."""
+    from kiosk_core.silero_vad import SileroModelUnavailableError, require_silero_vad_model
+
+    try:
+        require_silero_vad_model(
+            cfg.KIOSK_CORE_SILERO_VAD_ENABLED,
+            cfg.DEFAULT_SILERO_VAD_MODEL_PATH,
+            intra_op_threads=cfg.DEFAULT_SILERO_VAD_INTRA_OP_THREADS,
+        )
+    except SileroModelUnavailableError as exc:
+        logger.error("[STARTUP] %s", exc)
+        raise
+    if cfg.KIOSK_CORE_SILERO_VAD_ENABLED:
+        logger.info("[STARTUP] Silero VAD model loaded from %s ✓", cfg.DEFAULT_SILERO_VAD_MODEL_PATH)
+    else:
+        logger.info("[STARTUP] Silero VAD disabled (KIOSK_CORE_SILERO_VAD_ENABLED=false); sessions use the RMS VAD")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # ── Silero VAD model pre-flight ──────────────────────────────────────────
+    # First, before anything else starts. Sessions used to fall back to the RMS
+    # VAD on their own when the model was missing, so a kiosk built without it
+    # ran degraded with only a per-session log line to show for it. Now the
+    # process exits with the reason in `docker logs kiosk-core`.
+    _require_silero_vad_model()
+
     async with AsyncExitStack() as stack:
         # ── Wire MCP http_app lifespan (required for streamable HTTP transport) ──
         if _mcp_http_app is not None:

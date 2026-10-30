@@ -41,6 +41,8 @@
 #   --skip-queue            Skip the YOLO26 queue-service model download/export
 #   --identity              Also download identity-service models (face + voice)
 #   --identity-only         Only download identity-service models (implies --skip-ovms)
+#   --silero-only           Only download and verify the Silero VAD model, then exit.
+#                           Does not touch .env. `make build REGISTRY=false` runs this.
 #   --hf-token  TOKEN       HuggingFace token (or export HF_TOKEN env var)
 #
 # Examples:
@@ -51,6 +53,7 @@
 #   ./setup_models.sh --skip-queue           # LLM only, skip queue-service model
 #   ./setup_models.sh --identity             # LLM + identity (face detect/reid + ECAPA voice)
 #   ./setup_models.sh --identity-only        # only identity-service models
+#   ./setup_models.sh --silero-only          # only kiosk-core's Silero VAD model
 #   ./setup_models.sh --hf-token hf_xxx...   # explicit HF token
 
 set -e
@@ -103,6 +106,7 @@ TARGET_DEVICE="GPU"
 SKIP_OVMS=false
 SKIP_QUEUE=false
 DO_IDENTITY=false
+SILERO_ONLY=false
 HF_TOKEN="${HF_TOKEN:-}"
 
 while [[ $# -gt 0 ]]; do
@@ -132,6 +136,10 @@ while [[ $# -gt 0 ]]; do
         --identity-only)
             DO_IDENTITY=true
             SKIP_OVMS=true
+            shift
+            ;;
+        --silero-only)
+            SILERO_ONLY=true
             shift
             ;;
         --hf-token)
@@ -552,7 +560,12 @@ download_silero_vad_model() {
 
     mkdir -p "$(dirname "${SILERO_VAD_MODEL_PATH}")"
     echo "  Downloading silero_vad.onnx (v5) from snakers4/silero-vad..."
-    curl -fSL "${SILERO_VAD_URL}" -o "${SILERO_VAD_MODEL_PATH}"
+    if ! curl -fSL "${SILERO_VAD_URL}" -o "${SILERO_VAD_MODEL_PATH}"; then
+        echo "  ✗ Download failed for silero_vad.onnx"
+        echo "    from: ${SILERO_VAD_URL}"
+        rm -f "${SILERO_VAD_MODEL_PATH}"
+        exit 1
+    fi
 
     local downloaded_sha256
     downloaded_sha256="$(sha256sum "${SILERO_VAD_MODEL_PATH}" | cut -d' ' -f1)"
@@ -680,6 +693,14 @@ update_env() {
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
+# --silero-only: the build-time check behind `make build REGISTRY=false`. No
+# venv, no Docker and no .env changes; it only makes sure the one file
+# kiosk-core needs at build time is present and matches the pinned checksum.
+if [ "${SILERO_ONLY}" = true ]; then
+    download_silero_vad_model
+    exit 0
+fi
+
 print_header "Smart Kiosk Assistant — Model Setup"
 echo ""
 echo "  Device   : ${TARGET_DEVICE}"
