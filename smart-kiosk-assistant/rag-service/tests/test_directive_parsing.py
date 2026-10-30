@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import pytest
 
+from plugins.kiosk import directive_mode
 from plugins.kiosk.directive_mode import parse_directive, parse_price_directive
 
 
@@ -126,3 +127,24 @@ class TestPriceDirective:
     @pytest.mark.parametrize("raw", ["", "   ", None])
     def test_empty_is_none(self, raw):
         assert parse_price_directive(raw) is None
+
+
+class TestCollectActBlocks:
+    """collect_act_blocks reads consecutive <act> blocks and says when to stop."""
+
+    def test_consecutive_blocks_are_collected(self):
+        bodies, done = directive_mode.collect_act_blocks(
+            "<act>add|A|1</act> <act>add|B|3</act>"
+        )
+        assert bodies == ["add|A|1", "add|B|3"]
+        assert done is False  # the stream may still bring another block
+
+    def test_partial_next_block_keeps_waiting(self):
+        for tail in ("<", "<ac", "<act>", "<act>add|B"):
+            bodies, done = directive_mode.collect_act_blocks("<act>add|A|1</act>" + tail)
+            assert bodies == ["add|A|1"] and done is False, tail
+
+    def test_other_text_after_blocks_means_done(self):
+        bodies, done = directive_mode.collect_act_blocks("<act>add|A|1</act> Anything else?")
+        assert bodies == ["add|A|1"]
+        assert done is True

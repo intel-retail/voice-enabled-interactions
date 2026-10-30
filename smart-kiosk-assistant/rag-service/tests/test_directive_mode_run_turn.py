@@ -339,3 +339,127 @@ def test_confirmation_claim_not_spoken_when_confirm_fails(monkeypatch):
     assert "Got it." in spoken
     assert "Your order is confirmed." not in spoken
 
+
+
+# ── Several items in one turn ─────────────────────────────────────────────────
+def test_separate_act_blocks_are_all_executed(monkeypatch):
+    # The model often writes one <act> per item even though the prompt asks for
+    # one directive with semicolons. Before this was handled, only the first
+    # item reached the cart while the spoken reply confirmed both.
+    monkeypatch.setattr(
+        directive_mode,
+        "stream_completion",
+        _make_fake_stream(
+            "Got it. One burger and two fries."
+            "<act>add|Classic Chicken Burger|1</act>"
+            "<act>add|Classic French Fries (Regular)|2</act>"
+        ),
+    )
+    execute = AsyncMock(
+        return_value=({"total": 367.0, "upsell_suggestions": []}, ["place_order"], ["place_order"])
+    )
+    monkeypatch.setattr(directive_mode, "_execute", execute)
+
+    spoken: list[str] = []
+    result = _run_turn("one chicken burger and two regular fries", spoken)
+
+    assert result is not None
+    execute.assert_awaited_once()
+    actions = execute.await_args.args[0]
+    assert [(a["verb"], a["name"], a["quantity"]) for a in actions] == [
+        ("add", "Classic Chicken Burger", 1),
+        ("add", "Classic French Fries (Regular)", 2),
+    ]
+    assert not any("<act>" in s for s in spoken), spoken
+
+
+def test_semicolon_directive_still_executes_every_clause(monkeypatch):
+    monkeypatch.setattr(
+        directive_mode,
+        "stream_completion",
+        _make_fake_stream(
+            "Got it. A burger and two fries."
+            "<act>add|Classic Chicken Burger|1;add|Classic French Fries (Regular)|2</act>"
+        ),
+    )
+    execute = AsyncMock(
+        return_value=({"total": 367.0, "upsell_suggestions": []}, ["place_order"], ["place_order"])
+    )
+    monkeypatch.setattr(directive_mode, "_execute", execute)
+
+    result = _run_turn("one chicken burger and two regular fries", [])
+
+    assert result is not None
+    actions = execute.await_args.args[0]
+    assert [a["name"] for a in actions] == ["Classic Chicken Burger", "Classic French Fries (Regular)"]
+
+
+def test_text_after_the_act_block_stops_collection(monkeypatch):
+    monkeypatch.setattr(
+        directive_mode,
+        "stream_completion",
+        _make_fake_stream(
+            "Got it. One burger."
+            "<act>add|Classic Chicken Burger|1</act>"
+            " Anything else? <act>add|Classic French Fries (Regular)|1</act>"
+        ),
+    )
+    execute = AsyncMock(
+        return_value=({"total": 189.0, "upsell_suggestions": []}, ["place_order"], ["place_order"])
+    )
+    monkeypatch.setattr(directive_mode, "_execute", execute)
+
+    spoken: list[str] = []
+    result = _run_turn("one chicken burger", spoken)
+
+    assert result is not None
+    actions = execute.await_args.args[0]
+    assert [a["name"] for a in actions] == ["Classic Chicken Burger"]
+    assert "Anything else?" not in " ".join(spoken)
+
+
+def test_three_separate_act_blocks_are_all_executed(monkeypatch):
+    monkeypatch.setattr(
+        directive_mode,
+        "stream_completion",
+        _make_fake_stream(
+            "Got it. A burger, fries and a Pepsi."
+            "<act>add|Classic Chicken Burger|1</act>\n"
+            "<act>add|Classic French Fries (Regular)|1</act> "
+            "<act>add|Pepsi (330 ml)|1</act>"
+        ),
+    )
+    execute = AsyncMock(
+        return_value=({"total": 317.0, "upsell_suggestions": []}, ["place_order"], ["place_order"])
+    )
+    monkeypatch.setattr(directive_mode, "_execute", execute)
+
+    result = _run_turn("a chicken burger, regular fries and a pepsi", [])
+
+    assert result is not None
+    execute.assert_awaited_once()
+    assert [a["name"] for a in execute.await_args.args[0]] == [
+        "Classic Chicken Burger", "Classic French Fries (Regular)", "Pepsi (330 ml)",
+    ]
+
+
+def test_multi_item_turn_falls_back_when_an_item_is_rejected(monkeypatch):
+    # place_order receives every item at once; if the catalogue can't take one
+    # of them, nothing is committed and the whole turn goes to the tool path
+    # rather than adding half the order.
+    monkeypatch.setattr(
+        directive_mode,
+        "stream_completion",
+        _make_fake_stream(
+            "Got it. A burger and a milkshake."
+            "<act>add|Classic Chicken Burger|1</act>"
+            "<act>add|Mystery Milkshake|1</act>"
+        ),
+    )
+    execute = AsyncMock(return_value=(None, ["place_order"], []))
+    monkeypatch.setattr(directive_mode, "_execute", execute)
+
+    result = _run_turn("a chicken burger and a milkshake", [])
+
+    assert result is None
+    assert len(execute.await_args.args[0]) == 2
