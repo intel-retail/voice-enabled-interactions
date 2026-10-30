@@ -242,3 +242,37 @@ class TestPreviewCoalescing:
         # than being dropped on the floor.
         assert len(queue.items) == 2
         assert client._preview_refresh_pending is False
+
+
+class TestCommittedTextSince:
+    """committed_text_since() feeds the endpoint-completeness check after an
+    adaptive-pause commit has cleared the preview. It must fail closed: any
+    commit that could predate the customer's last word, or that carried no
+    words, returns ""."""
+
+    def test_commit_after_last_speech_is_returned(self, client):
+        last_speech = time.monotonic()
+        client._apply_completed_event(
+            {"sequence": 1, "transcript": "Please add one Pepsi 330ML please."}
+        )
+        assert client.committed_text_since(last_speech) == "Please add one Pepsi 330ML please."
+
+    def test_commit_before_last_speech_is_not_returned(self, client):
+        client._apply_completed_event({"sequence": 1, "transcript": "Please add one"})
+        last_speech = time.monotonic() + 1.0  # the customer kept talking afterwards
+        assert client.committed_text_since(last_speech) == ""
+
+    def test_empty_commit_does_not_count(self, client):
+        client._apply_completed_event({"sequence": 1, "transcript": "One burger please."})
+        last_speech = time.monotonic()
+        # Silence-only commit after the last word: the text is unchanged from
+        # the earlier sentence, which must not be mistaken for this one.
+        client._apply_completed_event({"sequence": 2, "transcript": ""})
+        assert client.committed_text_since(last_speech) == ""
+
+    def test_no_reference_fails_closed(self, client):
+        client._apply_completed_event({"sequence": 1, "transcript": "One burger please."})
+        assert client.committed_text_since(None) == ""
+
+    def test_no_commit_yet_fails_closed(self, client):
+        assert client.committed_text_since(time.monotonic()) == ""

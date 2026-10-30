@@ -71,6 +71,9 @@ class RealtimeAnalyzerClient:
         self._latest_sequence = -1
         self._latest_text = ""
         self._latest_segments: list[dict] = []
+        # When the latest real commit that carried words landed (monotonic).
+        # See committed_text_since().
+        self._last_commit_with_content_at: float | None = None
         self._update_event = threading.Event()
 
         # Preview state: updated by non-destructive `input_audio_buffer.preview`
@@ -251,6 +254,7 @@ class RealtimeAnalyzerClient:
             self._preview_text = ""
             if self._latest_text.strip():
                 self._content_landings.append(time.monotonic())
+                self._last_commit_with_content_at = time.monotonic()
         self._update_event.set()
         self._log_round_trip("commit")
 
@@ -417,6 +421,23 @@ class RealtimeAnalyzerClient:
         """
         with self._lock:
             return self._preview_text
+
+    def committed_text_since(self, reference_ts: float | None) -> str:
+        """Committed transcript text, if a commit with words landed at/after ``reference_ts``.
+
+        For the endpoint-completeness check ONLY. An adaptive-pause commit
+        clears the preview, and its result is not appended to the turn's
+        transcript until the final flush, so without this the check has
+        nothing to read until the full silence timeout. A commit that landed
+        after the customer's last speech frame covers the whole utterance and
+        will not change, unlike a preview. Returns "" when no such commit has
+        landed yet, so the caller fails closed.
+        """
+        with self._lock:
+            landed = self._last_commit_with_content_at
+            if reference_ts is None or landed is None or landed < reference_ts:
+                return ""
+            return self._latest_text
 
     def latest_snapshot(self) -> dict:
         """Latest cumulative transcript text/segments for this session."""

@@ -1386,12 +1386,28 @@ class BaseAudioSession:
                 # ONLY; transcript_parts (the actual turn text) is still
                 # built exclusively by real commits below.
                 _endpoint_candidate_transcript = _assemble_transcript(self.transcript_parts)
+                # Streaming mode, after the adaptive-pause commit: that commit
+                # cleared the preview and its words are not in transcript_parts
+                # until the final flush, so the candidate above stays empty and
+                # the turn used to wait out the full silence_timeout_seconds
+                # even when the correct transcript ("Please add one chocolate
+                # brownie to my order.") had already landed well before it. A
+                # commit that landed after the last speech frame is final, so
+                # it needs no stability window.
+                _committed_final = False
                 if self._streaming_active:
                     _preview_text = self.realtime_client.latest_preview_text()
                     if _preview_text:
                         _endpoint_candidate_transcript = (
                             f"{_endpoint_candidate_transcript} {_preview_text}".strip()
                         )
+                    elif _adaptive_flushed:
+                        _committed_text = self.realtime_client.committed_text_since(
+                            self._t_last_speech_frame
+                        )
+                        if _committed_text:
+                            _endpoint_candidate_transcript = _committed_text
+                            _committed_final = True
                 if (
                     config.DEFAULT_ENDPOINT_COMPLETE_ENABLED
                     and silence_run_seconds >= config.DEFAULT_ENDPOINT_SHORT_SECONDS
@@ -1423,7 +1439,10 @@ class BaseAudioSession:
                     # wall-clock -- see _endpoint_transcript_stable's
                     # docstring for why: bursty frame delivery can advance
                     # silence_run_seconds far faster than real time elapses.
-                    and self._endpoint_transcript_stable(_endpoint_candidate_transcript, silence_run_seconds)
+                    and (
+                        _committed_final
+                        or self._endpoint_transcript_stable(_endpoint_candidate_transcript, silence_run_seconds)
+                    )
                 ):
                     logger.info(
                         "[ENDPOINT] session=%s | early commit at %.2fs "
