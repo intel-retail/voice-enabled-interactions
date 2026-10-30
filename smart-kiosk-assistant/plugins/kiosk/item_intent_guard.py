@@ -210,6 +210,69 @@ def extract_named_item(utterance: str) -> str | None:
     return item
 
 
+# A reference made only of digits. When the model does not recognise the
+# spoken name, it fills product_id with a made-up number instead. Observed:
+# "One Perry chicken wrap." -> place_order(product_id="12345"), then
+# "and a fresh lime soda, please." -> place_order(product_id="67890"), and
+# the customer heard "Sorry, we don't have 12345 on the menu" twice.
+_PLACEHOLDER_REF_RE = re.compile(r"^\s*\d+\s*$")
+
+# Words before the item in a request with no ordering verb: "and a ...",
+# "also one ...", "uh, two ...".
+_BARE_ITEM_RE = re.compile(
+    r"""^\s*
+    (?:(?:and|also|plus|then|um+|uh+|er+|oh)[\s,]+)*
+    (?:a|an|one|two|three|four|five|\d+|the|some)?\s*
+    (?P<item>[a-z][a-z\s'-]{2,40}?)
+    (?:[\s,]*(?:please|too|as\s+well))?\s*[.!?]*\s*$""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def is_placeholder_reference(reference: object, utterance: str) -> bool:
+    """Return True when ``reference`` is a number the customer never said.
+
+    Args:
+        reference: The product reference in the tool call.
+        utterance: The raw customer message for the current turn.
+
+    Returns:
+        True for an all-digit reference that does not appear in the
+        utterance.
+    """
+    text = str(reference)
+    return bool(_PLACEHOLDER_REF_RE.match(text)) and text.strip() not in (utterance or "")
+
+
+def extract_bare_item(utterance: str) -> str | None:
+    """Return the item in a short request with no ordering verb.
+
+    Used only to replace a placeholder reference (see
+    :func:`is_placeholder_reference`). "One Perry chicken wrap." gives
+    "Perry chicken wrap"; kiosk-core's resolver matches the spoken name.
+
+    Args:
+        utterance: The raw customer message for the current turn.
+
+    Returns:
+        The item phrase, or ``None`` when the utterance is not a bare item
+        or names something too vague to identify a product.
+    """
+    if not utterance or _CONFIRMATION_ONLY_RE.match(utterance):
+        return None
+    # "maybe a pizza" is browsing, not an order; see extract_named_item.
+    if _TENTATIVE_RE.match(utterance):
+        return None
+    match = _BARE_ITEM_RE.match(utterance)
+    if not match:
+        return None
+    item = match.group("item").strip()
+    # "the second one" loses its article above, so check both forms.
+    if not _is_concrete_item(item) or not _is_concrete_item(f"the {item}"):
+        return None
+    return item
+
+
 def mismatches(reference: str, named_item: str) -> bool:
     """Return True when ``named_item`` shares no meaningful token with ``reference``.
 
@@ -258,6 +321,16 @@ def corrected_reference(
     reference = item.get("product_id") or item.get("name") or item.get("product") or ""
     if not reference:
         return None
+
+    if is_placeholder_reference(reference, utterance):
+        spoken_item = extract_named_item(utterance) or extract_bare_item(utterance)
+        if spoken_item:
+            logger.warning(
+                "[ITEM-INTENT-GUARD] tool=%s placeholder reference=%r — using the "
+                "customer's words %r instead",
+                tool_name, reference, spoken_item,
+            )
+        return spoken_item
 
     named_item = extract_named_item(utterance)
     if not named_item:
