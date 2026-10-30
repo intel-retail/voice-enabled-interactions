@@ -148,3 +148,53 @@ class TestCollectActBlocks:
         bodies, done = directive_mode.collect_act_blocks("<act>add|A|1</act> Anything else?")
         assert bodies == ["add|A|1"]
         assert done is True
+
+
+class TestApplyOneMore:
+    @staticmethod
+    def _add(name, quantity):
+        return {"verb": "add", "name": name, "quantity": quantity}
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Add one more Chocolate Shake.",
+            "Actually, add another Bottled Water.",
+            "Add one more six piece Spicy Ranger Nuggets.",
+            "Actually, add another ten piece Ranger Nuggets.",
+            "another 10-piece nuggets please",
+        ],
+    )
+    def test_one_more_sets_quantity_to_one(self, message):
+        actions = [self._add("Chocolate Shake", 2)]
+        assert directive_mode.apply_one_more(actions, message) == [self._add("Chocolate Shake", 1)]
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Add another two burgers.",
+            "add another 3 shakes",
+            "Two chocolate shakes please.",
+            "I'll have two more shakes.",
+        ],
+    )
+    def test_explicit_count_is_kept(self, message):
+        actions = [self._add("Chocolate Shake", 2)]
+        assert directive_mode.apply_one_more(actions, message) == actions
+
+    def test_several_adds_are_left_alone(self):
+        # "one more" could belong to either item, so nothing is changed.
+        actions = [self._add("Burger", 1), self._add("Fries", 2)]
+        assert directive_mode.apply_one_more(actions, "one more burger and two fries") == actions
+
+    def test_remove_and_confirm_are_untouched(self):
+        actions = [
+            {"verb": "remove", "name": "Fries", "quantity": 2},
+            self._add("Vanilla Shake", 2),
+            {"verb": "confirm"},
+        ]
+        assert directive_mode.apply_one_more(actions, "drop the fries, and one more vanilla shake") == [
+            {"verb": "remove", "name": "Fries", "quantity": 2},
+            self._add("Vanilla Shake", 1),
+            {"verb": "confirm"},
+        ]

@@ -463,3 +463,26 @@ def test_multi_item_turn_falls_back_when_an_item_is_rejected(monkeypatch):
 
     assert result is None
     assert len(execute.await_args.args[0]) == 2
+
+
+def test_one_more_adds_one_when_the_model_writes_the_new_total(monkeypatch):
+    # With one shake already in the cart, the model wrote the new total (2).
+    # place_order adds, so the cart ended with three.
+    monkeypatch.setattr(
+        directive_mode,
+        "stream_completion",
+        _make_fake_stream("One more Chocolate Shake added.<act>add|Chocolate Shake|2</act>"),
+    )
+    execute = AsyncMock(
+        return_value=({"total": 9.98, "upsell_suggestions": []}, ["place_order"], ["place_order"])
+    )
+    monkeypatch.setattr(directive_mode, "_execute", execute)
+
+    spoken: list[str] = []
+    result = _run_turn("Add one more Chocolate Shake.", spoken)
+
+    assert result is not None
+    actions = execute.await_args.args[0]
+    assert [(a["verb"], a["name"], a["quantity"]) for a in actions] == [
+        ("add", "Chocolate Shake", 1),
+    ]

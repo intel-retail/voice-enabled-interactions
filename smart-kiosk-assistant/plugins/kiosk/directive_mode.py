@@ -270,6 +270,44 @@ def parse_directive(raw: str) -> list[dict[str, Any]] | None:
     return actions or None
 
 
+# "one more" or "another", not followed by a count ("another two burgers").
+# A count followed by "piece" names a size ("another ten piece nuggets"), so
+# it does not block the match.
+_NUMBER_WORDS = (
+    r"two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\d+"
+)
+_ONE_MORE_RE = re.compile(
+    rf"\b(?:one\s+more|another)\b"
+    rf"(?!\s+(?:{_NUMBER_WORDS})\b(?!\s*-?\s*pieces?\b))",
+    re.IGNORECASE,
+)
+
+
+def apply_one_more(actions: list[dict[str, Any]], message: str) -> list[dict[str, Any]]:
+    """Set the quantity to 1 when the customer asked for "one more" of an item.
+
+    With the item already in the cart, the model writes the new total instead
+    of the increment: "Add one more Chocolate Shake" with one shake in the
+    cart came back as ``add|Chocolate Shake|2``, and ``place_order`` adds, so
+    the cart ended with three. A prompt rule saying quantities are increments
+    did not change this.
+
+    Only a turn with exactly one add is changed. With several adds the
+    message does not say which item "one more" belongs to.
+
+    Args:
+        actions: Output of :func:`parse_directive`.
+        message: The customer's utterance for this turn.
+
+    Returns:
+        ``actions``, with the single add's quantity set to 1 when it applies.
+    """
+    adds = [a for a in actions if a["verb"] == _ADD]
+    if len(adds) != 1 or adds[0]["quantity"] == 1 or not _ONE_MORE_RE.search(message or ""):
+        return actions
+    return [dict(a, quantity=1) if a is adds[0] else a for a in actions]
+
+
 def parse_price_directive(raw: str) -> str | None:
     """Parse the ``<check_price>…</check_price>`` block into an item name.
 
@@ -772,6 +810,7 @@ async def run_turn(
         state["tag_dispatched"] = True
         actions = parse_directive(";".join(b.strip() for b in bodies))
         if actions:
+            actions = apply_one_more(actions, message)
             state["task"] = asyncio.create_task(_execute(actions, user_id))
         else:
             state["task"] = "unparseable"
