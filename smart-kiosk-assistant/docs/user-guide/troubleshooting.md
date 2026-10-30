@@ -152,6 +152,31 @@ Then recreate the service:
 docker compose up -d --force-recreate <service-name>
 ```
 
+**Cause 3 — `kiosk-core` has no Silero VAD model.** `kiosk-core` exits at
+startup and Docker restarts it (`restart: unless-stopped`), so it shows as
+`Restarting` and never becomes healthy. After about 15 seconds `make up` stops
+with `dependency failed to start: container kiosk-core is unhealthy`.
+`docker logs kiosk-core` (or `make logs-core`) shows:
+
+```text
+[STARTUP] Silero VAD is enabled but the model file /app/kiosk_core/models/silero_vad.onnx does not exist.
+```
+
+The file is not in git. It goes missing when `setup_models.sh` was not run
+before the build, or when a clone set up before Sep 22nd, 2026 pulls the commit
+that removed it from git. Fetch it and rebuild `kiosk-core`:
+
+```bash
+./setup_models.sh --silero-only
+make dev-build SVC=kiosk-core
+```
+
+If you pulled the image (`REGISTRY=true`), the published image is missing the
+model. Pull a newer tag, or build locally with `make build REGISTRY=false`.
+
+To run the RMS VAD on purpose instead, set `KIOSK_CORE_SILERO_VAD_ENABLED=false`
+in `.env`.
+
 ## First Startup Is Slow
 
 This is expected. On first run each model-hosting service downloads or

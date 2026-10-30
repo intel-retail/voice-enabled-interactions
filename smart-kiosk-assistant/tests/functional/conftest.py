@@ -3,7 +3,7 @@ Functional test configuration for Smart Kiosk Assistant.
 
 Tier markers
 ------------
-  @pytest.mark.tier1  — CI-safe: no Docker, no ML models, no audio hardware.
+  @pytest.mark.tier1  — CI-safe: no Docker, no audio hardware; the Silero VAD model must be downloaded.
                         Runs on ubuntu-latest with only requirements.txt + libportaudio2.
   @pytest.mark.tier2  — Docker-required: builds and runs the kiosk-core container.
                         Skipped automatically when Docker daemon is unavailable.
@@ -56,7 +56,7 @@ _csv_results: list[dict] = []
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
-        "tier1: CI-safe functional tests — no Docker, no ML models, no audio hardware",
+        "tier1: CI-safe functional tests — no Docker, no audio hardware; the Silero VAD model must be downloaded",
     )
     config.addinivalue_line(
         "markers",
