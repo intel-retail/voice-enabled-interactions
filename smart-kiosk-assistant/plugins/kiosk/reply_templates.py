@@ -412,6 +412,88 @@ def is_browse_intent(utterance: str) -> bool:
     return not _MUTATION_INTENT_RE.search(utterance or "")
 
 
+# Hesitation words a customer says while choosing ("um", "uh", "er").
+_FILLER = r"(?:u+m+|u+h+m*|e+r+m*|h+m+|well|so|okay|ok|and|also|like|maybe)"
+
+# An ordering lead-in with no item after it: "I'll have um...", "Can I get
+# a", "Let me get, uh,". The customer has not said what they want yet.
+_LEAD_IN_ONLY_RE = re.compile(
+    r"^\s*(?:" + _FILLER + r"[\s,.…]+)*"
+    r"(?:(?:i|we)(?:'d|\s+would)\s+like(?:\s+to\s+(?:order|get|have))?|"
+    r"(?:i|we)(?:'ll|\s+will)\s+(?:have|take|get|go\s+with)|"
+    r"(?:can|could|may)\s+(?:i|we)\s+(?:get|have|order)|"
+    r"let\s+me\s+(?:get|have)|(?:give|get)\s+me|"
+    r"(?:i|we)\s+(?:want|need)|(?:i|we)\s+wanna)"
+    r"(?:[\s,.…]+(?:" + _FILLER + r"|a|an|the))*"
+    r"[\s,.…?!]*$",
+    re.IGNORECASE,
+)
+
+
+def is_lead_in_only(utterance: str) -> bool:
+    """Return True when the utterance starts an order but names nothing.
+
+    Args:
+        utterance: The customer's raw message for this turn.
+
+    Returns:
+        ``True`` for "I'll have um..." or "Can I get a", where the kiosk
+        took its turn before the customer said the item.
+    """
+    return bool(_LEAD_IN_ONLY_RE.match(utterance or ""))
+
+
+# Replies that answer the kiosk rather than name an item: agreement,
+# hesitation, a stall ("Hold on", "Let me think"), and the ways a customer
+# says they are done. Several can follow each other ("Never mind, that's
+# all"). Joined to a lead-in they would read as an order ("I'll have um No
+# thanks") and a decline would no longer close the order.
+_REPLY_PART = (
+    r"(?:yes|yeah|yep|no|nope|nah|sure|ok(?:ay)?|hmm+|u+m+|u+h+|actually|"
+    r"no,?\s+thanks?(?:\s+you)?|thanks?(?:\s+you)?|please|"
+    r"that'?s\s+(?:all|it|everything)|that\s+(?:is|will\s+be)\s+all|"
+    r"nothing(?:\s+(?:else|more))?|never\s*mind|forget\s+it|"
+    r"i'?m\s+(?:good|done|all\s+set)|all\s+set|"
+    r"hold\s+on|hang\s+on|wait(?:\s+a\s+(?:sec(?:ond)?|minute|moment))?|"
+    r"(?:one|a|just\s+a)\s+(?:sec(?:ond)?|minute|moment)|let\s+me\s+(?:think|see))"
+)
+_NOT_AN_ITEM_RE = re.compile(
+    r"^\s*(?:" + _FILLER + r"[\s,.…]+)*" + _REPLY_PART
+    + r"(?:[\s,.…!]+" + _REPLY_PART + r")*[\s,.…?!]*$",
+    re.IGNORECASE,
+)
+
+
+def join_lead_in(message: str, history: list[dict[str, str]] | None) -> str:
+    """Join the item the customer names to their unfinished lead-in.
+
+    Args:
+        message: The customer's utterance for this turn.
+        history: Earlier turns as ``{"role", "content"}`` dicts.
+
+    Returns:
+        "<lead-in> <message>" when the previous customer turn was only a
+        lead-in and this turn is not a question, a request of its own, or a
+        reply such as "No thanks" or "That's all"; otherwise ``message``
+        unchanged.
+    """
+    previous = next(
+        (t.get("content", "") for t in reversed(history or []) if t.get("role") == "user"),
+        "",
+    )
+    if not message or not is_lead_in_only(previous) or not is_browse_intent(message):
+        return message
+    if _NOT_AN_ITEM_RE.match(message):
+        return message
+    if (
+        "?" in message
+        or re.match(r"\s*(?:what|which|how|do|does|is|are|can)\b", message, re.IGNORECASE)
+        or is_price_query_intent(message)
+    ):
+        return message
+    return f"{previous.strip().rstrip('.…?!').strip()} {message.strip()}"
+
+
 # Single-item price/cost questions only — deliberately narrow. General
 # catalogue browsing ("what desserts do you have") still needs the
 # authoritative list_products tool-calling path (see _CATALOGUE_QUERY_RE in
