@@ -217,6 +217,32 @@ class TestHfTokenIsOptional:
             )
 
 
+    @pytest.mark.tier1
+    def test_diarization_is_off_when_the_variable_is_unset(self):
+        """Diarization is opt-in: with KIOSK_CORE_DIARIZATION_ENABLED unset,
+        kiosk_core does not request it, and both compose defaults are false."""
+        import sys
+        from unittest.mock import MagicMock, patch
+
+        sd_mock = MagicMock()
+        sd_mock.query_devices.return_value = []
+        env = {k: v for k, v in os.environ.items() if k != "KIOSK_CORE_DIARIZATION_ENABLED"}
+
+        with patch.dict("sys.modules", {"sounddevice": sd_mock}), \
+             patch.dict(os.environ, env, clear=True):
+            for mod in list(sys.modules.keys()):
+                if mod.startswith("kiosk_core"):
+                    del sys.modules[mod]
+            from kiosk_core import config as kiosk_cfg
+            assert not kiosk_cfg.DEFAULT_DIARIZATION_ENABLED, (
+                "Diarization must be off when KIOSK_CORE_DIARIZATION_ENABLED is unset"
+            )
+
+        with open(_DOCKER_COMPOSE) as fh:
+            compose_text = fh.read()
+        assert "${KIOSK_CORE_DIARIZATION_ENABLED:-true}" not in compose_text
+        assert compose_text.count("${KIOSK_CORE_DIARIZATION_ENABLED:-false}") == 2
+
 # ---------------------------------------------------------------------------
 # TARGET_DEVICE — allowed values
 # ---------------------------------------------------------------------------

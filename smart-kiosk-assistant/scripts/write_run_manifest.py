@@ -118,11 +118,11 @@ def build_manifest(
             "queue_enabled": "false" if forced_off else queue_enabled,
             "diarization_enabled": (
                 "false" if forced_off
-                else env.get("KIOSK_CORE_DIARIZATION_ENABLED", "true")
+                else env.get("KIOSK_CORE_DIARIZATION_ENABLED", "false")
             ),
             "queue_enabled_requested": queue_enabled,
             "diarization_enabled_requested": env.get(
-                "KIOSK_CORE_DIARIZATION_ENABLED", "true"
+                "KIOSK_CORE_DIARIZATION_ENABLED", "false"
             ),
             "forced_off_by_orchestrator": (
                 ["queue_service", "rtsp_streamer", "diarization"]
