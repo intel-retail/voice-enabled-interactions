@@ -937,6 +937,18 @@ DEFAULT_DIARIZATION_ENROLL_MIN_SECONDS = float(
 DEFAULT_SKIP_EMPTY_FINAL_FLUSH_ENABLED = os.getenv(
     "KIOSK_CORE_SKIP_EMPTY_FINAL_FLUSH_ENABLED", "false"
 ).lower() not in ("false", "0", "no")
+# Keep listening after a filler-only turn. When the endpoint commits right
+# after "Uh" / "Um" (customer pauses to think), ASR returns only the filler,
+# which _flush_chunk drops. Without this the session then ended silently
+# with an empty transcript, and the rest of the customer's audio was refused
+# (409 on the next chunk push), so the customer heard nothing. When enabled,
+# a silence-endpoint turn whose only ASR output was dropped filler resumes
+# listening on the same session, and the customer's next words become the
+# turn. A session that stays silent after the filler still ends at the next
+# silence timeout (or max_session_seconds), exactly as before.
+DEFAULT_FILLER_RELISTEN_ENABLED = os.getenv(
+    "KIOSK_CORE_FILLER_RELISTEN_ENABLED", "true"
+).lower() not in ("false", "0", "no")
 # Minimum domain-keyword overlap ratio to accept a fallback segment when the
 # primary customer is silent for an entire chunk.
 DEFAULT_SEMANTIC_FALLBACK_THRESHOLD = float(os.getenv("KIOSK_CORE_SEMANTIC_FALLBACK_THRESHOLD", "0.10"))

@@ -987,6 +987,10 @@ services:
       # word). Default off pending live A/B measurement; see config.py for
       # the full rationale (DEFAULT_SKIP_EMPTY_FINAL_FLUSH_ENABLED).
       KIOSK_CORE_SKIP_EMPTY_FINAL_FLUSH_ENABLED: ${KIOSK_CORE_SKIP_EMPTY_FINAL_FLUSH_ENABLED:-false}
+      # Keep listening when a turn held only a dropped filler ("Uh..."), so the
+      # customer's next words become the turn. See config.py
+      # (DEFAULT_FILLER_RELISTEN_ENABLED).
+      KIOSK_CORE_FILLER_RELISTEN_ENABLED: ${KIOSK_CORE_FILLER_RELISTEN_ENABLED:-true}
       # ASR trailing-silence trim (kiosk-voice-lab-main parity): trims the
       # audio actually SENT TO ASR down to "last speech + a short decay tail"
       # before every adaptive-pause/final flush, to stop Whisper hallucinating

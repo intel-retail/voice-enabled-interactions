@@ -784,6 +784,16 @@ class BaseAudioSession:
         # Count of turns where the final tail-chunk flush was skipped because
         # it held no unflushed speech, purely for observability/metrics.
         self._final_flush_skipped = False
+        # Filler-only turn re-listen (see config.DEFAULT_FILLER_RELISTEN_ENABLED).
+        # _filler_dropped: _flush_chunk dropped a filler-only ASR result since
+        # the last re-listen. _relisten_at: monotonic instant of the last
+        # re-listen; a later filler-only endpoint only re-listens again if new
+        # speech arrived after it. _stale_snapshot_text: the realtime
+        # analyzer's cumulative text at re-listen time, so the final flush
+        # never mistakes that old snapshot for the resumed turn's result.
+        self._filler_dropped = False
+        self._relisten_at: float | None = None
+        self._stale_snapshot_text: str | None = None
 
         # ── Adaptive VAD state ─────────────────────────────────────────────
         # `request.silence_threshold` is the seed/fallback gate. When adaptive
@@ -1064,6 +1074,9 @@ class BaseAudioSession:
         # near-empty buffers) and when adaptive_flush_pause_seconds > 0.
         adaptive_pause = self.request.adaptive_flush_pause_seconds
         _adaptive_flushed = False  # guard: only one adaptive flush per silence run
+        # True only when the turn ended on trailing silence (either endpoint
+        # branch below), the one case a filler-only turn may re-listen.
+        endpoint_committed = False
 
         try:
             for frame in frame_iterator:
@@ -1436,6 +1449,7 @@ class BaseAudioSession:
                     self._endpoint_shortcut_fired = True
                     end_reason = "silence_timeout"
                     self._log_last_word_spoken(silence_run_seconds)
+                    endpoint_committed = True
                     break
 
                 if silence_run_seconds >= self.request.silence_timeout_seconds:
@@ -1452,6 +1466,7 @@ class BaseAudioSession:
                         config.DEFAULT_ENDPOINT_SHORT_SECONDS,
                     )
                     self._log_last_word_spoken(silence_run_seconds)
+                    endpoint_committed = True
                     break
 
                 if (self._captured_samples / self.request.sample_rate) >= self.request.max_session_seconds:
@@ -1586,11 +1601,67 @@ class BaseAudioSession:
         # voice_to_voice_ms by however long this join blocked — on some turns
         # the single largest stage in the whole clock. See
         # WallTimes.final_flush_wait_ms.
+        #
+        # Wait for the final chunk's ASR first: a filler-only result ("Uh...")
+        # means the customer paused to think, not that the turn is over, so
+        # keep reading frames on this same session instead of ending it. See
+        # config.DEFAULT_FILLER_RELISTEN_ENABLED.
+        self._flush_queue.join()
+        if self._should_relisten_after_filler(endpoint_committed, final_status):
+            self._reset_for_relisten()
+            return self._process_frame_stream(frame_iterator)
         self._flush_queue.put(None)
         self._flush_queue.join()
         self._final_flush_wait_seconds = time.monotonic() - _t_final_flush_start
 
         return final_status, end_reason
+
+    def _should_relisten_after_filler(self, endpoint_committed: bool, final_status: str) -> bool:
+        """True when this turn produced nothing but dropped filler.
+
+        Only for a turn the trailing-silence endpoint ended: a stop, a
+        superseding session, max_session_seconds, an error, or the browser's
+        end-of-stream signal still end the session as before. A second
+        filler-only endpoint with no new speech since the last re-listen ends
+        the session too, so a silent customer can never keep it open.
+        Attributes are read with getattr defaults because test harnesses
+        build sessions via __new__() without running __init__.
+        """
+        if not (config.DEFAULT_FILLER_RELISTEN_ENABLED and endpoint_committed):
+            return False
+        if final_status != "completed" or self._stop_event.is_set():
+            return False
+        if self.transcript_parts or not getattr(self, "_filler_dropped", False):
+            return False
+        if getattr(self, "_rejected_speech_chunks", 0):
+            return False  # speaker-filter rejections keep their own handling
+        relisten_at = getattr(self, "_relisten_at", None)
+        if relisten_at is not None and (self._t_last_speech_frame or 0.0) <= relisten_at:
+            return False
+        return True
+
+    def _reset_for_relisten(self) -> None:
+        """Clear the per-turn endpoint state so the resumed turn is timed and
+        endpointed on the customer's next words, not on the dropped filler."""
+        logger.info(
+            "[ENDPOINT] session=%s | turn held only filler (dropped), "
+            "still listening for the rest of the turn",
+            self.session_id,
+        )
+        self._filler_dropped = False
+        self._relisten_at = time.monotonic()
+        # The filler WAS transcribed; nothing captured so far is pending.
+        self._unconfirmed_speech_pending = False
+        self._chunk_has_speech = False
+        self._endpoint_stable_transcript = None
+        self._endpoint_stable_since = None
+        self._endpoint_wait_seconds = None
+        self._endpoint_shortcut_fired = None
+        self._final_flush_skipped = False
+        self._t_endpoint_decision = None
+        self._t_last_word = None
+        if self._streaming_active:
+            self._stale_snapshot_text = self.realtime_client.latest_snapshot().get("text") or None
 
     def _flush_worker(self) -> None:
         """Background worker that transcribes queued chunks one at a time.
@@ -3009,7 +3080,14 @@ class BaseAudioSession:
                 # A chunk WITH new frames must still always commit and wait
                 # -- only a content-free commit is safe to skip this way.
                 _cached = self.realtime_client.latest_snapshot()
-                if not frames and (_cached.get("text") or _cached.get("segments")):
+                # After a filler-only re-listen the cache still holds the
+                # filler turn's snapshot until the next commit lands; that
+                # old snapshot must not stand in for the resumed turn.
+                if (
+                    not frames
+                    and (_cached.get("text") or _cached.get("segments"))
+                    and _cached.get("text") != getattr(self, "_stale_snapshot_text", None)
+                ):
                     payload = _cached
                 else:
                     self.realtime_client.commit(
@@ -3191,6 +3269,7 @@ class BaseAudioSession:
                     self.session_id, text[:60],
                 )
                 text = ""
+                self._filler_dropped = True
             if text:
                 # Drop a leading run of words the transcript already ends
                 # with. The two dedup paths above use different cursors — the
