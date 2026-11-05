@@ -71,7 +71,12 @@ export const tuning = {
   // (pipeline/config.py tick_s=0.4) closely enough to let the backend's
   // quiet-mode preview acceleration (DEFAULT_REALTIME_PREVIEW_COMMIT_QUIET_SECONDS,
   // 0.15s) actually have fresh audio to act on.
-  chunkSeconds: 0.5,
+  //
+  // Lowered from 0.5s to 0.25s: the backend can only end a turn when a chunk
+  // arrives, so a 0.5s cadence added up to 0.5s (about 0.25s on average) to
+  // every turn's end-of-turn decision. Measured with the order-fastpath
+  // benchmark; see the PR that made this change.
+  chunkSeconds: 0.25,
   // Max seconds of speech the backend accumulates before force-flushing to
   // Whisper, sent as chunk_seconds on session start.
   //

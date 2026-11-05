@@ -442,7 +442,7 @@ export function useVoiceSession({ deviceId, enabled, onTurnComplete }: UseVoiceS
       worklet.port.onmessage = (ev: MessageEvent<Float32Array>) => {
         if (!recordingRef.current) return;
         framesRef.current.push(ev.data);
-        // Both modes upload continuously in small tuning.chunkSeconds (0.5s)
+        // Both modes upload continuously in small tuning.chunkSeconds (0.25s)
         // slices so the backend's per-frame VAD never falls behind while the
         // customer is still talking — withholding audio until Stop meant the
         // whole utterance's VAD/frame-processing had to run in one CPU burst

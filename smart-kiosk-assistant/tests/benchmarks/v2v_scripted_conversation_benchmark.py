@@ -342,8 +342,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--push-chunk-seconds",
         type=float,
-        default=0.5,
-        help="Size of each WAV chunk pushed to /audio while streaming (default: 0.5s, like a live browser)",
+        default=0.25,
+        help="Size of each WAV chunk pushed to /audio while streaming (default: 0.25s, the kiosk UI's chunkSeconds)",
     )
     parser.add_argument(
         "--silence-timeout-seconds",
@@ -469,6 +469,7 @@ def main(argv: list[str] | None = None) -> int:
         label=label,
         started_at=datetime.now(UTC).isoformat(),
         realtime_factor=args.realtime_factor,
+        push_chunk_seconds=args.push_chunk_seconds,
         fixtures=[f"{script_name}:line{i + 1}" for i in range(len(lines))],
     )
 

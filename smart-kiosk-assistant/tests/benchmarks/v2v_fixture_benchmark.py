@@ -452,6 +452,9 @@ class BenchmarkReport:
     started_at: str
     finished_at: str = ""
     realtime_factor: float = 1.0
+    # Upload chunk size the run used. The default changed from 0.5 to 0.25 s,
+    # so reports from before and after that cannot be compared directly.
+    push_chunk_seconds: float | None = None
     fixtures: list[str] = field(default_factory=list)
     turns: list[TurnResult] = field(default_factory=list)
     summary: dict[str, Any] = field(default_factory=dict)
@@ -1101,7 +1104,7 @@ def replay_fixture(
     realtime_factor: float,
     silence_timeout_seconds: float,
     session_timeout: float,
-    push_chunk_seconds: float = 0.5,
+    push_chunk_seconds: float = 0.25,
     explicit_end_mark: bool = False,
     uplink: str = "ws",
     conversation_id: str | None = None,
@@ -1330,8 +1333,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--push-chunk-seconds",
         type=float,
-        default=0.5,
-        help="Size of each WAV chunk pushed to /audio while streaming (default: 0.5s, like a live browser)",
+        default=0.25,
+        help="Size of each WAV chunk pushed to /audio while streaming (default: 0.25s, the kiosk UI's chunkSeconds)",
     )
     # 1.1s matches config.DEFAULT_SILENCE_TIMEOUT_SECONDS (kiosk-voice-lab-main
     # parity, lowered from 1.5s). Kept overridable so older/1.5s comparisons
@@ -1370,6 +1373,7 @@ def main(argv: list[str] | None = None) -> int:
         label=args.label,
         started_at=datetime.now(UTC).isoformat(),
         realtime_factor=args.realtime_factor,
+        push_chunk_seconds=args.push_chunk_seconds,
         fixtures=[p.name for p in fixtures],
     )
 
