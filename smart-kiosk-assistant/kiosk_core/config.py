@@ -853,9 +853,10 @@ DEFAULT_WAKEWORD_TIMEOUT_SECONDS = float(os.getenv("KIOSK_CORE_WAKEWORD_TIMEOUT_
 DEFAULT_WAKEWORD_INFERENCE_FRAMEWORK = os.getenv("KIOSK_CORE_WAKEWORD_INFERENCE_FRAMEWORK", "onnx")
 
 # Speaker diarization — master switch and semantic fallback sensitivity.
-# Set KIOSK_CORE_DIARIZATION_ENABLED=false to revert to flat-text behavior
-# (no speaker filtering; all segments forwarded as-is).
-DEFAULT_DIARIZATION_ENABLED = os.getenv("KIOSK_CORE_DIARIZATION_ENABLED", "true").lower() not in ("false", "0", "no")
+# Off by default: flat-text behavior (no speaker filtering; all segments
+# forwarded as-is). Set KIOSK_CORE_DIARIZATION_ENABLED=true to turn on
+# primary-speaker filtering; it needs HF_TOKEN and the Pyannote licences.
+DEFAULT_DIARIZATION_ENABLED = os.getenv("KIOSK_CORE_DIARIZATION_ENABLED", "false").lower() not in ("false", "0", "no")
 # Diarization on INTERMEDIATE chunks only (the max-chunk-size-cap flush and
 # the adaptive-pause pre-warm flush — i.e. every chunk except the final tail
 # at true endpoint, which always keeps full diarization regardless of this

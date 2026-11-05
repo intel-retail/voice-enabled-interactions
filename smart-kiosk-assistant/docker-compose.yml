@@ -398,10 +398,11 @@ services:
       # same flag kiosk-core uses to decide whether to request diarization.
       # ./configs/audio-analyzer/config.yaml pins models.asr.diarization: True,
       # which makes preload_models() load pyannote at startup unconditionally —
-      # this override lets KIOSK_CORE_DIARIZATION_ENABLED=false (e.g. in CI,
-      # where no HF_TOKEN/model-licence acceptance is available) also skip that
-      # preload, instead of crashing with an unauthenticated 403 download.
-      AUDIO_ANALYZER__MODELS__ASR__DIARIZATION: ${KIOSK_CORE_DIARIZATION_ENABLED:-true}
+      # this override lets KIOSK_CORE_DIARIZATION_ENABLED=false (the default,
+      # and CI, where no HF_TOKEN/model-licence acceptance is available) also
+      # skip that preload, instead of crashing with an unauthenticated 403
+      # download.
+      AUDIO_ANALYZER__MODELS__ASR__DIARIZATION: ${KIOSK_CORE_DIARIZATION_ENABLED:-false}
       # ASR inference device override — must match config.yaml's own
       # models.asr.device (GPU), which this fallback exists to reproduce, not
       # contradict. It previously defaulted to CPU, which silently overrode
@@ -1016,7 +1017,8 @@ services:
       KIOSK_CORE_SPECULATIVE_DRAFT_ENABLED: ${KIOSK_CORE_SPECULATIVE_DRAFT_ENABLED:-false}
       KIOSK_CORE_SPECULATIVE_TTS_PRESYNTH_ENABLED: ${KIOSK_CORE_SPECULATIVE_TTS_PRESYNTH_ENABLED:-false}
       KIOSK_CORE_METRICS_URL:  http://metrics-collector:9000
-      # Diarization — re-enable once HF terms are accepted for pyannote models.
+      # Diarization — off by default; set KIOSK_CORE_DIARIZATION_ENABLED=true
+      # once HF terms are accepted for pyannote models.
       # Accept terms at: https://huggingface.co/pyannote/speaker-diarization-community-1
       #                  https://huggingface.co/pyannote/speaker-diarization-3.1
       #                  https://huggingface.co/pyannote/segmentation-3.0
@@ -1027,11 +1029,11 @@ services:
       # Parameterized so setting the env var once takes effect on both
       # services (e.g. as a fallback toggle if diarization ever needs to be
       # disabled in an environment where the pyannote model cache is
-      # genuinely incomplete). Under normal offline operation, diarization
-      # should stay enabled — see the HF_HUB_OFFLINE/TRANSFORMERS_OFFLINE
-      # vars on audio-analyzer above, which are the actual fix for pyannote
-      # loading fully offline from its already-complete local cache.
-      KIOSK_CORE_DIARIZATION_ENABLED: ${KIOSK_CORE_DIARIZATION_ENABLED:-true}
+      # genuinely incomplete). When diarization is enabled, see the
+      # HF_HUB_OFFLINE/TRANSFORMERS_OFFLINE vars on audio-analyzer above,
+      # which are the actual fix for pyannote loading fully offline from its
+      # already-complete local cache.
+      KIOSK_CORE_DIARIZATION_ENABLED: ${KIOSK_CORE_DIARIZATION_ENABLED:-false}
       # Silero VAD (v5, onnxruntime): model-based replacement for the adaptive
       # RMS VAD's speech/silence decision. Default ON — every turn timer (the
       # 0.50s adaptive flush, the sentence-completeness shortcut and the 1.1s

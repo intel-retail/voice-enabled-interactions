@@ -642,8 +642,8 @@ To fix:
    docker compose up -d --force-recreate audio-analyzer
    ```
 
-If you do not need per-speaker attribution, disable diarization instead —
-transcription continues to work normally:
+If you do not need per-speaker attribution, disable diarization instead (the
+default) — transcription continues to work normally:
 
 ```bash
 # .env

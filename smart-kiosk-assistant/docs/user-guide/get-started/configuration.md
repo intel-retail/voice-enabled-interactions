@@ -172,7 +172,7 @@ If `GPU` is configured and unavailable on the host, `make check-env` fails befor
 > `speaker-diarization-3.1`, so accepting only the configured model still
 > fails with a `401`. (`pyannote/wespeaker-voxceleb-resnet34-LM` is also
 > downloaded but is **not** gated — no licence acceptance needed.) Set
-> `KIOSK_CORE_DIARIZATION_ENABLED=false` to run without diarization.
+> `KIOSK_CORE_DIARIZATION_ENABLED=false` (the default) to run without diarization.
 
 Diarization (`models.diarization.device`) is a **separate component from ASR**
 (see [ASR Support Matrix](#asr-support-matrix) above) with its own,

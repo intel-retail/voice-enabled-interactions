@@ -382,7 +382,7 @@ def validate(env: dict[str, str], check_hardware: bool = True) -> Report:
 
     # -- diarization -------------------------------------------------------
     if diar_dev != "CPU":
-        enabled = (env.get("KIOSK_CORE_DIARIZATION_ENABLED") or "true").lower()
+        enabled = (env.get("KIOSK_CORE_DIARIZATION_ENABLED") or "false").lower()
         msg = (
             f"DIARIZATION_DEVICE={diar_dev}. The diarization component loads via "
             "torch.device(<value>); PyTorch has no 'gpu' device string (Intel "
