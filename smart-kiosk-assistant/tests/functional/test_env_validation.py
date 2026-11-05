@@ -295,3 +295,56 @@ class TestDockerComposeEnvCompleteness:
             f"{sorted(undocumented)}\n"
             f"Add them to .env.example with a safe default value."
         )
+
+
+# ---------------------------------------------------------------------------
+# Kokoro default voice
+# ---------------------------------------------------------------------------
+class TestKokoroDefaultVoice:
+    """The Kokoro default voice must be af_heart everywhere a default is set.
+
+    The TTS service and kiosk-core each read TTS_SPEAKER with their own
+    fallback, so a default changed in one place and not the others makes
+    kiosk-core request a voice the service was not configured with.
+    """
+
+    EXPECTED_VOICE = "af_heart"
+
+    @pytest.mark.tier1
+    def test_env_example_tts_speaker_is_af_heart(self):
+        assert _parse_env_example().get("TTS_SPEAKER") == self.EXPECTED_VOICE, (
+            f".env.example must set TTS_SPEAKER={self.EXPECTED_VOICE}"
+        )
+
+    @pytest.mark.tier1
+    def test_compose_tts_speaker_fallbacks_are_af_heart(self):
+        import re
+        text = "\n".join(
+            _strip_yaml_comment(line) for line in _DOCKER_COMPOSE.read_text().splitlines()
+        )
+        fallbacks = re.findall(r"\$\{TTS_SPEAKER:-([^}]*)\}", text)
+        # One for the text-to-speech service, one for kiosk-core.
+        assert len(fallbacks) >= 2, (
+            f"Expected TTS_SPEAKER fallbacks for both text-to-speech and kiosk-core, "
+            f"found {fallbacks}"
+        )
+        assert set(fallbacks) == {self.EXPECTED_VOICE}, (
+            f"docker-compose.yml TTS_SPEAKER fallbacks must all be "
+            f"{self.EXPECTED_VOICE}, found {fallbacks}"
+        )
+
+    @pytest.mark.tier1
+    def test_tts_service_config_default_speaker_is_af_heart(self):
+        config_path = _KIOSK_ROOT / "configs" / "text-to-speech" / "config.yaml"
+        with open(config_path) as fh:
+            cfg = yaml.safe_load(fh)
+        assert cfg["models"]["tts"]["default_speaker"] == self.EXPECTED_VOICE
+
+    @pytest.mark.tier1
+    def test_af_heart_is_an_accepted_kokoro_voice(self):
+        import importlib.util
+        script = _KIOSK_ROOT / "scripts" / "validate_device_profile.py"
+        spec = importlib.util.spec_from_file_location("validate_device_profile", script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        assert self.EXPECTED_VOICE in module.TTS_SPEAKERS["kokoro"]

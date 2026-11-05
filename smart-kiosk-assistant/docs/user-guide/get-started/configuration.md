@@ -377,7 +377,7 @@ so an ordinary `make up` is unaffected.
 | `TTS_MODEL` | `kokoro` | TTS model |
 | `TTS_RUNTIME` | `kokoro` | TTS engine/runtime |
 | `TTS_DEVICE` | `CPU` | TTS device |
-| `TTS_SPEAKER` | `am_michael` | Voice (must match the model) |
+| `TTS_SPEAKER` | `af_heart` | Voice (must match the model) |
 | `TTS_DTYPE` | `int8` | TTS precision (**GPU requires `fp16`**) |
 | `TTS_MODEL_VARIANT` | `custom_voice` | Model variant |
 | `KIOSK_RESULTS_HOST_DIR` | `./results` | Results bind mount (set by `PROFILE`) |

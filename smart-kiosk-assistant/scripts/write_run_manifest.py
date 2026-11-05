@@ -102,7 +102,7 @@ def build_manifest(
             "tts": env.get("TTS_MODEL", "kokoro"),
             "tts_runtime": env.get("TTS_RUNTIME", "kokoro"),
             "tts_dtype": env.get("TTS_DTYPE", "int8"),
-            "tts_speaker": env.get("TTS_SPEAKER", "am_michael"),
+            "tts_speaker": env.get("TTS_SPEAKER", "af_heart"),
             "llm": env.get("OVMS_MODEL_NAME", "OpenVINO/Qwen3-4B-int8-ov"),
         },
         "run": {

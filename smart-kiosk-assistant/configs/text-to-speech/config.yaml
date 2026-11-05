@@ -76,14 +76,15 @@ models:
     #           bm_george | bm_lewis
     #           (see components/tts/kokoro/kokoro_tts.py::SUPPORTED_VOICES)
     #
-    # am_michael (US male) is the kiosk default for Kokoro — closest timbre
-    # match to the previous SpeechT5 "Ryan" voice.
+    # af_heart (US female) is the kiosk default for Kokoro, chosen in a live
+    # listening test. am_michael (US male) was the earlier default, picked as
+    # the closest timbre match to the previous SpeechT5 "Ryan" voice.
     #
     # Ryan (CMU Arctic "bdl", US male) was the kiosk default for SpeechT5:
     # measured ~3.8 dB louder and ~13% faster to synthesize than the
     # previous implicit voice ("Elena"/slt), which sounded feeble over
     # kiosk speakers.
-    default_speaker: am_michael
+    default_speaker: af_heart
     # Default language. Permitted values: English (the service currently supports English only)
     default_language: English
     models_base_path: models           # directory for downloaded/exported model assets

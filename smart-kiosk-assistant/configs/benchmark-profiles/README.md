@@ -74,7 +74,7 @@ time, so `make validate-profile` checks it up front.
 
 | Engine | `TTS_MODEL` | `TTS_RUNTIME` | Devices | `TTS_SPEAKER` | `TTS_MODEL_VARIANT` |
 |---|---|---|---|---|---|
-| Kokoro | `kokoro` | `kokoro` | CPU only | `am_michael` (and 27 others) | `custom_voice` (unused) |
+| Kokoro | `kokoro` | `kokoro` | CPU only | `af_heart` (and 27 others) | `custom_voice` (unused) |
 | SpeechT5 | `microsoft/speecht5_tts` | `openvino` | CPU, GPU, NPU | `Ryan`, `Miles`, `Aaron`, `Nora`, `Elena`, `Kabir`, `Angus` | `default` |
 | Qwen | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | `openvino` | CPU, GPU | `Ryan` | `custom_voice` \| `voice_design` |
 
@@ -141,7 +141,7 @@ make benchmark PROFILE=asr-npu_tts-cpu V2V_RUNS=3 QUEUE=true
 | `TTS_MODEL` / `TTS_RUNTIME` | `kokoro` / `kokoro` | Must be a valid pair |
 | `TTS_DEVICE` | `CPU` | Engine-dependent |
 | `TTS_DTYPE` | `int8` | `int8` \| `fp16` \| `fp32`; **fp16 required on GPU** |
-| `TTS_SPEAKER` | `am_michael` | Engine-dependent vocabulary |
+| `TTS_SPEAKER` | `af_heart` | Engine-dependent vocabulary |
 | `TTS_MODEL_VARIANT` | `custom_voice` | Engine-dependent |
 | `TARGET_DEVICE` | `GPU` | OVMS LLM — pinned to GPU in all shipped profiles |
 | `RAG_EMBEDDING_DEVICE` / `RAG_RERANKER_DEVICE` | `GPU` | Pinned, not under test |

@@ -531,9 +531,9 @@ services:
       # than producing a plausible-but-wrong table 20 minutes later.
       TEXT_TO_SPEECH__MODELS__TTS__DTYPE:           ${TTS_DTYPE:-int8}
       # Voice vocabularies are per-implementation and do not overlap: Kokoro
-      # wants am_michael, SpeechT5/Qwen want Ryan. Switching the model without
+      # wants af_heart, SpeechT5/Qwen want Ryan. Switching the model without
       # switching the speaker makes every synthesis request fail validation.
-      TEXT_TO_SPEECH__MODELS__TTS__DEFAULT_SPEAKER: ${TTS_SPEAKER:-am_michael}
+      TEXT_TO_SPEECH__MODELS__TTS__DEFAULT_SPEAKER: ${TTS_SPEAKER:-af_heart}
       TEXT_TO_SPEECH__MODELS__TTS__MODEL_VARIANT:   ${TTS_MODEL_VARIANT:-custom_voice}
       # 2 uvicorn worker PROCESSES so overlapping synth calls (e.g. a
       # speculative draft's pre-synthesis running alongside the real turn's
@@ -910,15 +910,16 @@ services:
       # configs/text-to-speech/config.yaml), which has no "Ryan" voice, and
       # the stale override made EVERY TTS request 400 (silent replies) until
       # it was corrected to am_michael -- Kokoro's closest match to the old
-      # Ryan voice, and config.yaml's own default_speaker.
+      # Ryan voice. The Kokoro default is now af_heart (US female), chosen in
+      # a live listening test, and matches config.yaml's default_speaker.
       #
-      # Pinning am_michael then broke the opposite case: 9 of the 10 profiles
+      # Pinning a Kokoro voice then broke the opposite case: 9 of the 10 profiles
       # in configs/benchmark-profiles/ switch the service back to SpeechT5
       # with TTS_SPEAKER=Ryan, so the service came up on SpeechT5 while
       # kiosk-core kept asking for a Kokoro voice and every request failed.
       # Parameterised against the same variable the service reads, so the two
       # can no longer disagree; the default keeps the Kokoro behaviour.
-      KIOSK_CORE_TTS_VOICE:    ${TTS_SPEAKER:-am_michael}
+      KIOSK_CORE_TTS_VOICE:    ${TTS_SPEAKER:-af_heart}
       # kiosk_core.config.DEFAULT_TTS_MODEL falls back to "qwen-tts" when this
       # is unset. TtsClient sends whatever this resolves to as the model name
       # on every request, and the TTS backend matches by substring (e.g.
