@@ -9,15 +9,19 @@ YOLO11) purely through configuration: ``pipeline.py`` only ever reads
 ``ir_path``/``proc_path``, while this module resolves *how* the IR is
 obtained. The ``omz`` provider downloads the pre-converted IR directly from the
 Intel Open Model Zoo storage server (the same artifact ``omz_downloader``
-fetches), because the ``intel/dlstreamer:2026.2.0-ubuntu24`` image ships neither
+fetches), because the ``intel/dlstreamer:2026.3.0-ubuntu24-rc1`` image ships neither
 the OMZ CLI tools nor ``openvino-dev``.
 """
+import json
 import logging
 import os
 import shutil
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+import yaml
 
 from config_loader import config
 
@@ -36,6 +40,28 @@ OMZ_STORAGE_BASE = "https://storage.openvinotoolkit.org/repositories/open_model_
 OMZ_RELEASE = "2023.0"
 OMZ_MODELS_BIN_INDEX = "1"
 _DOWNLOAD_TIMEOUT_SECONDS = 60
+
+# DL Streamer >= 2026.3 refuses to initialise *any* inference element whose
+# model it classifies as YOLO -- including `gvainference`, which performs no
+# post-processing at all -- unless a `metadata.yaml` sits next to the IR:
+#
+#   YOLO model (model_type "YOLO") requires <models>/metadata.yaml
+#   to determine the model version and task.
+#
+# The classification is name-based, so our `yolo26n*.xml` trips it even on the
+# `postproc: decoder` path where src/yolo_decoder.py owns decoding entirely and
+# DL Streamer never looks at the tensors. 2026.2 had no such gate, so the file
+# is absent from every IR we provision. Writing it keeps that raw-tensor path
+# working; the values only have to satisfy the gate, because nothing in
+# DL Streamer consumes them once `gvainference` is the element in use.
+_YOLO_METADATA_FILENAME = "metadata.yaml"
+_YOLO_METADATA_TASK = "detect"
+# Ultralytics' own exporter stamps the package version here. DL Streamer only
+# parses it to pick a YOLO generation, and the decoder path ignores that
+# choice, so a plain Ultralytics-era version is enough.
+_YOLO_METADATA_VERSION = "8.3.0"
+_YOLO_DEFAULT_IMGSZ = [640, 640]
+_YOLO_DEFAULT_NAMES = {0: "person"}
 
 
 def _resolve(path: str) -> str:
@@ -140,6 +166,145 @@ def _provider_for(model_cfg) -> str:
     return str(explicit).lower() if explicit else DEFAULT_PROVIDER
 
 
+def _is_yolo_model(ir_path: str) -> bool:
+    """Return True if DL Streamer would classify this IR as a YOLO model.
+
+    Mirrors DL Streamer's own name-based detection, which is what triggers the
+    ``metadata.yaml`` requirement in 2026.3+.
+
+    Args:
+        ir_path: Path to the OpenVINO IR ``.xml``.
+
+    Returns:
+        True when the IR filename marks it as a YOLO model.
+    """
+    return "yolo" in Path(ir_path).stem.lower()
+
+
+def _yolo_labels(ir_path: str) -> dict:
+    """Return ``{class_index: label}`` for a YOLO IR.
+
+    Reuses the labels already declared in the model-proc JSON that ships beside
+    the IR, so metadata.yaml never contradicts the model. Falls back to a
+    person-only map, which is all queue-service counts.
+
+    Args:
+        ir_path: Path to the OpenVINO IR ``.xml``.
+
+    Returns:
+        Mapping of class index to label name.
+    """
+    proc_json = Path(os.path.splitext(ir_path)[0] + ".json")
+    if not proc_json.is_file():
+        # Static IRs are written as <name>_static.xml with no model-proc of
+        # their own; fall back to the one belonging to the source IR.
+        stem = proc_json.stem
+        if stem.endswith("_static"):
+            proc_json = proc_json.with_name(stem[: -len("_static")] + ".json")
+    try:
+        with open(proc_json, encoding="utf-8") as fh:
+            postproc = json.load(fh).get("output_postproc") or []
+        for entry in postproc:
+            labels = entry.get("labels")
+            if labels:
+                return {i: name for i, name in enumerate(labels)}
+    except (OSError, ValueError) as exc:
+        logger.debug("Could not read labels from %s: %s", proc_json, exc)
+    return dict(_YOLO_DEFAULT_NAMES)
+
+
+def _yolo_imgsz(ir_path: str) -> list:
+    """Return the model's ``[height, width]`` input size.
+
+    Args:
+        ir_path: Path to the OpenVINO IR ``.xml``.
+
+    Returns:
+        Two-element ``[height, width]`` list, defaulting to 640x640 when the
+        IR cannot be read or its spatial dims are dynamic.
+    """
+    try:
+        from openvino import Core  # imported lazily; see ensure_static_ir
+
+        shape = Core().read_model(ir_path).input().get_partial_shape()
+        if shape.rank.is_static and len(shape) == 4:
+            height, width = shape[2], shape[3]
+            if height.is_static and width.is_static:
+                return [height.get_length(), width.get_length()]
+    except Exception as exc:  # pragma: no cover - diagnostic only
+        logger.debug("Could not read input shape from %s: %s", ir_path, exc)
+    return list(_YOLO_DEFAULT_IMGSZ)
+
+
+def ensure_yolo_metadata(ir_path: str) -> str:
+    """Write the ``metadata.yaml`` DL Streamer 2026.3+ demands for YOLO IRs.
+
+    No-op for non-YOLO models and when the file already exists, so a
+    hand-authored metadata.yaml is never overwritten.
+
+    Args:
+        ir_path: Path to the OpenVINO IR ``.xml`` that will be inferenced.
+
+    Returns:
+        ``ir_path`` unchanged, so this composes with the other ensure_* steps.
+
+    Raises:
+        RuntimeError: The metadata is missing and could not be written. The
+            pipeline cannot start without it, so this aborts startup rather
+            than leaving a service whose /health passes while it detects
+            nothing.
+    """
+    if not _is_yolo_model(ir_path):
+        return ir_path
+
+    metadata_path = Path(ir_path).parent / _YOLO_METADATA_FILENAME
+    if metadata_path.is_file():
+        logger.debug("YOLO metadata already present: %s", metadata_path)
+        return ir_path
+
+    metadata = {
+        "description": f"Generated by queue-service for {Path(ir_path).name}",
+        "author": "queue-service",
+        "version": _YOLO_METADATA_VERSION,
+        "task": _YOLO_METADATA_TASK,
+        "batch": 1,
+        "imgsz": _yolo_imgsz(ir_path),
+        "names": _yolo_labels(ir_path),
+    }
+    # Stage in the same directory so the publish step is a same-filesystem
+    # rename-equivalent: a torn write can never be mistaken for a complete
+    # file by the next startup. os.link (not os.replace) is the publish
+    # primitive because it fails rather than clobbering a metadata.yaml that
+    # appeared in the meantime -- the same invariant as the is_file() check
+    # above, held across the write.
+    tmp_name = None
+    try:
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            dir=metadata_path.parent, prefix=".metadata-", suffix=".yaml"
+        )
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
+            yaml.safe_dump(metadata, fh, sort_keys=False)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.link(tmp_name, metadata_path)
+    except FileExistsError:
+        logger.debug("YOLO metadata created concurrently: %s", metadata_path)
+        return ir_path
+    except OSError as exc:
+        raise RuntimeError(
+            f"Could not write the YOLO metadata DL Streamer 2026.3+ requires "
+            f"at {metadata_path}: {exc}"
+        ) from exc
+    finally:
+        if tmp_name is not None:
+            try:
+                os.unlink(tmp_name)
+            except OSError:  # pragma: no cover - best-effort staging cleanup
+                pass
+    logger.info("Wrote DL Streamer YOLO metadata: %s", metadata_path)
+    return ir_path
+
+
 def ensure_model(model_cfg=None) -> str:
     """Ensure the configured detector IR exists; return its path.
 
@@ -155,7 +320,7 @@ def ensure_model(model_cfg=None) -> str:
     ir_path = _resolve(getattr(model_cfg, "ir_path"))
     if os.path.isfile(ir_path):
         logger.info("Model IR already present: %s", ir_path)
-        return ensure_static_ir(ir_path, model_cfg)
+        return ensure_yolo_metadata(ensure_static_ir(ir_path, model_cfg))
 
     provider = _provider_for(model_cfg)
     handler = _PROVIDERS.get(provider)
@@ -172,7 +337,7 @@ def ensure_model(model_cfg=None) -> str:
     if not os.path.isfile(ir_path):
         raise RuntimeError(f"Model provisioning did not produce IR at {ir_path}")
     logger.info("Model ready: %s", ir_path)
-    return ensure_static_ir(ir_path, model_cfg)
+    return ensure_yolo_metadata(ensure_static_ir(ir_path, model_cfg))
 
 
 def ensure_static_ir(ir_path: str, model_cfg=None) -> str:

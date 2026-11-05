@@ -1,19 +1,20 @@
 # SPDX-FileCopyrightText: (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
-# DLStreamer 2026.2 is REQUIRED, not merely preferred.
+# DLStreamer >= 2026.2 is REQUIRED, not merely preferred.
 #
-# The YOLO26 IR loads and runs correctly under the OpenVINO 2026.2 runtime
+# The YOLO26 IR loads and runs correctly under the OpenVINO 2026.2+ runtime
 # bundled here, but on 2026.1 gvainference aborts at caps negotiation with
 # "post-processing is NULL" / "Mapper is null" and the pipeline never
-# prerolls. Verified with the identical yolo26n_static.xml in both images:
+# prerolls. Verified with the identical yolo26n_static.xml in each image:
 #
 #   intel/dlstreamer:2026.1.0-ubuntu24      (OpenVINO 2026.1) -> fails
 #   intel/dlstreamer:2026.2.0-ubuntu24      (OpenVINO 2026.2) -> works
+#   intel/dlstreamer:2026.3.0-ubuntu24-rc1  (OpenVINO 2026.3) -> current
 #
-# person-detection-retail-0013 loads fine on both, so a green pipeline with
-# the old detector says nothing about this. Do not downgrade this tag while
-# conf/queue-config.yaml has `postproc: decoder`.
-FROM intel/dlstreamer:2026.2.0-ubuntu24
+# person-detection-retail-0013 loads fine on all of them, so a green pipeline
+# with the old detector says nothing about this. Do not downgrade below
+# 2026.2 while conf/queue-config.yaml has `postproc: decoder`.
+FROM intel/dlstreamer:2026.3.0-ubuntu24-rc1
 
 ARG APP_UID=1000
 ARG APP_GID=1000
