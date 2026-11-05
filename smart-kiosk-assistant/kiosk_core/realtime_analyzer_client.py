@@ -24,6 +24,7 @@ import json
 import logging
 import threading
 import time
+from collections import deque
 from urllib.parse import urlencode, urlparse, urlunparse
 
 import websockets
@@ -71,6 +72,11 @@ class RealtimeAnalyzerClient:
         self._latest_sequence = -1
         self._latest_text = ""
         self._latest_segments: list[dict] = []
+        # Send time (monotonic) of every commit() not yet answered by a
+        # completed event, oldest first, and the send time of the commit
+        # that produced the current _latest_text. See committed_text_since().
+        self._commit_sent_at: deque[float] = deque()
+        self._latest_text_commit_sent_at: float | None = None
         self._update_event = threading.Event()
 
         # Preview state: updated by non-destructive `input_audio_buffer.preview`
@@ -237,6 +243,18 @@ class RealtimeAnalyzerClient:
     def _apply_completed_event(self, event: dict) -> None:
         sequence = event.get("sequence", 0)
         with self._lock:
+            # The analyzer answers commits in the order it receives them, so
+            # this event belongs to the oldest unanswered commit. Popped even
+            # for a stale event below, which still answered a commit. A
+            # commit whose audio transcribed to nothing gets no event at all,
+            # so its stamp stays queued and a later event takes that older
+            # stamp: the error only ever makes the stamp earlier, which
+            # committed_text_since() treats as "not covered" (fail closed).
+            # This holds within one session too: a stamp orphaned in an
+            # earlier turn on the same client (e.g. a silence-only flush)
+            # makes later events take older stamps, so the shortcut fails
+            # closed (a slower endpoint, never a wrong transcript).
+            commit_sent_at = self._commit_sent_at.popleft() if self._commit_sent_at else None
             if sequence <= self._latest_sequence:
                 # Stale/out-of-order result -- never let it overwrite a
                 # newer snapshot.
@@ -251,6 +269,7 @@ class RealtimeAnalyzerClient:
             self._preview_text = ""
             if self._latest_text.strip():
                 self._content_landings.append(time.monotonic())
+                self._latest_text_commit_sent_at = commit_sent_at
         self._update_event.set()
         self._log_round_trip("commit")
 
@@ -365,12 +384,18 @@ class RealtimeAnalyzerClient:
             return
         baseline = self._latest_sequence
         self._update_event.clear()
-        self._pending_request_sent_at = time.monotonic()
+        sent_at = time.monotonic()
+        self._pending_request_sent_at = sent_at
+        with self._lock:
+            self._commit_sent_at.append(sent_at)
         try:
             self._loop.call_soon_threadsafe(
                 self._send_queue.put_nowait, json.dumps({"type": "input_audio_buffer.commit"})
             )
         except RuntimeError:
+            with self._lock:
+                # Never sent, so no event will answer it.
+                self._commit_sent_at.pop()
             return
         if not wait:
             return
@@ -417,6 +442,30 @@ class RealtimeAnalyzerClient:
         """
         with self._lock:
             return self._preview_text
+
+    def committed_text_since(self, reference_ts: float | None) -> str:
+        """Committed transcript text, if its commit was SENT at/after ``reference_ts``.
+
+        For the endpoint-completeness check ONLY. An adaptive-pause commit
+        clears the preview, and its result is not appended to the turn's
+        transcript until the final flush, so without this the check has
+        nothing to read until the full silence timeout.
+
+        ``reference_ts`` is the customer's last speech frame. The commit's
+        send time is what counts, not when its result landed: frames are
+        queued before the commit that follows them, so a commit sent after
+        the last speech frame holds every word up to it. A commit sent while
+        the customer was still talking can land after their last word when
+        ASR is slow, and its text then stops short ("one classic burger"
+        without "no onions"). Returns "" in that case, when the latest commit
+        carried no words, and when nothing has landed yet, so the caller
+        fails closed.
+        """
+        with self._lock:
+            sent_at = self._latest_text_commit_sent_at
+            if reference_ts is None or sent_at is None or sent_at < reference_ts:
+                return ""
+            return self._latest_text
 
     def latest_snapshot(self) -> dict:
         """Latest cumulative transcript text/segments for this session."""

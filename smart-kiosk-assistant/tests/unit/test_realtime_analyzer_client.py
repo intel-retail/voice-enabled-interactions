@@ -242,3 +242,116 @@ class TestPreviewCoalescing:
         # than being dropped on the floor.
         assert len(queue.items) == 2
         assert client._preview_refresh_pending is False
+
+
+class _Clock:
+    """A settable time.monotonic() for the client module."""
+
+    def __init__(self, monkeypatch):
+        self.now = 0.0
+        monkeypatch.setattr(
+            "kiosk_core.realtime_analyzer_client.time.monotonic", lambda: self.now
+        )
+
+
+class TestCommittedTextSince:
+    """committed_text_since() feeds the endpoint-completeness check after an
+    adaptive-pause commit has cleared the preview. It must fail closed: any
+    commit that could predate the customer's last word, or that carried no
+    words, returns ""."""
+
+    def test_commit_sent_after_last_speech_is_returned(self, client):
+        _attach_fake_socket(client)
+        last_speech = time.monotonic()
+        client.commit()
+        client._apply_completed_event(
+            {"sequence": 1, "transcript": "Please add one Pepsi 330ML please."}
+        )
+        assert client.committed_text_since(last_speech) == "Please add one Pepsi 330ML please."
+
+    def test_commit_before_last_speech_is_not_returned(self, client):
+        _attach_fake_socket(client)
+        client.commit()
+        client._apply_completed_event({"sequence": 1, "transcript": "Please add one"})
+        last_speech = time.monotonic() + 1.0  # the customer kept talking afterwards
+        assert client.committed_text_since(last_speech) == ""
+
+    def test_commit_sent_before_last_speech_but_landing_after_it(self, client, monkeypatch):
+        # Slow ASR: the adaptive-pause commit goes out during a short pause,
+        # the customer says "no onions", and only then does the commit's
+        # result land. Its text stops short, so it must not end the turn.
+        clock = _Clock(monkeypatch)
+        _attach_fake_socket(client)
+        clock.now = 10.0
+        client.commit()
+        last_speech = 11.0
+        clock.now = 12.0
+        client._apply_completed_event({"sequence": 1, "transcript": "One classic burger."})
+        assert client.committed_text_since(last_speech) == ""
+
+    def test_commit_with_no_words_gets_no_event_and_later_events_fail_closed(
+        self, client, monkeypatch
+    ):
+        # The analyzer sends no completed event for a commit whose audio
+        # transcribed to nothing (audio-analyzer _commit_utterance returns
+        # early). Its stamp stays queued, so the next event takes it: an
+        # older stamp than its own commit's, which can only fail closed.
+        clock = _Clock(monkeypatch)
+        _attach_fake_socket(client)
+        clock.now = 1.0
+        client.commit()  # A
+        client._apply_completed_event({"sequence": 1, "transcript": "One burger."})
+        clock.now = 2.0
+        client.commit()  # B: silence only, no event
+        clock.now = 3.0
+        client.commit()  # C
+        client._apply_completed_event({"sequence": 2, "transcript": "One burger, no onions."})
+        assert client._latest_text_commit_sent_at == 2.0
+        assert client.committed_text_since(2.5) == ""
+        assert client.committed_text_since(1.5) == "One burger, no onions."
+
+    def test_each_event_takes_the_send_time_of_its_own_commit(self, client, monkeypatch):
+        clock = _Clock(monkeypatch)
+        _attach_fake_socket(client)
+        clock.now = 1.0
+        client.commit()
+        clock.now = 2.0
+        client.commit()
+        clock.now = 3.0
+        client._apply_completed_event({"sequence": 1, "transcript": "One burger."})
+        assert client._latest_text_commit_sent_at == 1.0
+        clock.now = 4.0
+        client._apply_completed_event({"sequence": 2, "transcript": "One burger, no onions."})
+        assert client._latest_text_commit_sent_at == 2.0
+        assert len(client._commit_sent_at) == 0
+
+    def test_stale_event_still_answers_its_commit(self, client):
+        _attach_fake_socket(client)
+        client._apply_completed_event({"sequence": 5, "transcript": "newer"})
+        client.commit()
+        client._apply_completed_event({"sequence": 2, "transcript": "older"})
+        assert len(client._commit_sent_at) == 0
+        assert client.committed_text_since(0.0) == ""
+
+    def test_event_with_no_commit_outstanding_fails_closed(self, client):
+        client._apply_completed_event({"sequence": 1, "transcript": "One burger please."})
+        assert client.committed_text_since(0.0) == ""
+
+    def test_unsent_commit_is_not_queued(self, client):
+        class _ClosedLoop:
+            def call_soon_threadsafe(self, fn, *args):
+                raise RuntimeError("loop closed")
+
+        client._send_queue = _FakeQueue()
+        client._loop = _ClosedLoop()
+        client.commit()
+        assert len(client._commit_sent_at) == 0
+
+    def test_no_reference_fails_closed(self, client):
+        _attach_fake_socket(client)
+        client.commit()
+        client._apply_completed_event({"sequence": 1, "transcript": "One burger please."})
+        assert client.committed_text_since(None) == ""
+
+    def test_no_commit_yet_fails_closed(self, client):
+        assert client.committed_text_since(time.monotonic()) == ""
