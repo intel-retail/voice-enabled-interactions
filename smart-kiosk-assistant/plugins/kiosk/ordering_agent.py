@@ -777,6 +777,10 @@ _CONFIRM_INTENT_RE = re.compile(
 # on a decline embedded in a real request ("no burger, just fries"). ``_close``
 # in chat() additionally gates this on there being an active cart with items, so
 # a bare "no thanks" with no order simply falls through to the normal path.
+# Spoken when the customer starts an order but has not named the item yet
+# (see reply_templates.is_lead_in_only). Short, so they can carry on.
+_LEAD_IN_ONLY_REPLY = "Sure. What would you like?"
+
 _DECLINE_CLOSE_RE = re.compile(
     r"^\s*(?:(?:no|nope|nah)[,.!\s]*)?"
     r"(?:thank(?:s| you| you very much)|thanks a lot|"
@@ -2531,6 +2535,36 @@ class OrderingAgent:
         # accumulator and discarded, so mcp_ms/mcp_calls always came back
         # None/0 even though the MCP round-trip genuinely happened.
         llm_metrics.reset()
+
+        # An ordering lead-in with no item ("I'll have um...") means the kiosk
+        # took its turn before the customer said what they want. Directive
+        # mode answered it by copying its prompt example: "Got it. A chicken
+        # burger." with a Classic Chicken Burger the customer never named in
+        # the cart. Ask for the item instead, and read the next turn as the
+        # end of the same sentence.
+        message = reply_templates.join_lead_in(message, history)
+        if reply_templates.is_lead_in_only(message):
+            logger.info(
+                "[AGENT] Ordering lead-in without an item — asking for it | session=%s",
+                session_id,
+            )
+            _speculative_ctx.reset(speculative_token)
+            _tool_call_log_ctx.reset(tool_call_log_token)
+            return {
+                "reply": _LEAD_IN_ONLY_REPLY,
+                "tool_calls": [],
+                "tool_call_detail": [],
+                "llm_ms": None,
+                "llm_ttft_ms": None,
+                "llm_calls": 0,
+                "retrieval_ms": None,
+                "mcp_ms": None,
+                "mcp_calls": 0,
+                "guard_ms": None,
+                "template_ms": None,
+                "templated": True,
+                "streamed": "",
+            }
 
         # Directive mode: one tool-free completion that carries both the cart
         # mutation and the speech, so TTS can start while the model is still
