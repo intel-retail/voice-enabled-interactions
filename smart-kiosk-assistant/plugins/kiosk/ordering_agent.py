@@ -40,6 +40,7 @@ from plugins.kiosk import menu_guard
 from plugins.kiosk import price_guard
 from plugins.kiosk import removal_guard
 from plugins.kiosk import reply_templates
+from plugins.kiosk import upsell_accept
 from agentic.adk_runtime import create_adk_model, create_runner, create_session_service
 from agentic.mcp_client import MCPTool, bootstrap_mcp_tools, call_tool, get_all_tools
 from agentic.tools import knowledge_lookup_tool as knowledge_tool
@@ -2532,6 +2533,40 @@ class OrderingAgent:
         # None/0 even though the MCP round-trip genuinely happened.
         llm_metrics.reset()
 
+        # ── Upsell-acceptance fast path ─────────────────────────────────
+        # "Yes, please add that." right after "Would you also like <item>?"
+        # adds <item>. The offer was composed in code from the last tool
+        # result, so the item is known exactly; the model was not resolving
+        # "that" and confirmed the order instead (see upsell_accept.py). Runs
+        # before directive mode because that is the path that misread it.
+        # Gated to a whole-utterance acceptance of an offer in the previous
+        # assistant turn; anything else falls through unchanged.
+        offered = None if speculative else upsell_accept.offered_item(history)
+        if offered and upsell_accept.is_acceptance(message):
+            _tpl_start = time.monotonic()
+            spoken = await self._accept_upsell(offered, user_id, session_id)
+            if spoken:
+                llm_metrics.record_template((time.monotonic() - _tpl_start) * 1000)
+                template = llm_metrics.template_snapshot()
+                _speculative_ctx.reset(speculative_token)
+                _tool_call_log_ctx.reset(tool_call_log_token)
+                return {
+                    "reply": spoken,
+                    "tool_calls": ["place_order"],
+                    "tool_call_detail": [],
+                    "llm_ms": None,
+                    "llm_ttft_ms": None,
+                    "llm_calls": 0,
+                    "retrieval_ms": None,
+                    "mcp_ms": None,
+                    "mcp_calls": 1,
+                    "guard_ms": None,
+                    "template_ms": template["ms"],
+                    "templated": True,
+                    "streamed": "",
+                }
+            # The add failed or needs a choice: let the normal path handle it.
+
         # Directive mode: one tool-free completion that carries both the cart
         # mutation and the speech, so TTS can start while the model is still
         # generating. Restricted to turns with explicit mutation intent, plus
@@ -3186,6 +3221,48 @@ class OrderingAgent:
         )
         total_txt = f" The total is {int(total) if float(total).is_integer() else total} rupees." if total is not None else ""
         return f"Your order is confirmed. Your order number is {order_id}.{total_txt} Enjoy your meal!"
+
+    async def _accept_upsell(self, item_name: str, user_id: str, session_id: str) -> str:
+        """Add one of the item the customer just accepted, and template the reply.
+
+        Args:
+            item_name: The item named in the previous turn's offer.
+            user_id: Owner of the draft order.
+            session_id: Conversation id, for the cart memory and logging.
+
+        Returns:
+            The spoken reply built from the tool result, or an empty string
+            when the add did not cleanly succeed (the caller then falls back).
+        """
+        try:
+            payload = action_result.unwrap(await call_tool(
+                "place_order",
+                {
+                    "user_id": user_id,
+                    "items": [{"product_id": item_name, "quantity": 1}],
+                    "dry_run": False,
+                },
+            ))
+        except Exception:
+            logger.exception("[AGENT] Upsell accept failed | session=%s item=%r", session_id, item_name)
+            return ""
+        spoken = reply_templates.speak_order_mutation(payload) if payload else None
+        if not spoken:
+            logger.warning(
+                "[AGENT] Upsell accept not clean, falling back | session=%s item=%r result=%s",
+                session_id, item_name, str(payload)[:200],
+            )
+            return ""
+        # Same cart memory update _mcp_fn makes after a place_order.
+        cart = self._cart_states.setdefault(session_id, _CartState())
+        if isinstance(payload.get("items"), list):
+            cart.known_items = payload["items"]
+        upsell = payload.get("upsell_suggestions") or []
+        cart.pending_upsell = (
+            upsell[0].get("product") if upsell and isinstance(upsell[0], dict) else None
+        )
+        logger.info("[AGENT] Upsell accepted, added %r | session=%s", item_name, session_id)
+        return spoken
 
     async def _force_knowledge(self, message: str, session_id: str) -> str:
         """Answer an outlet question from the knowledge base, deterministically.
