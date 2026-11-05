@@ -172,3 +172,56 @@ class TestTentativeIntent:
         assert result is not None, (
             f"Expected non-None for direct order: {utterance!r}"
         )
+
+
+class TestPlaceholderReference:
+    """A made-up numeric product_id is replaced with what the customer said."""
+
+    def test_bare_item_replaces_placeholder(self):
+        # Observed: "One Perry chicken wrap." -> place_order(product_id="12345").
+        items = [{"product_id": "12345", "quantity": 1}]
+        assert (
+            guard.corrected_reference("place_order", items, "One Perry chicken wrap.")
+            == "Perry chicken wrap"
+        )
+
+    def test_follow_up_item_replaces_placeholder(self):
+        # Observed: "and a fresh lime soda, please." -> product_id="67890".
+        items = [{"product_id": "67890", "quantity": 1}]
+        assert (
+            guard.corrected_reference("update_order", items, "and a fresh lime soda, please.")
+            == "fresh lime soda"
+        )
+
+    def test_named_item_replaces_placeholder(self):
+        items = [{"product_id": "12345", "quantity": 1}]
+        assert guard.corrected_reference("place_order", items, "Add a Pepsi") == "Pepsi"
+
+    @pytest.mark.parametrize("utterance", ["yes", "one of those", "the second one", "two please"])
+    def test_placeholder_kept_when_customer_named_nothing(self, utterance: str):
+        items = [{"product_id": "12345", "quantity": 1}]
+        assert guard.corrected_reference("place_order", items, utterance) is None
+
+    @pytest.mark.parametrize("utterance", [
+        "maybe a pizza",
+        "I was thinking of a burger",
+        "Just browsing",
+    ])
+    def test_tentative_utterance_is_not_an_item(self, utterance: str):
+        assert guard.extract_bare_item(utterance) is None
+        items = [{"product_id": "12345", "quantity": 1}]
+        assert guard.corrected_reference("place_order", items, utterance) is None
+
+    def test_number_the_customer_said_is_not_a_placeholder(self):
+        assert not guard.is_placeholder_reference("12345", "I want item 12345")
+        assert guard.is_placeholder_reference("12345", "One Perry chicken wrap.")
+        assert not guard.is_placeholder_reference("BURGER-NV-001", "a burger")
+
+    def test_real_reference_without_verb_is_untouched(self):
+        # Only a placeholder is replaced from a verb-less utterance.
+        items = [{"product_id": "Peri Peri Chicken Wrap", "quantity": 1}]
+        assert guard.corrected_reference("place_order", items, "One Perry chicken wrap.") is None
+
+    def test_multi_item_call_is_untouched(self):
+        items = [{"product_id": "12345", "quantity": 1}, {"product_id": "67890", "quantity": 1}]
+        assert guard.corrected_reference("place_order", items, "One Perry chicken wrap.") is None
