@@ -54,7 +54,7 @@ defaults:
 # ---------------------------------------------------------------------------
 # TIER 1 — CI-safe functional tests
 # Covers TC #1, #2, #4, #6, #7 from functional-test-cases-sheet.md
-# No Docker, no ML models, no audio hardware required.
+# No Docker, no audio hardware. Needs the Silero VAD model (./setup_models.sh --silero-only).
 # Runs on every push and PR.
 # ---------------------------------------------------------------------------
 jobs:
@@ -93,6 +93,22 @@ jobs:
             pyyaml \
             requests
 
+      # The Silero VAD model is not in git (commit 82ec327); setup_models.sh
+      # downloads it with a pinned checksum. Fetched before Tier 1 because
+      # kiosk-core refuses to start without it while Silero is enabled, and
+      # Tier 1's ordering tests run the app's startup. tests/unit/ also loads
+      # the real model. --silero-only fetches just this ~2.2 MB file (no venv,
+      # no Docker, no .env changes). Cached by SHA so PRs don't re-download it.
+      - name: Cache Silero VAD model
+        id: cache-silero-vad
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: smart-kiosk-assistant/kiosk_core/models/silero_vad.onnx
+          key: silero-vad-v5-1a153a22
+
+      - name: Download Silero VAD model (verifies the checksum on a cache hit too)
+        run: ./setup_models.sh --silero-only
+
       - name: Run Tier 1 functional tests
         env:
           PYTHONPATH: .
@@ -117,43 +133,13 @@ jobs:
             smart-kiosk-assistant/tests/functional/test_results.csv
           retention-days: 30
 
-      # tests/unit/test_silero_vad.py exercises the real ONNX model, not a
-      # mock — and setup_models.sh (commit 82ec327) stopped git-tracking
-      # kiosk_core/models/silero_vad.onnx in favour of downloading it on
-      # demand. This job never ran setup_models.sh (it's Tier 2's job, and
-      # pulls in far more than this ~2.2 MB file), so those tests started
-      # failing with NoSuchFile as soon as the model left git. Fetch just
-      # this one file directly, with the same pinned checksum
-      # setup_models.sh verifies, cached by SHA so PRs don't re-download it.
-      - name: Cache Silero VAD model
-        id: cache-silero-vad
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: smart-kiosk-assistant/kiosk_core/models/silero_vad.onnx
-          key: silero-vad-v5-1a153a22
-
-      - name: Download Silero VAD model (if cache miss)
-        if: steps.cache-silero-vad.outputs.cache-hit != 'true'
-        run: |
-          set -e
-          mkdir -p kiosk_core/models
-          curl -fSL \
-            https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx \
-            -o kiosk_core/models/silero_vad.onnx
-          expected="1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"
-          actual="$(sha256sum kiosk_core/models/silero_vad.onnx | cut -d' ' -f1)"
-          if [ "${actual}" != "${expected}" ]; then
-            echo "Checksum mismatch: expected ${expected}, got ${actual}"
-            exit 1
-          fi
-
       # tests/unit/ is deliberately excluded from pytest.ini's default
       # testpaths (tests/functional only) so functional's tier1/tier2/tier3
       # marker selection stays unambiguous. That means these regression tests
       # — ASR endpoint/flush/VAD/speaker-filter behavior — must be invoked
       # explicitly or they silently never run in CI. No Docker build/hardware
       # required, same as Tier 1 functional above — just the small Silero
-      # VAD model fetched above.
+      # VAD model fetched before Tier 1.
       - name: Run unit tests
         env:
           PYTHONPATH: .

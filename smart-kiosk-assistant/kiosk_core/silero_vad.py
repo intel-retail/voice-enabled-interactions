@@ -129,3 +129,56 @@ class SileroVAD:
         self.buf = np.zeros(0, dtype=np.float32)
         self.last_prob = 0.0
         self.context = np.zeros(self.context_size, dtype=np.float32)
+
+
+class SileroModelUnavailableError(RuntimeError):
+    """Silero VAD is enabled but its model cannot be loaded."""
+
+
+def require_silero_vad_model(
+    enabled: bool,
+    model_path: str | Path,
+    intra_op_threads: int = 1,
+) -> None:
+    """Refuse to start when Silero VAD is enabled and its model will not load.
+
+    Called once at kiosk-core startup. The model file is not in git; it is
+    downloaded by ``setup_models.sh`` and baked into the image by ``COPY . .``.
+    Without this check a missing or corrupt file only showed up per session,
+    where the session quietly ran the RMS VAD instead.
+
+    Loads the model at 16 kHz, so a truncated or wrong file fails here and
+    not on the first customer turn.
+
+    Args:
+        enabled: Value of ``KIOSK_CORE_SILERO_VAD_ENABLED``. When False the
+            RMS VAD is the chosen detector and nothing is checked.
+        model_path: Path to ``silero_vad.onnx``.
+        intra_op_threads: onnxruntime intra-op thread cap, as for sessions.
+
+    Raises:
+        SileroModelUnavailableError: If Silero is enabled and the model file
+            is missing or fails to load.
+    """
+    if not enabled:
+        return
+
+    path = Path(model_path)
+    fix = (
+        "Run ./setup_models.sh (or ./setup_models.sh --silero-only) and rebuild "
+        "kiosk-core. If you pulled the image (REGISTRY=true), the published image "
+        "is missing the model: pull a newer tag or build locally with "
+        "REGISTRY=false. Or set KIOSK_CORE_SILERO_VAD_ENABLED=false to use the "
+        "RMS VAD on purpose."
+    )
+    if not path.is_file():
+        raise SileroModelUnavailableError(
+            f"Silero VAD is enabled but the model file {path} does not exist. {fix}"
+        )
+    try:
+        SileroVAD(path, sample_rate=16000, intra_op_threads=intra_op_threads)
+    except Exception as exc:
+        raise SileroModelUnavailableError(
+            f"Silero VAD is enabled but the model file {path} failed to load "
+            f"({type(exc).__name__}: {exc}). {fix}"
+        ) from exc
