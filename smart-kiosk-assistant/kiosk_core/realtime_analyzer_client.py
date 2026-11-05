@@ -52,8 +52,26 @@ class RealtimeAnalyzerClient:
         speaker_scope_id: str | None,
         diarization: bool | None,
         language: str | None,
+        low_latency: bool = False,
+        sample_rate: int = 16000,
     ):
         self._session_id = session_id
+        # Analyzer low-latency mode. ``low_latency`` only asks for it. The
+        # mode is in effect once the analyzer's transcription_session.updated
+        # echoes low_latency.enabled = true (see _apply_session_event). An
+        # analyzer without the mode ignores the request and never echoes it,
+        # so this client and the caller keep today's behaviour. While the
+        # mode is in effect, every preview and commit carries
+        # trailing_silence_ms from our own VAD, and a preview sent while the
+        # buffer ends in silence asks for the whole buffer ("full"), so the
+        # analyzer can trim the silence and answer the commit from that
+        # preview without a second decode.
+        self._low_latency_requested = low_latency
+        self._low_latency_active = False
+        self._bytes_per_ms = sample_rate * 2 / 1000.0
+        self._tx_lock = threading.Lock()
+        self._tx_bytes = 0          # bytes sent since the last commit
+        self._tx_speech_end = 0     # _tx_bytes right after the last speech frame
         self._speaker_scope_id = speaker_scope_id
         self._diarization = diarization
         self._language = language
@@ -201,6 +219,13 @@ class RealtimeAnalyzerClient:
                     "input_audio_transcription": {"language": self._language},
                 },
             }))
+            if self._low_latency_requested:
+                # Separate update, so an analyzer that rejects the field
+                # still applies the settings above.
+                await ws.send(json.dumps({
+                    "type": "session.update",
+                    "session": {"low_latency": {"enabled": True}},
+                }))
             self._ready_event.set()
 
             sender = asyncio.ensure_future(self._sender_loop(ws))
@@ -229,10 +254,38 @@ class RealtimeAnalyzerClient:
                 self._apply_completed_event(event)
             elif event_type == "conversation.item.input_audio_transcription.preview":
                 self._apply_preview_event(event)
+            elif event_type in ("transcription_session.created", "transcription_session.updated"):
+                self._apply_session_event(event)
             elif event_type == "error":
                 logger.warning(
                     "session=%s | realtime analyzer error: %s", self._session_id, event.get("error")
                 )
+
+    def _apply_session_event(self, event: dict) -> None:
+        """Track whether the analyzer has the low-latency mode in effect.
+
+        Only an explicit low_latency.enabled = true in the analyzer's own
+        session config turns the mode on. An analyzer without the mode sends
+        no low_latency field, so the mode stays off.
+        """
+        if not self._low_latency_requested:
+            return
+        session = event.get("session")
+        low_latency = session.get("low_latency") if isinstance(session, dict) else None
+        active = isinstance(low_latency, dict) and low_latency.get("enabled") is True
+        with self._tx_lock:
+            changed = active != self._low_latency_active
+            self._low_latency_active = active
+        if changed:
+            logger.info(
+                "session=%s | realtime analyzer low-latency mode %s",
+                self._session_id, "on" if active else "off",
+            )
+
+    def low_latency_active(self) -> bool:
+        """True once the analyzer confirmed the low-latency mode for this session."""
+        with self._tx_lock:
+            return self._low_latency_active
 
     def _apply_completed_event(self, event: dict) -> None:
         sequence = event.get("sequence", 0)
@@ -298,11 +351,13 @@ class RealtimeAnalyzerClient:
 
     # ── public, thread-safe API used by BaseAudioSession ────────────────
 
-    def send_frame(self, pcm_bytes: bytes) -> None:
+    def send_frame(self, pcm_bytes: bytes, is_speech: bool = False) -> None:
         """Enqueue a frame for continuous streaming.
 
         Never blocks the caller (the frame-capture loop) beyond a cheap
         queue put -- the actual network send happens on the background loop.
+        ``is_speech`` is our VAD's verdict for the frame. Only the
+        low-latency mode uses it, to work out trailing_silence_ms.
         """
         if self._closed or self._send_queue is None:
             return
@@ -310,10 +365,32 @@ class RealtimeAnalyzerClient:
             "type": "input_audio_buffer.append",
             "audio": base64.b64encode(pcm_bytes).decode("ascii"),
         })
-        try:
-            self._loop.call_soon_threadsafe(self._send_queue.put_nowait, payload)
-        except RuntimeError:
-            pass  # loop already stopped/closed
+        with self._tx_lock:
+            try:
+                self._loop.call_soon_threadsafe(self._send_queue.put_nowait, payload)
+            except RuntimeError:
+                return  # loop already stopped/closed
+            self._tx_bytes += len(pcm_bytes)
+            if is_speech:
+                self._tx_speech_end = self._tx_bytes
+
+    def _enqueue_with_silence_hint(self, message: dict, *, full_if_silent: bool, reset: bool) -> None:
+        """Send ``message`` in order with the frames.
+
+        Adds the low-latency fields only while the mode is in effect, so an
+        analyzer without the mode gets the same messages as before.
+        Raises RuntimeError when the loop is closed, like call_soon_threadsafe.
+        """
+        with self._tx_lock:
+            if self._low_latency_active:
+                silence_ms = (self._tx_bytes - self._tx_speech_end) / self._bytes_per_ms
+                message["trailing_silence_ms"] = round(silence_ms, 1)
+                if full_if_silent and silence_ms > 0 and self._tx_speech_end > 0:
+                    message["full"] = True
+            self._loop.call_soon_threadsafe(self._send_queue.put_nowait, json.dumps(message))
+            if reset:
+                self._tx_bytes = 0
+                self._tx_speech_end = 0
 
     def preview(self) -> None:
         """Ask the analyzer to transcribe everything buffered since the last
@@ -345,8 +422,8 @@ class RealtimeAnalyzerClient:
             self._preview_in_flight = True
         self._pending_request_sent_at = time.monotonic()
         try:
-            self._loop.call_soon_threadsafe(
-                self._send_queue.put_nowait, json.dumps({"type": "input_audio_buffer.preview"})
+            self._enqueue_with_silence_hint(
+                {"type": "input_audio_buffer.preview"}, full_if_silent=True, reset=False
             )
         except RuntimeError:
             with self._lock:
@@ -367,8 +444,8 @@ class RealtimeAnalyzerClient:
         self._update_event.clear()
         self._pending_request_sent_at = time.monotonic()
         try:
-            self._loop.call_soon_threadsafe(
-                self._send_queue.put_nowait, json.dumps({"type": "input_audio_buffer.commit"})
+            self._enqueue_with_silence_hint(
+                {"type": "input_audio_buffer.commit"}, full_if_silent=False, reset=True
             )
         except RuntimeError:
             return

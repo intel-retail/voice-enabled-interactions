@@ -1050,6 +1050,10 @@ services:
       # wait most turns. Falls back to the file-POST path per-session if the
       # socket fails to connect — never fails the turn. Default OFF.
       KIOSK_CORE_ANALYZER_STREAMING_ENABLED: ${KIOSK_CORE_ANALYZER_STREAMING_ENABLED:-false}
+      # Ask audio-analyzer for its realtime low-latency mode (streaming only,
+      # diarization off). No effect until the analyzer confirms the mode. See
+      # config.py (DEFAULT_ANALYZER_LOW_LATENCY_ENABLED). Default OFF.
+      KIOSK_CORE_ANALYZER_LOW_LATENCY_ENABLED: ${KIOSK_CORE_ANALYZER_LOW_LATENCY_ENABLED:-false}
       # Consecutive rejected turns (speaker filter dropped every segment as
       # non-primary) required before the kiosk speaks
       # KIOSK_CORE_UNRECOGNIZED_SPEAKER_PROMPT instead of staying silent.

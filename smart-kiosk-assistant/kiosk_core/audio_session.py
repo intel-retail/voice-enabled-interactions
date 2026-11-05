@@ -393,6 +393,20 @@ _INCOMPLETE_TAIL_WORDS = frozenset(
 _ENDPOINT_WORD_RE = re.compile(r"[^a-z' ]")
 
 
+def _analyzer_low_latency_requested() -> bool:
+    """True when kiosk-core should ask audio-analyzer for its low-latency mode.
+
+    The analyzer applies the mode only with diarization off, so it is not
+    requested otherwise. Asking is not enough to change behaviour: the
+    session also needs RealtimeAnalyzerClient.low_latency_active(), which
+    only turns true once the analyzer confirms the mode.
+    """
+    return (
+        config.DEFAULT_ANALYZER_LOW_LATENCY_ENABLED
+        and not config.DEFAULT_DIARIZATION_ENABLED
+    )
+
+
 def _looks_complete(text: str, min_words: int) -> bool:
     """True when a transcript reads like a finished utterance.
 
@@ -660,6 +674,8 @@ class BaseAudioSession:
                     speaker_scope_id=self.agent_session_id,
                     diarization=config.DEFAULT_DIARIZATION_ENABLED,
                     language=request.language,
+                    low_latency=_analyzer_low_latency_requested(),
+                    sample_rate=request.sample_rate,
                 )
                 self.realtime_client.start(
                     timeout=config.DEFAULT_REALTIME_CONNECT_TIMEOUT_SECONDS
@@ -1051,6 +1067,19 @@ class BaseAudioSession:
     def _run(self) -> None:
         raise NotImplementedError
 
+    def _stream_frame(self, frame: np.ndarray, is_speech: bool) -> None:
+        """Send one captured speech-phase frame over the realtime socket.
+
+        Our VAD's verdict goes with the frame only when the analyzer
+        low-latency mode is requested, the one place it is used (the client
+        turns it into trailing_silence_ms). Otherwise the call is the same as
+        before.
+        """
+        if _analyzer_low_latency_requested():
+            self.realtime_client.send_frame(frame.tobytes(), is_speech=is_speech)
+        else:
+            self.realtime_client.send_frame(frame.tobytes())
+
     def _process_frame_stream(self, frame_iterator) -> tuple[str, str | None]:
         chunk_frames: list[np.ndarray] = []
         silence_run_seconds = 0.0
@@ -1116,7 +1145,7 @@ class BaseAudioSession:
                         chunk_frames.append(frame)
                         self._captured_samples += len(frame)
                         if self._streaming_active:
-                            self.realtime_client.send_frame(frame.tobytes())
+                            self._stream_frame(frame, is_speech=True)
                         # Every frame reaching this branch is speech by
                         # construction (the preroll-drain loop above only
                         # ever buffered frames while still deciding, and this
@@ -1129,7 +1158,7 @@ class BaseAudioSession:
                 chunk_frames.append(frame)
                 self._captured_samples += len(frame)
                 if self._streaming_active:
-                    self.realtime_client.send_frame(frame.tobytes())
+                    self._stream_frame(frame, is_speech=is_speech)
 
                 if is_speech:
                     # Overwritten on every speech frame -- only the LAST one
@@ -3009,7 +3038,32 @@ class BaseAudioSession:
                 # A chunk WITH new frames must still always commit and wait
                 # -- only a content-free commit is safe to skip this way.
                 _cached = self.realtime_client.latest_snapshot()
-                if not frames and (_cached.get("text") or _cached.get("segments")):
+                # Analyzer low-latency mode, once the analyzer has confirmed
+                # it. Until then every flush commits as before.
+                _low_latency = (
+                    _analyzer_low_latency_requested()
+                    and self.realtime_client.low_latency_active()
+                )
+                if _low_latency and not is_final:
+                    # No intermediate commit. The analyzer keeps the audio
+                    # and the final commit covers it, answered from the last
+                    # full preview. An intermediate commit here would land
+                    # almost at once and clear the preview text the endpoint
+                    # check is still reading in this same burst of frames.
+                    # Nothing was transcribed, so no session state moves.
+                    logger.info(
+                        "[CHUNK] session=%s | low-latency mode: no intermediate commit",
+                        self.session_id,
+                    )
+                    return
+                elif (
+                    not _low_latency
+                    and not frames
+                    and (_cached.get("text") or _cached.get("segments"))
+                ):
+                    # Never in low-latency mode: there no earlier flush
+                    # committed this turn's audio, so the final flush must
+                    # always commit, even when the cache holds older text.
                     payload = _cached
                 else:
                     self.realtime_client.commit(

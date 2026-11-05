@@ -33,6 +33,17 @@ DEFAULT_ANALYZER_STREAMING_ENABLED = os.getenv(
     "KIOSK_CORE_ANALYZER_STREAMING_ENABLED", "false"
 ).lower() not in ("false", "0", "no")
 
+# Ask audio-analyzer for its low-latency realtime mode (streaming only).
+# Previews sent during silence cover the whole utterance, and the final
+# commit reuses the last one instead of decoding again. Needs an analyzer
+# build with the mode. The kiosk changes its commits only after the analyzer
+# confirms the mode, so an older analyzer keeps today's behaviour. Not
+# requested while KIOSK_CORE_DIARIZATION_ENABLED is true, because the
+# analyzer applies the mode only with diarization off. Default off.
+DEFAULT_ANALYZER_LOW_LATENCY_ENABLED = os.getenv(
+    "KIOSK_CORE_ANALYZER_LOW_LATENCY_ENABLED", "false"
+).lower() not in ("false", "0", "no")
+
 # Hands-free browser sessions stream raw int16 PCM frames over a persistent
 # WebSocket (`/api/v1/sessions/stream`) instead of posting WAV chunks over
 # separate REST requests. Additive and reversible: push-to-talk keeps the REST
