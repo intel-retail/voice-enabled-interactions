@@ -962,4 +962,8 @@ async def run_turn(
         "template_ms": None,
         "templated": True,
         "directive": True,
+        # The cart after an <act> turn, so the caller can record the change
+        # in the tool-calling path's session (see
+        # OrderingAgent._record_directive_turn). None for a price lookup.
+        "cart_payload": payload if state["tag"] == _ACT_TAG else None,
     }

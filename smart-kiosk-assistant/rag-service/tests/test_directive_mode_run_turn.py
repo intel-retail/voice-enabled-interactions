@@ -128,6 +128,24 @@ def test_act_directive_appends_upsell_offer_from_payload(monkeypatch):
     assert not _has_money(spoken), spoken
 
 
+def test_act_directive_returns_cart_payload(monkeypatch):
+    # The caller records the cart change in the tool-calling path's session.
+    payload = {"total": 169.0, "items": [{"product_name": "Classic Chicken Burger"}]}
+    monkeypatch.setattr(
+        directive_mode,
+        "stream_completion",
+        _make_fake_stream("Got it. <act>add|Classic Chicken Burger|1</act>"),
+    )
+    monkeypatch.setattr(
+        directive_mode, "_execute", AsyncMock(return_value=(payload, ["place_order"], ["place_order"]))
+    )
+
+    result = _run_turn("add a classic chicken burger", [])
+
+    assert result is not None
+    assert result["cart_payload"] == payload
+
+
 # ── <check_price> ─────────────────────────────────────────────────────────────
 def test_check_price_directive_composes_price_from_payload(monkeypatch):
     monkeypatch.setattr(
@@ -148,6 +166,8 @@ def test_check_price_directive_composes_price_from_payload(monkeypatch):
     assert result["directive"] is True
     assert "The Classic Chicken Burger costs ₹189." in result["reply"]
     assert not _has_money(spoken), spoken
+    # A price lookup changes nothing in the cart.
+    assert result["cart_payload"] is None
 
 
 # ── Fallback paths (return None) ──────────────────────────────────────────────
