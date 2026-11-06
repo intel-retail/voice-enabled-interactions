@@ -386,14 +386,29 @@ _LIST_RESULT_TOOLS = frozenset({
     "get_popular_products",
 })
 
-# Explicit cart-mutation intent. Deliberately narrow: a false NEGATIVE here
-# just costs one LLM call (today's behaviour), while a false POSITIVE could
-# swallow an order. Bare "order" is not enough — "what's in my order" is a
-# read; only "order a/one/the <thing>" is an instruction to buy.
+# Explicit cart-mutation intent. Bare "order" is not enough — "what's in my
+# order" is a read; only "order a/one/the <thing>" is an instruction to buy.
+#
+# This also gates directive mode (ordering_agent.chat), so a false NEGATIVE is
+# not cheap: the turn falls to the tool-calling path. On an internal Panther
+# Lake test system (order-fastpath), "I would like one Classic Chicken Burger"
+# and "I will have one Spicy Chicken Crunch Burger" reached the first LLM token
+# about 7x later on that path than "Please add one ..." did in directive mode.
+# So the everyday ordering phrasings are listed too: "I'd like", "I'll have",
+# "can I get", "give me", "I want a". "I'd like to <verb>" counts only for
+# ordering verbs, so "I'd like to explore burgers" / "to know ..." stay
+# questions.
+_QTY = r"(?:a|an|one|two|three|four|five|six|\d+|the|some|my)"
 _MUTATION_INTENT_RE = re.compile(
     r"\b(?:add|adding|buy|purchase|remove|removing|delete|drop|cancel|"
     r"confirm|checkout|check\s+out|place\s+(?:the|my)\s+order|"
-    r"order\s+(?:me\s+)?(?:a|an|one|two|three|four|five|\d+|the)\b)",
+    r"order\s+(?:me\s+)?" + _QTY + r"\b|"
+    r"(?:i|we)(?:'d|\s+would)\s+like\s+(?:to\s+(?:order|get|have|add|buy|grab|try)\b|(?!to\b))|"
+    r"(?:i|we)(?:'ll|\s+will)\s+(?:have|take|get|go\s+with)\b|"
+    r"(?:can|could|may)\s+(?:i|we)\s+(?:get|have)\s+" + _QTY + r"\b|"
+    r"(?:give|get)\s+me\s+" + _QTY + r"\b|"
+    r"let\s+me\s+(?:get|have)\b|"
+    r"(?:i|we)\s+(?:want|need)\s+" + _QTY + r"\b)",
     re.IGNORECASE,
 )
 

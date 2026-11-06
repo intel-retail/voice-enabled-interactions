@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import pytest
 
+from plugins.kiosk import directive_mode
 from plugins.kiosk.directive_mode import parse_directive, parse_price_directive
 
 
@@ -126,3 +127,74 @@ class TestPriceDirective:
     @pytest.mark.parametrize("raw", ["", "   ", None])
     def test_empty_is_none(self, raw):
         assert parse_price_directive(raw) is None
+
+
+class TestCollectActBlocks:
+    """collect_act_blocks reads consecutive <act> blocks and says when to stop."""
+
+    def test_consecutive_blocks_are_collected(self):
+        bodies, done = directive_mode.collect_act_blocks(
+            "<act>add|A|1</act> <act>add|B|3</act>"
+        )
+        assert bodies == ["add|A|1", "add|B|3"]
+        assert done is False  # the stream may still bring another block
+
+    def test_partial_next_block_keeps_waiting(self):
+        for tail in ("<", "<ac", "<act>", "<act>add|B"):
+            bodies, done = directive_mode.collect_act_blocks("<act>add|A|1</act>" + tail)
+            assert bodies == ["add|A|1"] and done is False, tail
+
+    def test_other_text_after_blocks_means_done(self):
+        bodies, done = directive_mode.collect_act_blocks("<act>add|A|1</act> Anything else?")
+        assert bodies == ["add|A|1"]
+        assert done is True
+
+
+class TestApplyOneMore:
+    @staticmethod
+    def _add(name, quantity):
+        return {"verb": "add", "name": name, "quantity": quantity}
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Add one more Chocolate Shake.",
+            "Actually, add another Bottled Water.",
+            "Add one more six piece Spicy Ranger Nuggets.",
+            "Actually, add another ten piece Ranger Nuggets.",
+            "another 10-piece nuggets please",
+        ],
+    )
+    def test_one_more_sets_quantity_to_one(self, message):
+        actions = [self._add("Chocolate Shake", 2)]
+        assert directive_mode.apply_one_more(actions, message) == [self._add("Chocolate Shake", 1)]
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Add another two burgers.",
+            "add another 3 shakes",
+            "Two chocolate shakes please.",
+            "I'll have two more shakes.",
+        ],
+    )
+    def test_explicit_count_is_kept(self, message):
+        actions = [self._add("Chocolate Shake", 2)]
+        assert directive_mode.apply_one_more(actions, message) == actions
+
+    def test_several_adds_are_left_alone(self):
+        # "one more" could belong to either item, so nothing is changed.
+        actions = [self._add("Burger", 1), self._add("Fries", 2)]
+        assert directive_mode.apply_one_more(actions, "one more burger and two fries") == actions
+
+    def test_remove_and_confirm_are_untouched(self):
+        actions = [
+            {"verb": "remove", "name": "Fries", "quantity": 2},
+            self._add("Vanilla Shake", 2),
+            {"verb": "confirm"},
+        ]
+        assert directive_mode.apply_one_more(actions, "drop the fries, and one more vanilla shake") == [
+            {"verb": "remove", "name": "Fries", "quantity": 2},
+            self._add("Vanilla Shake", 1),
+            {"verb": "confirm"},
+        ]
