@@ -5,7 +5,7 @@ Pins the exact tool/event contract the Central QSR Agent depends on (tool
 names, descriptions, input schemas, and representative ``tools/call``
 results), captured as a baseline against the pre-migration,
 ``mcp_service_sdk``-backed implementation before the rewrite (see
-``docs/qsr-mcp.md``), plus event persistence/replay/rate-limit behaviour of
+``docs/user-guide/qsr-mcp.md``), plus event persistence/replay/rate-limit behaviour of
 the in-tree durable log and policy gate that replaced the SDK's.
 
 Runs the real ``fastmcp.FastMCP`` app in-process (``Client(mcp)``, no

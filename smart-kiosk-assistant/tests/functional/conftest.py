@@ -37,8 +37,17 @@ import pydantic.root_model  # noqa: F401
 # module and raise "ImportError: cannot import name 'claw_state'". Importing
 # fastmcp once, up front, ensures the hook is fully installed before any
 # module eviction/reimport cycles begin.
+#
+# fastmcp>=3.4 also loads ``fastmcp.server`` and uvicorn's websocket protocol
+# implementation lazily. If those are first imported inside a
+# ``patch.dict("sys.modules", ...)`` block they are evicted on exit, and the
+# next import fails (KeyError: 'uvicorn.protocols.websockets...' / "FastMCP
+# server support is not installed"). Pre-import them for the same reason.
 try:
     import fastmcp  # noqa: F401
+    import fastmcp.server  # noqa: F401
+    import uvicorn.protocols.websockets.websockets_impl  # noqa: F401
+    import uvicorn.protocols.websockets.websockets_sansio_impl  # noqa: F401
 except ModuleNotFoundError:  # pragma: no cover
     # Some environments (e.g. Docker-focused CI jobs) don't install app deps on the runner.
     # Only pre-import fastmcp when it's available.

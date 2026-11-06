@@ -48,6 +48,7 @@ models. `kiosk-core` and `kiosk-ui` are I/O-only.
 ./how-it-works.md
 ./measuring-latency.md
 ./api-reference.md
+./qsr-mcp.md
 ./troubleshooting.md
 Release Notes <./release-notes.md>
 

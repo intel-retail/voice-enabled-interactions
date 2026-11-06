@@ -105,5 +105,5 @@ question or from urgency alone.
 Service owners should add specialized question mappings to the Tool Routing
 table as new read/act tools are added to
 [`kiosk_core/qsr_mcp/mcp_service.py`](../../kiosk_core/qsr_mcp/mcp_service.py).
-See [`docs/qsr-mcp.md`](../../docs/qsr-mcp.md) for the full tool/event
+See [`docs/user-guide/qsr-mcp.md`](../../docs/user-guide/qsr-mcp.md) for the full tool/event
 contract and keep live values out of this file.

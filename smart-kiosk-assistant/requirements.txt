@@ -40,7 +40,7 @@ PyYAML==6.0.2
 # own durable event log/delivery/policy-gate plumbing directly (see
 # kiosk_core/qsr_mcp/event_log.py, delivery.py, policy.py) instead of the
 # external mcp-service-sdk package.
-fastmcp==3.2.0
+fastmcp==3.4.10
 
 # VLM metrics logging (kiosk_core.audio_session._emit_vlm_metrics /
 # config.VLM_METRICS_ENABLED). Installed straight from the same
