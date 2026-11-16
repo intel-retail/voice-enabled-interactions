@@ -45,13 +45,12 @@ models. `kiosk-core` and `kiosk-ui` are I/O-only.
 :::{toctree}
 :hidden:
 
-./get-started.md
+Get Started <./get-started.md>
 ./how-it-works.md
 ./measuring-latency.md
 QSR MCP Surface <./qsr-mcp.md>
-./api-reference.md
-./qsr-mcp.md
-./troubleshooting.md
+API Reference <./api-reference.md>
+Troubleshooting <./troubleshooting.md>
 Release Notes <./release-notes.md>
 
 :::
