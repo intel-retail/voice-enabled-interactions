@@ -30,19 +30,15 @@ This release depends on **specific commits** of two other repositories.
 | Repository | Pinned commit | Why |
 | --- | --- | --- |
 | [`intel-retail/performance-tools`](https://github.com/intel-retail/performance-tools) | `2595194` | Provides `benchmark_smart_kiosk_v2v.py`, the voice-to-voice benchmark orchestrator, and the natural-endpointing measurement mode. Tracked as a Git **submodule**, so the commit is recorded in this repository — you do not pick it manually. |
-| [`open-edge-platform/edge-ai-libraries`](https://github.com/open-edge-platform/edge-ai-libraries) | `fc89569` | Source for the `audio-analyzer` and `text-to-speech` images. You do **not** build these two services here — they are always pulled pre-built from the registry (Docker Hub `intel/audio-analyzer` and `intel/text-to-speech` by default). The settings this release relies on (`TEXT_TO_SPEECH_WORKERS`, the ASR preview pool, and forwarding an empty ASR language to English-only checkpoints) are not yet on upstream `main`, so the published images are built from the pinned commit above. |
+| [`open-edge-platform/edge-ai-libraries`](https://github.com/open-edge-platform/edge-ai-libraries) | `62468e8` | Source for the `audio-analyzer` and `text-to-speech` images. You do **not** build these two services here — they are always pulled pre-built from the registry (Docker Hub `intel/audio-analyzer` and `intel/text-to-speech` by default). The published images are built from this upstream `main` commit, which includes everything this release relies on: `TEXT_TO_SPEECH_WORKERS`, the Kokoro TTS engine, the ASR preview pool, forwarding an empty ASR language to English-only checkpoints, and the realtime low-latency mode. |
 
 `audio-analyzer` and `text-to-speech` have **no `build:` section** in
 `docker-compose.yml` — neither `docker compose build` nor
 `make build REGISTRY=false` ever rebuilds them from source. To change
 either service, build and push its image from an `edge-ai-libraries`
-checkout at `fc89569` (see
+checkout at `62468e8` (see
 [Rebuilding the External TTS/ASR Images](#rebuilding-the-external-ttsasr-images)),
 then pull it here.
-
-> **Note for reviewers / early adopters:** once the upstream
-> `edge-ai-libraries` change lands and official images are published,
-> repoint `REGISTRY` to the upstream namespace and delete this note.
 
 ## Clone and Prepare
 
@@ -190,16 +186,17 @@ build locally and leave it cached):
 
 ```bash
 git clone --filter=blob:none --sparse \
-  https://github.com/sainijit/edge-ai-libraries.git
+  https://github.com/open-edge-platform/edge-ai-libraries.git
 git -C edge-ai-libraries sparse-checkout set \
   microservices/audio-analyzer microservices/text-to-speech
-git -C edge-ai-libraries checkout fc89569
+git -C edge-ai-libraries checkout 62468e8
 
-# audio-analyzer
+# audio-analyzer (its Dockerfile lives in docker/)
 docker build -t intel/audio-analyzer:latest \
+  -f edge-ai-libraries/microservices/audio-analyzer/docker/Dockerfile \
   edge-ai-libraries/microservices/audio-analyzer
 
-# text-to-speech (includes Kokoro TTS, absent from upstream main)
+# text-to-speech
 docker build -t intel/text-to-speech:latest \
   edge-ai-libraries/microservices/text-to-speech
 ```

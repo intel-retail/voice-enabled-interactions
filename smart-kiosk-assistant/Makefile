@@ -278,11 +278,9 @@ export KIOSK_CORE_QUEUE_SERVICE_ENABLED = $(if $(_QUEUE_ON),true,false)
 # In registry mode (REGISTRY=true or a registry name) they are pulled, like
 # metrics-collector. With REGISTRY=false they are NOT built here; the locally
 # tagged intel/{audio-analyzer,text-to-speech}:${RELEASE_TAG} image is used as
-# is -- build it once directly from the edge-ai-libraries fork
-# (docker compose build in that repo, or `make build` before this split), then
-# it is reused. The fork source lives at
-# ../edge-ai-libraries/microservices/{audio-analyzer,text-to-speech} and must be
-# kept in sync with upstream open-edge-platform/edge-ai-libraries.
+# is -- build it once directly from upstream open-edge-platform/edge-ai-libraries
+# (microservices/{audio-analyzer,text-to-speech}) at the commit pinned in
+# docs/user-guide/get-started/build-from-source.md, then it is reused.
 
 # Colors
 RED    := \033[0;31m
@@ -695,7 +693,7 @@ build: check-env $(_SILERO_BUILD_DEP) ## Pull images (default with .env); REGIST
 			fi; \
 		done; \
 	else \
-		echo "$(YELLOW)  Pulling audio-analyzer and text-to-speech from registry (image-only; built once from the edge-ai-libraries fork)...$(NC)"; \
+		echo "$(YELLOW)  Pulling audio-analyzer and text-to-speech from registry (image-only; built from upstream edge-ai-libraries)...$(NC)"; \
 		REGISTRY_REPO=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull audio-analyzer text-to-speech; \
 	fi; \
 	REGISTRY_REPO=$(_DOCKER_REGISTRY) $(COMPOSE_BASE) pull metrics-collector || \

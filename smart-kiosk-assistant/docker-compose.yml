@@ -326,9 +326,9 @@ services:
 
   audio-analyzer:
     # Consumed as a prebuilt image only. The source lives in the separate
-    # edge-ai-libraries repo (../edge-ai-libraries/microservices/audio-analyzer,
-    # a fork kept in sync with upstream open-edge-platform/edge-ai-libraries);
-    # it is NOT built from this repo. Build the image once from that repo
+    # upstream open-edge-platform/edge-ai-libraries repo
+    # (microservices/audio-analyzer, at the commit pinned in
+    # docs/user-guide/get-started/build-from-source.md); it is NOT built from this repo. Build the image once from that repo
     # (`docker compose build` there) or pull it with REGISTRY=true, then it is
     # reused via the image: tag below.
     image: ${REGISTRY_REPO:-intel}/audio-analyzer:${RELEASE_TAG:-latest}
@@ -464,9 +464,9 @@ services:
 
   text-to-speech:
     # Consumed as a prebuilt image only. The source lives in the separate
-    # edge-ai-libraries repo (../edge-ai-libraries/microservices/text-to-speech,
-    # a fork kept in sync with upstream open-edge-platform/edge-ai-libraries,
-    # which adds the Kokoro TTS engine); it is NOT built from this repo. Build
+    # upstream open-edge-platform/edge-ai-libraries repo
+    # (microservices/text-to-speech, at the commit pinned in
+    # docs/user-guide/get-started/build-from-source.md); it is NOT built from this repo. Build
     # the image once from that repo (`docker compose build` there) or pull it
     # with REGISTRY=true, then it is reused via the image: tag below.
     image: ${REGISTRY_REPO:-intel}/text-to-speech:${RELEASE_TAG:-latest}
