@@ -263,7 +263,7 @@ automatically. A from-source build takes 10–20 minutes the first time.
 > | Variable | Shipped value | Read by | Meaning |
 > |---|---|---|---|
 > | `REGISTRY` | `true` | the `Makefile` only | Build mode: `true` = pull released images, `false` = build from source |
-> | `REGISTRY_REPO` | `intel` | `docker-compose.yml` | Image **name prefix**, e.g. `intel/kiosk-core:latest` |
+> | `REGISTRY_REPO` | `intel` | `docker-compose.yml` | Image **name prefix**, e.g. `intel/kiosk-core:2026.3.0-rc1` |
 >
 > Every `image:` entry in `docker-compose.yml` resolves through
 > `${REGISTRY_REPO:-intel}`, never through `REGISTRY`. Keep `REGISTRY_REPO=intel`
@@ -274,10 +274,10 @@ automatically. A from-source build takes 10–20 minutes the first time.
 
 ### Which image version you get: `RELEASE_TAG`
 
-The shipped `.env` sets `RELEASE_TAG=latest`, and every `image:` entry resolves
+The shipped `.env` sets `RELEASE_TAG=2026.3.0-rc1` (the current release), and every `image:` entry resolves
 to `${REGISTRY_REPO}/<service>:${RELEASE_TAG}`. With `REGISTRY=true`,
-`make build` therefore **pulls** whatever `:latest` currently points at rather
-than building the code in your checkout.
+`make build` therefore **pulls** the images published for that release tag
+rather than building the code in your checkout.
 
 This matters when you are verifying a fix. Pulling a newer repository revision
 does **not** by itself change the `audio-analyzer`, `text-to-speech`,
@@ -289,7 +289,7 @@ If you are reproducing or validating a specific fix, pick one of these:
 
 ```bash
 # A. Pin a known release tag (reproducible, recommended for validation)
-RELEASE_TAG=2026.2.0        # in .env
+RELEASE_TAG=2026.3.0-rc1   # in .env (any published tag)
 make build
 make up
 
@@ -314,7 +314,7 @@ make show-config                # prints REGISTRY, the compose image prefix, and
 docker inspect kiosk-core --format '{{.Config.Image}} (image ID: {{.Image}})'
 ```
 
-> `RELEASE_TAG` in `.env` must match the Makefile default (`RELEASE_TAG ?= latest`)
+> `RELEASE_TAG` in `.env` must match the Makefile default (`RELEASE_TAG ?= 2026.3.0-rc1`)
 > unless you deliberately pin a different one. `METRICS_COLLECTOR_TAG` is
 > independent and is versioned separately.
 

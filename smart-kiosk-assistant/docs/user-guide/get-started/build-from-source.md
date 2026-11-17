@@ -79,7 +79,7 @@ the external ASR/TTS images yourself — see
 ## Create the Environment File
 
 `.env` is not committed to the repo. `docker-compose.yml` reads
-`REGISTRY_REPO`/`RELEASE_TAG` from it and falls back to `latest` if
+`REGISTRY_REPO`/`RELEASE_TAG` from it and falls back to `2026.3.0-rc1` if
 it's missing, so create it before building:
 
 ```bash
