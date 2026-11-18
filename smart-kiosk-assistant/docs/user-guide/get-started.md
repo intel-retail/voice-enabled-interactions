@@ -268,7 +268,7 @@ automatically. A from-source build takes 10–20 minutes the first time.
 > | Variable | Shipped value | Read by | Meaning |
 > | --- | --- | --- | --- |
 > | `REGISTRY` | `true` | the `Makefile` only | Build mode: `true` = pull released images, `false` = build from source |
-> | `REGISTRY_REPO` | `intel` | `docker-compose.yml` | Image **name prefix**, e.g. `intel/kiosk-core:2026.3.0-rc1` |
+> | `REGISTRY_REPO` | `intel` | `docker-compose.yml` | Image **name prefix**, e.g. `intel/kiosk-core:2026.3.0-rc2` |
 >
 > Every `image:` entry in `docker-compose.yml` resolves through
 > `${REGISTRY_REPO:-intel}`, never through `REGISTRY`. Keep `REGISTRY_REPO=intel`
@@ -279,7 +279,7 @@ automatically. A from-source build takes 10–20 minutes the first time.
 
 ### Which image version you get: `RELEASE_TAG`
 
-The shipped `.env` sets `RELEASE_TAG=2026.3.0-rc1` (the current release), and every `image:` entry resolves
+The shipped `.env` sets `RELEASE_TAG=2026.3.0-rc2` (the current release), and every `image:` entry resolves
 to `${REGISTRY_REPO}/<service>:${RELEASE_TAG}`. With `REGISTRY=true`,
 `make build` therefore **pulls** the images published for that release tag
 rather than building the code in your checkout.
@@ -294,7 +294,7 @@ If you are reproducing or validating a specific fix, pick one of these:
 
 ```bash
 # A. Pin a known release tag (reproducible, recommended for validation)
-RELEASE_TAG=2026.3.0-rc1   # in .env (any published tag)
+RELEASE_TAG=2026.3.0-rc2   # in .env (any published tag)
 make build
 make up
 
@@ -319,7 +319,7 @@ make show-config                # prints REGISTRY, the compose image prefix, and
 docker inspect kiosk-core --format '{{.Config.Image}} (image ID: {{.Image}})'
 ```
 
-> `RELEASE_TAG` in `.env` must match the Makefile default (`RELEASE_TAG ?= 2026.3.0-rc1`)
+> `RELEASE_TAG` in `.env` must match the Makefile default (`RELEASE_TAG ?= 2026.3.0-rc2`)
 > unless you deliberately pin a different one. `METRICS_COLLECTOR_TAG` is
 > independent and is versioned separately.
 

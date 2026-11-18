@@ -101,7 +101,7 @@ services:
       # Dockerfile and they are not baked into the image.
       args:
         <<: *egress-proxy
-    image: ${REGISTRY_REPO:-intel}/rtsp-streamer:${RELEASE_TAG:-2026.3.0-rc1}
+    image: ${REGISTRY_REPO:-intel}/rtsp-streamer:${RELEASE_TAG:-2026.3.0-rc2}
     container_name: rtsp-streamer
     # Gated behind the `queue` compose profile (container-layer flag), same
     # pattern as identity-service — ON by default via the Makefile's `up`
@@ -177,7 +177,7 @@ services:
       # Dockerfile and they are not baked into the image.
       args:
         <<: *egress-proxy
-    image: ${REGISTRY_REPO:-intel}/queue-service:${RELEASE_TAG:-2026.3.0-rc1}
+    image: ${REGISTRY_REPO:-intel}/queue-service:${RELEASE_TAG:-2026.3.0-rc2}
     container_name: queue-service
     # Gated behind the `queue` compose profile — see rtsp-streamer above for
     # the full rationale (ON by default; `make up QUEUE=false` disables it).
@@ -331,7 +331,7 @@ services:
     # docs/user-guide/get-started/build-from-source.md); it is NOT built from this repo. Build the image once from that repo
     # (`docker compose build` there) or pull it with REGISTRY=true, then it is
     # reused via the image: tag below.
-    image: ${REGISTRY_REPO:-intel}/audio-analyzer:${RELEASE_TAG:-2026.3.0-rc1}
+    image: ${REGISTRY_REPO:-intel}/audio-analyzer:${RELEASE_TAG:-2026.3.0-rc2}
     container_name: audio-analyzer
     # Hardcoded to match the image's baked-in app user and the
     # ownership of the named volumes. Do not change.
@@ -469,7 +469,7 @@ services:
     # docs/user-guide/get-started/build-from-source.md); it is NOT built from this repo. Build
     # the image once from that repo (`docker compose build` there) or pull it
     # with REGISTRY=true, then it is reused via the image: tag below.
-    image: ${REGISTRY_REPO:-intel}/text-to-speech:${RELEASE_TAG:-2026.3.0-rc1}
+    image: ${REGISTRY_REPO:-intel}/text-to-speech:${RELEASE_TAG:-2026.3.0-rc2}
     container_name: text-to-speech
     user: "1000:1000"
     ports:
@@ -580,7 +580,7 @@ services:
       # Dockerfile and they are not baked into the image.
       args:
         <<: *egress-proxy
-    image: ${REGISTRY_REPO:-intel}/rag-service:${RELEASE_TAG:-2026.3.0-rc1}
+    image: ${REGISTRY_REPO:-intel}/rag-service:${RELEASE_TAG:-2026.3.0-rc2}
     container_name: rag-service
     # Hardcoded to match the image's baked-in app user and the
     # ownership of the named volumes. Do not change.
@@ -876,7 +876,7 @@ services:
       # Dockerfile and they are not baked into the image.
       args:
         <<: *egress-proxy
-    image: ${REGISTRY_REPO:-intel}/kiosk-core:${RELEASE_TAG:-2026.3.0-rc1}
+    image: ${REGISTRY_REPO:-intel}/kiosk-core:${RELEASE_TAG:-2026.3.0-rc2}
     container_name: kiosk-core
     user: "1000:1000"
     ports:
@@ -1199,7 +1199,7 @@ services:
       # Dockerfile and they are not baked into the image.
       args:
         <<: *egress-proxy
-    image: ${REGISTRY_REPO:-intel}/identity-service:${RELEASE_TAG:-2026.3.0-rc1}
+    image: ${REGISTRY_REPO:-intel}/identity-service:${RELEASE_TAG:-2026.3.0-rc2}
     container_name: identity-service
     profiles: ["identity"]
     user: "1000:1000"
@@ -1261,7 +1261,7 @@ services:
       # Dockerfile and they are not baked into the image.
       args:
         <<: *egress-proxy
-    image: ${REGISTRY_REPO:-intel}/kiosk-ui:${RELEASE_TAG:-2026.3.0-rc1}
+    image: ${REGISTRY_REPO:-intel}/kiosk-ui:${RELEASE_TAG:-2026.3.0-rc2}
     container_name: kiosk-ui
     ports:
       - "7860:7860"
@@ -1283,7 +1283,7 @@ services:
   # so the two screens can never drift out of sync with each other's backend
   # wiring. No separate build context or Dockerfile.
   kiosk-ui-customer:
-    image: ${REGISTRY_REPO:-intel}/kiosk-ui:${RELEASE_TAG:-2026.3.0-rc1}
+    image: ${REGISTRY_REPO:-intel}/kiosk-ui:${RELEASE_TAG:-2026.3.0-rc2}
     container_name: kiosk-ui-customer
     ports:
       - "7861:7860"

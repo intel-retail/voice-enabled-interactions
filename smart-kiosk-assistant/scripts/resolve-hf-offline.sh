@@ -75,10 +75,10 @@ CACHE_VOLUMES="audio_analyzer_models text_to_speech_cache rag_service_hf_cache"
 PROBE_IMG=""
 PROBE_TOOL=""
 select_probe_image() {
-    for I in "${REGISTRY_REPO:-intel}/text-to-speech:${RELEASE_TAG:-2026.3.0-rc1}" \
-             "${REGISTRY_REPO:-intel}/rag-service:${RELEASE_TAG:-2026.3.0-rc1}" \
-             "${REGISTRY_REPO:-intel}/kiosk-core:${RELEASE_TAG:-2026.3.0-rc1}" \
-             "${REGISTRY_REPO:-intel}/audio-analyzer:${RELEASE_TAG:-2026.3.0-rc1}" \
+    for I in "${REGISTRY_REPO:-intel}/text-to-speech:${RELEASE_TAG:-2026.3.0-rc2}" \
+             "${REGISTRY_REPO:-intel}/rag-service:${RELEASE_TAG:-2026.3.0-rc2}" \
+             "${REGISTRY_REPO:-intel}/kiosk-core:${RELEASE_TAG:-2026.3.0-rc2}" \
+             "${REGISTRY_REPO:-intel}/audio-analyzer:${RELEASE_TAG:-2026.3.0-rc2}" \
              alpine:latest busybox:latest alpine busybox; do
         docker image inspect "$I" >/dev/null 2>&1 || continue
         TOOL=$(docker run --rm --entrypoint sh "$I" -c \
