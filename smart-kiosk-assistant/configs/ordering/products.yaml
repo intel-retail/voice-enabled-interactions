@@ -3,6 +3,8 @@
 # Format: product_id, name, category, price (INR)
 # Categories: burgers, wraps, pizza, beverages, sides, desserts, breakfast
 
+restaurant_name: "QuickBite Express"
+
 products:
   # ── Burgers ─────────────────────────────────────────────────────────
   - product_id: BURGER-VEG-001
