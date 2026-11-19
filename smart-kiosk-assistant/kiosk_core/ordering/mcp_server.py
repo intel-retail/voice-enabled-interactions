@@ -435,11 +435,12 @@ async def list_products(
     """List menu products in a category, or the category list when none is given.
 
     Args:
-        category: One of: burgers, pizza, wraps, sides, beverages, desserts.
-                  Call with a category to get that category's products with
-                  prices. Call with NO category only to discover which
-                  categories exist — that returns category names and item
-                  counts, NOT products.
+        category: The category name as it exists on the CURRENT menu — call
+                  ``list_categories`` first if you don't already know the
+                  valid names, since they vary by menu. Call with a category
+                  to get that category's products with prices. Call with NO
+                  category only to discover which categories exist — that
+                  returns category names and item counts, NOT products.
         dietary: Leave unset — the caller fills this in automatically from
                  whatever the customer stated earlier in the conversation
                  (see the ordering agent's dietary tracking).
@@ -448,8 +449,9 @@ async def list_products(
         With a category: products with product_id, name, category, price,
         and is_veg. Without one: ``{category, item_count}`` entries to offer
         the customer. With a category/item that matches nothing we carry at
-        all (e.g. "dosa", "sushi"): ``{category_not_found: True, message,
-        categories}`` — see the comment below for why this is a distinct case.
+        all on this menu (e.g. an unrelated dish name): ``{category_not_found:
+        True, message, categories}`` — see the comment below for why this is
+        a distinct case.
     """
     requested = category
     category = _normalise_category(category)
@@ -594,7 +596,7 @@ async def place_order(
     Args:
         user_id: Customer identifier (use "anonymous" if unknown).
         items: List of {product_id, quantity}. product_id may be a catalogue id
-            OR a plain product name (e.g. "Classic Chicken Burger") — the server
+            OR a plain product name as the customer said it — the server
             resolves it.
         dietary: Leave unset — the caller fills this in automatically from
             anything the customer has already said about diet this session.
@@ -821,14 +823,14 @@ async def remove_from_order(
     """Remove one or more items from the customer's current cart.
 
     Use this whenever the customer asks to take something off their order —
-    "remove the aloo tikki burger", "drop the fries and the coke", "I don't
-    want the pepsi anymore", "cancel the two burgers". Several items can be
-    removed in a single call: pass one entry per item.
+    "remove the X", "drop the Y and the Z", "I don't want the W anymore",
+    "cancel the two burgers". Several items can be removed in a single call:
+    pass one entry per item.
 
     Args:
         user_id: The customer whose cart to modify. Defaults to "anonymous".
         items: List of {product_id, quantity}. product_id may be a catalogue id
-            OR the plain spoken product name (e.g. "Aloo Tikki Burger") — the
+            OR the plain spoken product name as the customer said it — the
             server resolves it, preferring items actually in the cart. Omit
             quantity (or pass 0) to remove the item entirely; pass a number
             only when the customer wants to remove some but not all units.

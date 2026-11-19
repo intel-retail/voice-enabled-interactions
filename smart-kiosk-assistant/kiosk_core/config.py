@@ -141,6 +141,9 @@ def _build_asr_prompt() -> str:
         )
         with open(path, "r", encoding="utf-8") as handle:
             data = yaml.safe_load(handle) or {}
+        restaurant_name = (
+            str(data.get("restaurant_name", "")).strip() if isinstance(data, dict) else ""
+        )
         raw = data.get("products") if isinstance(data, dict) else data
         names: list[str] = []
         for product in raw or []:
@@ -154,8 +157,12 @@ def _build_asr_prompt() -> str:
                 names.append(name)
         if not names:
             return _ASR_PROMPT_FALLBACK
+        # restaurant_name is optional per menu (configs/menus/*/ordering/
+        # products.yaml): include it when the menu declares one, otherwise
+        # skip the prefix entirely rather than naming the wrong restaurant.
+        prefix = f"{restaurant_name} restaurant. " if restaurant_name else ""
         return (
-            "QuickBite Express restaurant. "
+            prefix
             + ", ".join(names)
             + ". Menu, order, remove, add, confirm, cancel."
         )
