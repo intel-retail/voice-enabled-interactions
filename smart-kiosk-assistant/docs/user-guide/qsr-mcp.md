@@ -1,6 +1,6 @@
 # Smart Kiosk — QSR Model Context Protocol (MCP) Surface
 
-Exposes kiosk-core to the [Central QSR Agent](https://docs.openedgeplatform.intel.com/dev/edge-ai-suites/ai-suite-retail/qsr-store-agent/index.html)
+Exposes kiosk-core to the [Central QSR Agent](https://docs.openedgeplatform.intel.com/2026.3/edge-ai-suites/ai-suite-retail/qsr-store-agent/index.html)
 directly via `fastmcp` — the same MCP framework already used by
 `kiosk_core/ordering/mcp_server.py`'s internal `/mcp` mount. This is a
 **separate** MCP surface from that ordering mount, which is only for the

@@ -2,10 +2,10 @@
 
 <!--hide_directive
 <div class="component_card_widget">
-  <a class="icon_github" href="https://github.com/intel-retail/voice-enabled-interactions/tree/main/smart-kiosk-assistant">
+  <a class="icon_github" href="https://github.com/intel-retail/voice-enabled-interactions/tree/release-2026.3.0/smart-kiosk-assistant">
      GitHub
   </a>
-  <a class="icon_document" href="https://github.com/intel-retail/voice-enabled-interactions/blob/main/smart-kiosk-assistant/README.md">
+  <a class="icon_document" href="https://github.com/intel-retail/voice-enabled-interactions/blob/release-2026.3.0/smart-kiosk-assistant/README.md">
      Readme
   </a>
 </div>

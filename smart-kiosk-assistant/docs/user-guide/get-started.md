@@ -112,7 +112,7 @@ Skip this block and set `TARGET_DEVICE=CPU` in `.env` if no Intel GPU is availab
 ## Step 2: Clone the Repository
 
 ```bash
-git clone --recurse-submodules -b <release-or-tag> --single-branch https://github.com/intel-retail/voice-enabled-interactions.git  #e.g. v4.0.0
+git clone --recurse-submodules -b release-2026.3.0 --single-branch https://github.com/intel-retail/voice-enabled-interactions.git  #e.g. v4.0.0
 cd voice-enabled-interactions/smart-kiosk-assistant
 ```
 
@@ -268,7 +268,7 @@ automatically. A from-source build takes 10–20 minutes the first time.
 > | Variable | Shipped value | Read by | Meaning |
 > | --- | --- | --- | --- |
 > | `REGISTRY` | `true` | the `Makefile` only | Build mode: `true` = pull released images, `false` = build from source |
-> | `REGISTRY_REPO` | `intel` | `docker-compose.yml` | Image **name prefix**, e.g. `intel/kiosk-core:2026.3.0-rc2` |
+> | `REGISTRY_REPO` | `intel` | `docker-compose.yml` | Image **name prefix**, e.g., `intel/kiosk-core:2026.3.0-rc2` |
 >
 > Every `image:` entry in `docker-compose.yml` resolves through
 > `${REGISTRY_REPO:-intel}`, never through `REGISTRY`. Keep `REGISTRY_REPO=intel`
@@ -319,6 +319,7 @@ make show-config                # prints REGISTRY, the compose image prefix, and
 docker inspect kiosk-core --format '{{.Config.Image}} (image ID: {{.Image}})'
 ```
 
+> [!IMPORTANT]
 > `RELEASE_TAG` in `.env` must match the Makefile default (`RELEASE_TAG ?= 2026.3.0-rc2`)
 > unless you deliberately pin a different one. `METRICS_COLLECTOR_TAG` is
 > independent and is versioned separately.
