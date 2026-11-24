@@ -6,7 +6,7 @@ This release focuses on voice-to-voice latency optimization and exposes the kios
 
 ### Key Updates
 
-- **QSR MCP Surface:** Added a `fastmcp` server in `kiosk-core` (port `8014`, `KIOSK_CORE_QSR_MCP_ENABLED`) for the [Central QSR Agent](https://docs.openedgeplatform.intel.com/dev/edge-ai-suites/ai-suite-retail/qsr-store-agent/index.html), separate from the internal ordering `/mcp` mount.
+- **QSR MCP Surface:** Added a `fastmcp` server in `kiosk-core` (port `8014`, `KIOSK_CORE_QSR_MCP_ENABLED`) for the [Central QSR Agent](https://docs.openedgeplatform.intel.com/2026.3/edge-ai-suites/ai-suite-retail/qsr-store-agent/index.html), separate from the internal ordering `/mcp` mount.
 
   - **Read tools:** Kiosk context, including menu availability, queue depth, wait estimate, settings, and recent orders.
   - **Act tools:** Menu item add/update, availability changes, board mode, and kiosk settings, each protected by policy gates and rate limits.

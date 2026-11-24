@@ -687,7 +687,7 @@ missing. Always check the logs rather than the health endpoint.
 
 - Confirm the knowledge base was ingested. The operator UI exposes a
   Knowledge Base panel; see also
-  [rag-service/README.md](https://github.com/intel-retail/voice-enabled-interactions/blob/main/smart-kiosk-assistant/rag-service/README.md).
+  [rag-service/README.md](https://github.com/intel-retail/voice-enabled-interactions/blob/release-2026.3.0/smart-kiosk-assistant/rag-service/README.md).
 - Check `rag-service` logs for retrieval scores and reranker output.
 - Try the same question from the API to rule out the UI:
 

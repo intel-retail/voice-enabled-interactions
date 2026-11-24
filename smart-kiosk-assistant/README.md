@@ -40,7 +40,7 @@ All five services are started by the top-level [docker-compose.yml](./docker-com
 Clone the repository and pull the prebuilt images from Docker Hub:
 
 ```bash
-git clone --recurse-submodules -b <release-or-tag> --single-branch https://github.com/intel-retail/voice-enabled-interactions.git  #e.g. v4.0.0
+git clone --recurse-submodules -b release-2026.3.0 --single-branch https://github.com/intel-retail/voice-enabled-interactions.git  #e.g. v4.0.0
 cd voice-enabled-interactions/smart-kiosk-assistant
 docker compose pull
 docker compose up -d

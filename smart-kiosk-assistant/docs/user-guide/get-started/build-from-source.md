@@ -54,7 +54,7 @@ From whatever parent directory you keep the source in, run:
 # --recurse-submodules checks out performance-tools at the commit this
 # repository pins. Without it the submodule directory is empty and
 # `make benchmark` cannot find the benchmark orchestrator.
-git clone --recurse-submodules -b main --single-branch \
+git clone --recurse-submodules -b release-2026.3.0 --single-branch \
   https://github.com/intel-retail/voice-enabled-interactions.git
 cd voice-enabled-interactions/smart-kiosk-assistant/
 
@@ -116,7 +116,7 @@ HuggingFace Hub and updates `OVMS_MODEL_NAME`, `TARGET_DEVICE`, and
 
 ## Build All Images With Compose
 
-The top-level [docker-compose.yml](https://github.com/intel-retail/voice-enabled-interactions/blob/main/smart-kiosk-assistant/docker-compose.yml)
+The top-level [docker-compose.yml](https://github.com/intel-retail/voice-enabled-interactions/blob/release-2026.3.0/smart-kiosk-assistant/docker-compose.yml)
 declares both `image:` and `build:` for the three services whose source lives in
 this repository: `rag-service`, `kiosk-core`, and `kiosk-ui`. `audio-analyzer`
 and `text-to-speech` are declared `image:`-only — their source lives in the
