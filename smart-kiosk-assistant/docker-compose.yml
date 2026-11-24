@@ -284,7 +284,7 @@ services:
     # therefore targets /metrics instead, which this image does serve. If a
     # future image tag adds a real /health endpoint, switch the healthcheck
     # back and update the endpoint list above.
-    image: ${REGISTRY_REPO:-intel}/hl-ai-metrics-collector:${METRICS_COLLECTOR_TAG:-2026.3.0-rc1}
+    image: ${REGISTRY_REPO:-intel}/hl-ai-metrics-collector:${METRICS_COLLECTOR_TAG:-2026.3.0-ubuntu24-rc2}
     container_name: metrics-collector
     privileged: true
     pid: host

@@ -9,12 +9,12 @@
 #
 #   intel/dlstreamer:2026.1.0-ubuntu24      (OpenVINO 2026.1) -> fails
 #   intel/dlstreamer:2026.2.0-ubuntu24      (OpenVINO 2026.2) -> works
-#   intel/dlstreamer:2026.3.0-ubuntu24-rc1  (OpenVINO 2026.3) -> current
+#   intel/dlstreamer:2026.3.0-ubuntu24-rc2  (OpenVINO 2026.3) -> current
 #
 # person-detection-retail-0013 loads fine on all of them, so a green pipeline
 # with the old detector says nothing about this. Do not downgrade below
 # 2026.2 while conf/queue-config.yaml has `postproc: decoder`.
-FROM intel/dlstreamer:2026.3.0-ubuntu24-rc1
+FROM intel/dlstreamer:2026.3.0-ubuntu24-rc2
 
 ARG APP_UID=1000
 ARG APP_GID=1000
