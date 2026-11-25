@@ -2,11 +2,11 @@
 
 ## Version 2026.3.0
 
-This release focuses on voice-to-voice latency optimization and exposes the kiosk to the Central QSR Agent through a dedicated MCP surface.
+This release focuses on voice-to-voice latency optimization and exposes the kiosk to the Central QSR Agent through a dedicated Model Context Protocol (MCP) surface.
 
 ### Key Updates
 
-- **QSR MCP Surface:** Added a `fastmcp` server in `kiosk-core` (port `8014`, `KIOSK_CORE_QSR_MCP_ENABLED`) for the [Central QSR Agent](https://docs.openedgeplatform.intel.com/2026.3/edge-ai-suites/ai-suite-retail/qsr-store-agent/index.html), separate from the internal ordering `/mcp` mount.
+- **QSR MCP Surface:** Added a `fastmcp` server in `kiosk-core` (port `8014`, `KIOSK_CORE_QSR_MCP_ENABLED`) for the [Central QSR Agent](https://docs.openedgeplatform.intel.com/2026.3/edge-ai-suites/ai-suite-retail/qsr-store-agent/index.html), separate from the internal ordering `/mcp` mount:
 
   - **Read tools:** Kiosk context, including menu availability, queue depth, wait estimate, settings, and recent orders.
   - **Act tools:** Menu item add/update, availability changes, board mode, and kiosk settings, each protected by policy gates and rate limits.
@@ -15,19 +15,19 @@ This release focuses on voice-to-voice latency optimization and exposes the kios
 
   See [QSR MCP](./qsr-mcp.md).
 
-- **Voice-to-Voice Latency Optimization:** Brought the median voice-to-voice latency under 800 ms.
+- **Voice-to-Voice Latency Optimization:** Brought the median voice-to-voice latency under 800 ms:
 
-  - **Directive mode (default):** Everyday orders use a single tool-free LLM call. First speakable words arrive in about 551 ms, down from 1.1–1.6 s.
-  - **Streaming ASR (default):** Uses the audio-analyzer low-latency realtime mode, which reuses the preview transcript instead of decoding a second time.
+  - **Directive mode (default):** Everyday orders use a single tool-free Large Language Model (LLM) call. First speakable words arrive in about 551 ms, down from 1.1–1.6 s.
+  - **Streaming Automatic Speech Recognition (ASR) (default):** Uses the audio-analyzer low-latency realtime mode, which reuses the preview transcript instead of decoding a second time.
   - **Faster ASR:** Final ASR runs `distil-small.en` on GPU, and diarization is skipped on preview chunks. Total ASR time dropped from 881 ms to 445 ms.
   - **Faster agent turns:** Compacting the MCP tool schemas cut agent turn latency by 9%.
   - **Lower turn-end delay:** Audio uploads in 0.25 s chunks, endpointing is tuned, and a cached opener phrase plays while the reply is prepared.
 
-- **Hands-Free Conversation:** Hands-free is now the default mic mode in both UIs. Audio streams over a persistent WebSocket.
+- **Hands-Free Conversation:** Hands-free is now the default microphone mode in both UIs. Audio streams over a persistent WebSocket.
 
-- **Accurate Latency Measurement:** Voice-to-voice is now measured from the customer's last word to the first reply audio at the speaker. Dashboard KPIs are unified across panels. See [Measuring Latency](./measuring-latency.md).
+- **Accurate Latency Measurement:** Voice-to-voice is now measured from the customer's last word to the first reply audio at the speaker. Dashboard Key Performance Indicators (KPIs) are unified across panels. See [Measuring Latency](./measuring-latency.md).
 
-- **Benchmarking Framework:** Added the `performance-tools` submodule with `make benchmark` for voice-to-voice runs, hardware metrics, consolidated CSV, and plots. Device-combination profiles (`PROFILE=…`, `make benchmark-matrix`) cover ASR and TTS on CPU, GPU, and NPU.
+- **Benchmarking Framework:** Added the `performance-tools` submodule with `make benchmark` for voice-to-voice runs, hardware metrics, consolidated CSV, and plots. Device-combination profiles (`PROFILE=…`, `make benchmark-matrix`) cover ASR and text-to-speech (TTS) on CPU, GPU, and NPU.
 
 - **Ordering Accuracy:** Fixed several ordering errors:
 
@@ -40,17 +40,17 @@ This release focuses on voice-to-voice latency optimization and exposes the kios
 
 - **Default Changes:**
 
-  - Speaker diarization is now opt-in (`KIOSK_CORE_DIARIZATION_ENABLED=false`), so no Pyannote licence is needed by default.
+  - Speaker diarization is now opt-in (`KIOSK_CORE_DIARIZATION_ENABLED=false`), so no Pyannote license is needed by default.
   - The default Kokoro voice is `af_heart`.
   - `TARGET_DEVICE=CPU` now moves the whole stack to CPU.
 
 - **Platform and Deployment:**
 
-  - DL Streamer base images are upgraded to 2026.3.0. `queue-service` generates the `metadata.yaml` file that DL Streamer now requires.
+  - Deep Learning Streamer (DL Streamer) base images are upgraded to 2026.3.0. `queue-service` generates the `metadata.yaml` file that DL Streamer now requires.
   - `audio-analyzer` and `text-to-speech` are pinned to upstream `edge-ai-libraries`.
   - Proxy settings pass through inline, so `docker-compose.proxy.yml` is no longer needed.
   - Vulnerable dependencies are updated, including `pypdf`, `mcp`, `fastmcp`, `vite`, and `minimatch`.
-  - Dependencies left over from the Gradio app are removed.
+  - Dependencies left over from the Gradio application are removed.
 
 ## Version 2026.2.0
 
