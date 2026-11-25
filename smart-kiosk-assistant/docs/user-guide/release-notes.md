@@ -4,7 +4,7 @@
 
 This release focuses on voice-to-voice latency optimization and exposes the kiosk to the Central QSR Agent through a dedicated Model Context Protocol (MCP) surface.
 
-### Key Updates
+**New**:
 
 - **QSR MCP Surface:** Added a `fastmcp` server in `kiosk-core` (port `8014`, `KIOSK_CORE_QSR_MCP_ENABLED`) for the [Central QSR Agent](https://docs.openedgeplatform.intel.com/2026.3/edge-ai-suites/ai-suite-retail/qsr-store-agent/index.html), separate from the internal ordering `/mcp` mount:
 
@@ -14,6 +14,12 @@ This release focuses on voice-to-voice latency optimization and exposes the kios
   - **Event autonomy:** A durable event log and optional push of queue and board events to the agent's `/autonomy/events` inbox.
 
   See [QSR MCP](./qsr-mcp.md).
+
+- **Benchmarking Framework:** Added the `performance-tools` submodule with `make benchmark` for voice-to-voice runs, hardware metrics, consolidated CSV, and plots. Device-combination profiles (`PROFILE=…`, `make benchmark-matrix`) cover ASR and text-to-speech (TTS) on CPU, GPU, and NPU.
+
+- **Ranger Burgers Menu:** Added an opt-in North American sample menu with its own knowledge base. QuickBite Express remains the default.
+
+**Improved**:
 
 - **Voice-to-Voice Latency Optimization:** Brought the median voice-to-voice latency under 800 ms:
 
@@ -27,7 +33,13 @@ This release focuses on voice-to-voice latency optimization and exposes the kios
 
 - **Accurate Latency Measurement:** Voice-to-voice is now measured from the customer's last word to the first reply audio at the speaker. Dashboard Key Performance Indicators (KPIs) are unified across panels. See [Measuring Latency](./measuring-latency.md).
 
-- **Benchmarking Framework:** Added the `performance-tools` submodule with `make benchmark` for voice-to-voice runs, hardware metrics, consolidated CSV, and plots. Device-combination profiles (`PROFILE=…`, `make benchmark-matrix`) cover ASR and text-to-speech (TTS) on CPU, GPU, and NPU.
+- **Platform and Deployment:**
+
+  - Deep Learning Streamer (DL Streamer) base images are upgraded to 2026.3.0. `queue-service` generates the `metadata.yaml` file that DL Streamer now requires.
+  - `audio-analyzer` and `text-to-speech` are pinned to upstream `edge-ai-libraries`.
+  - Dependencies left over from the Gradio application are removed.
+
+**Fixed**:
 
 - **Ordering Accuracy:** Fixed several ordering errors:
 
@@ -36,7 +48,9 @@ This release focuses on voice-to-voice latency optimization and exposes the kios
   - Invented product IDs are replaced with the spoken item.
   - Order confirmation claims are held until the order is committed.
 
-- **Ranger Burgers Menu:** Added an opt-in North American sample menu with its own knowledge base. QuickBite Express remains the default.
+- **Dependency Vulnerabilities:** Vulnerable dependencies are updated, including `pypdf`, `mcp`, `fastmcp`, `vite`, and `minimatch`.
+
+**Upgrade Notes**:
 
 - **Default Changes:**
 
@@ -44,13 +58,8 @@ This release focuses on voice-to-voice latency optimization and exposes the kios
   - The default Kokoro voice is `af_heart`.
   - `TARGET_DEVICE=CPU` now moves the whole stack to CPU.
 
-- **Platform and Deployment:**
+- **Proxy Configuration:** Proxy settings pass through inline, so `docker-compose.proxy.yml` is no longer needed.
 
-  - Deep Learning Streamer (DL Streamer) base images are upgraded to 2026.3.0. `queue-service` generates the `metadata.yaml` file that DL Streamer now requires.
-  - `audio-analyzer` and `text-to-speech` are pinned to upstream `edge-ai-libraries`.
-  - Proxy settings pass through inline, so `docker-compose.proxy.yml` is no longer needed.
-  - Vulnerable dependencies are updated, including `pypdf`, `mcp`, `fastmcp`, `vite`, and `minimatch`.
-  - Dependencies left over from the Gradio application are removed.
 
 ## Version 2026.2.0
 
